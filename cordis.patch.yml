@@ -1,0 +1,4 @@
+# cordis patch for dsh: loads the iterate-plugin
+- insert:
+  - id: iterate-plugin
+    name: '<absolute-path-to>/harness/iterate-plugin/src/index.ts'
