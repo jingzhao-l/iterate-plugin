@@ -4,6 +4,15 @@
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus a dry-run pure-review mode with multi-round convergence and a meta-review that audits the report and emits a final review report.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jingzhao-l/iterate-skill.git",
+    "directory": "harness/iterate-plugin"
+  },
+  "homepage": "https://github.com/jingzhao-l/iterate-skill#readme",
+  "bugs": {
+    "url": "https://github.com/jingzhao-l/iterate-skill/issues"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",

@@ -1,5 +1,7 @@
 # iterate-plugin for DeepSeek Harness (dsh)
 
+> **本插件由 [iterate-skill 主仓库](https://github.com/jingzhao-l/iterate-skill) 统一维护**：代码提交、发版、npm 发布均在主仓库完成，本仓库为独立发布的镜像，便于 dsh 生态发现与安装。欢迎 **star / fork 主仓库** 并在 [主仓库 Issues](https://github.com/jingzhao-l/iterate-skill/issues) 反馈问题。
+
 `iterate-plugin` 是 [iterate](https://github.com/iterate-skill/iterate-skill) 技能的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件，提供**自治闭环代码迭代**和**dry-run 纯多轮审查**能力。
 
 ## 特性
