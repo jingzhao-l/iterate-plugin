@@ -2,7 +2,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadConfig } from '../config-loader.ts'
 import { buildReviewPlan, buildReviewReport } from '../review.ts'
-import type { KnownIntentional, ReviewFinding, ReviewRound } from '../types.ts'
+import { buildFinalReviewReport, metaReviewReport } from '../meta-review.ts'
+import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
 
 /** Default round cap when neither the arg nor config provides one. */
 const DEFAULT_MAX_REVIEW_ROUNDS = 3
@@ -28,15 +29,16 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
         'Deterministic review engine for the iterate workflow. ' +
         'Use `plan` to generate the review plan (dimensions, reviewer prompts, findings schema, round cap) ' +
         'for normal or dry-run mode. Use `aggregate` to merge raw per-round findings into a deduped, ' +
-        'severity-sorted report with multi-round convergence statistics. ' +
-        '`aggregate` is purely computational — it never modifies any file.',
+        'severity-sorted report with multi-round convergence statistics, and to audit that report ' +
+        '(`meta-review`) producing a final review report. ' +
+        '`aggregate`/`meta-review` are purely computational — they never modify any file.',
 
       parameters: {
         operation: {
           type: 'string',
           required: true,
-          description: '"plan" to build the review plan, "aggregate" to merge findings.',
-          enum: ['plan', 'aggregate'],
+          description: '"plan" to build the review plan, "aggregate" to merge findings, "meta-review" to audit a report.',
+          enum: ['plan', 'aggregate', 'meta-review'],
         },
         mode: {
           type: 'string',
@@ -64,6 +66,12 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             'For `aggregate`: known-intentional entries to filter out, e.g. ' +
             '[{"file":"db/queries.py","line":42,"dimension":"security","reason":"..."}]. line=0/omitted = whole file.',
         },
+        report: {
+          type: 'json',
+          description:
+            'For `meta-review`: the ReviewReport JSON (as returned by `aggregate`) to audit for ' +
+            'internal consistency and produce the final review report.',
+        },
         path: {
           type: 'string',
           description: 'Project root directory (default: current working directory).',
@@ -80,6 +88,7 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             found: { type: 'boolean' },
             plan: { type: 'json' },
             report: { type: 'json' },
+            finalReport: { type: 'json' },
             error: { type: 'string' },
           },
         },
@@ -141,9 +150,29 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           return { operation: 'aggregate', mode, report: report as unknown as JsonValue }
         }
 
+        if (args.operation === 'meta-review') {
+          const source = args.report as ReviewReport | undefined
+          if (!source || typeof source !== 'object') {
+            return {
+              operation: 'meta-review',
+              mode,
+              error: 'report must be a ReviewReport JSON object (as returned by `aggregate`).',
+            }
+          }
+          const audit = metaReviewReport(source)
+          const finalReport = buildFinalReviewReport(source)
+          return {
+            operation: 'meta-review',
+            mode,
+            found: true,
+            report: audit as unknown as JsonValue,
+            finalReport: finalReport as unknown as JsonValue,
+          }
+        }
+
         return {
           operation: args.operation,
-          error: `Unknown operation "${args.operation}". Use "plan" or "aggregate".`,
+          error: `Unknown operation "${args.operation}". Use "plan", "aggregate", or "meta-review".`,
         }
       },
     }),

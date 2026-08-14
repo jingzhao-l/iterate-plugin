@@ -32,7 +32,8 @@ The script CANNOT call tools directly. Subagents are the ones who call tools.
 
 ### Dry-run mode workflow (pure review — the ONLY mode that never touches files)
 This is iterate's read-only health-check: repeated review rounds until findings converge,
-then produce an auditable report. NO file writes, NO git, NO branches, NO worktree.
+then produce an auditable report, then audit the report itself (meta-review) and give a
+final review report. NO file writes, NO git, NO branches, NO worktree.
 
 Canonical script — reproduce this structure exactly (adjust dims via the plan):
 
@@ -80,6 +81,15 @@ await agent(
   'Call iterate_decision_log({operation:"append", type:"report", round:' + report.convergence.totalRounds + ', data:{mode:"dry-run", totalFindings:' + report.summary.totalFindings + '}})',
   { label: 'review:log' }
 )
+
+phase('meta-review')
+// Audit the report itself for internal consistency, then produce the final report.
+const metaRes = await agent(
+  'Call iterate_review({operation:"meta-review", report:' + JSON.stringify(report) + '}) and return the finalReport JSON.',
+  { label: 'review:meta' }
+)
+const finalReport = metaRes && metaRes.finalReport ? metaRes.finalReport : null
+
 return {
   mode: 'dry-run',
   goal: report.goal,
@@ -90,7 +100,9 @@ return {
   totalFindings: report.summary.totalFindings,
   bySeverity: { critical: report.summary.critical, high: report.summary.high, medium: report.summary.medium, low: report.summary.low },
   byDimension: report.summary.byDimension,
-  report
+  report,
+  metaReview: finalReport ? { verdict: finalReport.verdict, issues: finalReport.metaReview.issues, checksRun: finalReport.metaReview.checksRun } : null,
+  finalReport
 }
 \`\`\`
 
@@ -99,6 +111,7 @@ Key rules for dry-run:
 - Each round feeds the already-known findings to reviewers so they hunt NEW issues only → that is what drives convergence.
 - Stop when a round reports 0 new findings (converged) or maxReviewRounds is reached.
 - The report (with per-round convergence stats + suggested fix priorities) is the deliverable.
+- **Meta-review**: after building the report, audit it with \`iterate_review({operation:"meta-review"})\` for internal consistency (counts, severity buckets, dimension sums, sort order, convergence math). The \`finalReport.verdict\` is \`approved\` only when the report passes every check; otherwise \`needs_revision\`. Surface the final report and its verdict as the closing deliverable.
 - Only a single \`report\` entry may be appended to the decision log; nothing else is written.
 
 ### Normal-mode workflow (autonomous closed loop)
