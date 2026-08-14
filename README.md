@@ -18,7 +18,15 @@
 
 ## 安装
 
-在你的 dsh profile 目录下安装插件：
+### 从 npm 安装（发布后）
+
+```bash
+dsh plugin --profile web add iterate-plugin
+# 或
+pnpm add iterate-plugin
+```
+
+### 本地开发 / 源码挂载
 
 ```bash
 dsh plugin --profile web add /Volumes/Eng-Dev/iterate-skill/harness/iterate-plugin

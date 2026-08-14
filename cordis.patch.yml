@@ -1,4 +1,9 @@
-# cordis patch for dsh: loads the iterate-plugin
+# iterate-plugin bundle layer — applied when a profile lists this bundle.
+# package.json declares `dsh.bundle.patch` pointing at this file.
+#
+# `name` is a PACKAGE NAME (resolved through the profile's node_modules or the
+# installation fallback $DSH_HOME/profiles/node_modules), NOT a relative path.
+# `iterate-plugin` is this package's main entry (→ src/index.ts).
 - insert:
   - id: iterate-plugin
-    name: '<absolute-path-to>/harness/iterate-plugin/src/index.ts'
+    name: iterate-plugin

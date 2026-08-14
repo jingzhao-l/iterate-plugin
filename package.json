@@ -3,18 +3,28 @@
   "version": "2.3.6",
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus a dry-run pure-review mode with multi-round convergence and a meta-review that audits the report and emits a final review report.",
   "type": "module",
-  "private": true,
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
     "iterate",
     "code-review",
     "autonomous",
-    "dry-run"
+    "dry-run",
+    "cordis"
   ],
   "dsh": {
-    "bundle": "./cordis.patch.yml"
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
       "types": "./src/index.ts",
