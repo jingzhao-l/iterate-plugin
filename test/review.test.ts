@@ -21,8 +21,9 @@ const f = (partial: Partial<ReviewFinding>): ReviewFinding => ({
   file: 'src/a.ts',
   severity: 'medium',
   summary: 'A problem',
-  detail: 'details',
-  classification: 'atomic',
+  failure_scenario: 'fails when x happens',
+  suggested_fix: 'do y instead',
+  is_atomic: true,
   ...partial,
 })
 
@@ -95,13 +96,13 @@ describe('dedupe', () => {
 
   it('dedupeFindings removes exact duplicates, keeps first occurrence', () => {
     const input = [
-      f({ summary: 'same issue', detail: 'first' }),
-      f({ summary: '  SAME issue ', detail: 'second (duplicate)' }),
-      f({ summary: 'different', detail: 'third' }),
+      f({ summary: 'same issue', suggested_fix: 'first' }),
+      f({ summary: '  SAME issue ', suggested_fix: 'second (duplicate)' }),
+      f({ summary: 'different', suggested_fix: 'third' }),
     ]
     const out = dedupeFindings(input)
     assert.equal(out.length, 2)
-    assert.equal(out[0]!.detail, 'first')
+    assert.equal(out[0]!.suggested_fix, 'first')
   })
 
   it('dedupeFindings keeps findings that differ only by dimension', () => {
@@ -259,7 +260,7 @@ describe('reviewer tasks & schema', () => {
     assert.equal(schema.type, 'object')
     assert.deepEqual(schema.required, ['findings'])
     const item = schema.properties.findings.items
-    for (const k of ['dimension', 'file', 'severity', 'summary', 'detail', 'classification']) {
+    for (const k of ['dimension', 'file', 'severity', 'summary', 'failure_scenario', 'suggested_fix', 'is_atomic']) {
       assert.ok(item.required.includes(k), `missing required ${k}`)
     }
   })

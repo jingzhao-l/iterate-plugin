@@ -256,10 +256,19 @@ export function findingsSchema(): Record<string, unknown> {
             line: { type: 'integer' },
             severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
             summary: { type: 'string' },
-            detail: { type: 'string' },
-            classification: { type: 'string', enum: ['atomic', 'architectural'] },
+            failure_scenario: { type: 'string' },
+            suggested_fix: { type: 'string' },
+            is_atomic: { type: 'boolean' },
           },
-          required: ['dimension', 'file', 'severity', 'summary', 'detail', 'classification'],
+          required: [
+            'dimension',
+            'file',
+            'severity',
+            'summary',
+            'failure_scenario',
+            'suggested_fix',
+            'is_atomic',
+          ],
         },
       },
     },
@@ -303,7 +312,8 @@ export function reviewerTaskPrompt(input: {
     `Return a JSON object: {"findings": [...]}.`,
     `Each finding: dimension (must be "${input.dimension}"), file (relative path), ` +
       'line (optional integer), severity (critical/high/medium/low), summary (one line), ' +
-      'detail (specific evidence), classification (atomic = single file/single function/<=20 lines change, else architectural).',
+      'failure_scenario (how/when it fails, specific evidence), suggested_fix (the concrete fix), ' +
+      'is_atomic (true if the fix is <= {atomic.max_lines} lines within a SINGLE file/function, else false).',
     `Write summaries and details in ${input.outputLanguage}.`,
   )
   return parts.join('\n')

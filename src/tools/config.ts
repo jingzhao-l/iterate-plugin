@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadConfig, validateConfig } from '../config-loader.ts'
+import { loadEffectiveConfig, validateConfig } from '../config-loader.ts'
 
 /**
  * Register the `iterate_config` tool.
@@ -54,19 +54,16 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
 
       async execute(args) {
         const projectRoot = args.path ?? process.cwd()
-        const config = loadConfig(projectRoot)
-
-        if (!config) {
-          return {
-            found: false,
-            error: 'iterate.config.yaml not found or unparseable at project root.',
-          }
-        }
+        // Effective config = defaults (Master) merged with any project-root
+        // overrides. Never null: a project without a config file runs on the
+        // built-in defaults, so the workflow stays usable out of the box.
+        const { config, source } = loadEffectiveConfig(projectRoot)
+        const hasOverride = source === 'override'
 
         if (args.validate) {
           const errors = validateConfig(config)
           return {
-            found: true,
+            found: hasOverride,
             valid: errors.length === 0,
             errors: errors.length > 0 ? errors : undefined,
             section: 'validation_report',
@@ -78,15 +75,15 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
           const section = configRecord[args.section]
           if (section === undefined) {
             return {
-              found: true,
+              found: hasOverride,
               error: `Section "${args.section}" not found in config.`,
               availableSections: Object.keys(configRecord),
             }
           }
-          return { found: true, section: args.section, data: section as JsonValue }
+          return { found: hasOverride, section: args.section, data: section as JsonValue }
         }
 
-        return { found: true, config: config as unknown as JsonValue }
+        return { found: hasOverride, config: config as unknown as JsonValue }
       },
     }),
   )

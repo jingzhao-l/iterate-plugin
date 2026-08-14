@@ -13,8 +13,9 @@ const f = (partial: Partial<ReviewFinding>): ReviewFinding => ({
   file: 'src/a.ts',
   severity: 'medium',
   summary: 'A problem',
-  detail: 'details',
-  classification: 'atomic',
+  failure_scenario: 'fails when x happens',
+  suggested_fix: 'do y instead',
+  is_atomic: true,
   ...partial,
 })
 

@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadConfig } from '../config-loader.ts'
+import { loadEffectiveConfig } from '../config-loader.ts'
 import { buildReviewPlan, buildReviewReport } from '../review.ts'
 import { buildFinalReviewReport, metaReviewReport } from '../meta-review.ts'
 import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
@@ -50,7 +50,7 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           description:
             'For `aggregate`: array of per-round findings, e.g. ' +
             '[{"round":1,"findings":[...]},{"round":2,"findings":[...]}]. Each finding: ' +
-            '{dimension,file,line?,severity,summary,detail,classification}.',
+            '{dimension,file,line?,severity,summary,failure_scenario,suggested_fix,is_atomic}.',
         },
         maxReviewRounds: {
           type: 'integer',
@@ -99,18 +99,12 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
 
       async execute(args) {
         const projectRoot = args.path ?? process.cwd()
-        const config = loadConfig(projectRoot)
+        // Effective config = defaults merged with project overrides. Never
+        // null, so `plan`/`aggregate` work even without a config file.
+        const { config } = loadEffectiveConfig(projectRoot)
         const mode = args.mode ?? 'dry-run'
 
         if (args.operation === 'plan') {
-          if (!config) {
-            return {
-              operation: 'plan',
-              mode,
-              found: false,
-              error: 'iterate.config.yaml not found or unparseable at project root.',
-            }
-          }
           const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS
           const knownIntentional = (config.personalization as { known_intentional?: KnownIntentional[] } | undefined)
             ?.known_intentional
@@ -136,9 +130,9 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             }
           }
 
-          const maxReviewRounds = args.maxReviewRounds ?? config?.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS
-          const goal = args.goal ?? config?.goal ?? ''
-          const dimensions = config?.dimensions ?? []
+          const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS
+          const goal = args.goal ?? config.goal ?? ''
+          const dimensions = config.dimensions ?? []
           const report = buildReviewReport({
             mode,
             goal,

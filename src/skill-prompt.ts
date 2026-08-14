@@ -43,7 +43,8 @@ const planRes = await agent(
   'Call iterate_review({operation:"plan", mode:"dry-run"}) and return the plan JSON.',
   { label: 'review:plan' }
 )
-const plan = planRes.plan
+const plan = (planRes && planRes.plan) ? planRes.plan : null
+if (!plan || !Array.isArray(plan.dimensions)) throw new Error('plan failed: iterate_review did not return a valid plan')
 const dims = plan.dimensions.map(d => d.id)
 const maxRounds = plan.maxReviewRounds
 const known = []            // cumulative deduped findings across rounds
@@ -76,7 +77,8 @@ const finalAgg = await agent(
   'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + '}) and return the report JSON.',
   { label: 'review:aggregate:final' }
 )
-const report = finalAgg.report
+const report = (finalAgg && finalAgg.report) ? finalAgg.report : null
+if (!report || !report.convergence) throw new Error('aggregate failed: no valid report was produced')
 await agent(
   'Call iterate_decision_log({operation:"append", type:"report", round:' + report.convergence.totalRounds + ', data:{mode:"dry-run", totalFindings:' + report.summary.totalFindings + '}})',
   { label: 'review:log' }
@@ -89,6 +91,7 @@ const metaRes = await agent(
   { label: 'review:meta' }
 )
 const finalReport = metaRes && metaRes.finalReport ? metaRes.finalReport : null
+const metaAudit = finalReport && finalReport.metaReview ? finalReport.metaReview : null
 
 return {
   mode: 'dry-run',
@@ -101,7 +104,7 @@ return {
   bySeverity: { critical: report.summary.critical, high: report.summary.high, medium: report.summary.medium, low: report.summary.low },
   byDimension: report.summary.byDimension,
   report,
-  metaReview: finalReport ? { verdict: finalReport.verdict, issues: finalReport.metaReview.issues, checksRun: finalReport.metaReview.checksRun } : null,
+  metaReview: metaAudit ? { verdict: finalReport.verdict, issues: metaAudit.issues || [], checksRun: metaAudit.checksRun || 0 } : null,
   finalReport
 }
 \`\`\`
@@ -129,7 +132,8 @@ const planRes = await agent(
   'Call iterate_review({operation:"plan", mode:"normal", maxReviewRounds:' + (args.maxRounds || 3) + '}) and return the plan JSON.',
   { label: 'review:plan' }
 )
-const plan = planRes.plan
+const plan = (planRes && planRes.plan) ? planRes.plan : null
+if (!plan || !Array.isArray(plan.dimensions)) throw new Error('plan failed: iterate_review did not return a valid plan')
 const dims = plan.dimensions.map(d => d.id)
 const maxRounds = plan.maxReviewRounds
 const rounds = []          // findings per review round (each on the then-current code state)
@@ -154,8 +158,8 @@ for (let r = 1; r <= maxRounds; r++) {
     { label: 'review:aggregate:r' + r }
   )
   const findings = (agg && agg.report && agg.report.findings) ? agg.report.findings : thisRound.findings
-  const atomic = findings.filter(f => f.classification === 'atomic')
-  const remaining = findings.filter(f => f.classification !== 'atomic')
+  const atomic = findings.filter(f => f.is_atomic === true)
+  const remaining = findings.filter(f => f.is_atomic !== true)
 
   if (atomic.length > 0) {
     await parallel(atomic.map(f => () => agent(
@@ -212,8 +216,9 @@ Key rules for normal mode:
 ### Finding schema (for reviewer agents)
 { "dimension": string, "file": string (relative path), "line": number (optional),
   "severity": "critical" | "high" | "medium" | "low", "summary": string (one line),
-  "detail": string, "classification": "atomic" | "architectural" }
-Atomic = single file, single function, ≤20 lines change. Architectural = everything else.
+  "failure_scenario": string (how/when it fails), "suggested_fix": string (the concrete fix),
+  "is_atomic": boolean (true if fix ≤ max_lines within a single file/function) }
+Atomic = is_atomic true (single file, single function, ≤20 lines change). Architectural = everything else.
 
 ### Workflow meta
 Always pass \`meta: { name: "iterate", description: "Autonomous iterate loop" }\`.

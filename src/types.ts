@@ -54,8 +54,10 @@ export interface ReviewFinding {
   line?: number
   severity: 'critical' | 'high' | 'medium' | 'low'
   summary: string
-  detail: string
-  classification: 'atomic' | 'architectural'
+  failure_scenario: string
+  suggested_fix: string
+  /** true if the fix fits within atomic thresholds (single file, single function, ≤ max_lines). */
+  is_atomic: boolean
 }
 
 /** Review report (dry-run or normal mode) */

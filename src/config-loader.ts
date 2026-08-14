@@ -19,12 +19,123 @@ export function loadConfig(projectRoot: string): IterateConfig | null {
 }
 
 /**
- * Validate that a command is allowed by the whitelist.
- * A command is allowed if it starts with any whitelist prefix.
+ * Sensible defaults for every config field. These are the "Master" config:
+ * when a project has no iterate.config.yaml (or only partial overrides), every
+ * missing key is filled from here so the plugin is usable out of the box while
+ * never inventing trusted validation commands (they must be configured).
  */
-export function isCommandAllowed(command: string, whitelist: string[]): boolean {
+export function defaultConfig(): IterateConfig {
+  return {
+    goal: 'Improve code quality and maintainability',
+    max_rounds: 7,
+    language: 'en',
+    dimensions: [
+      'correctness',
+      'security',
+      'performance',
+      'architecture',
+      'style-tests',
+      'tech-debt',
+      'spec-compliance',
+      'frontend-backend',
+      'ui-ux',
+    ],
+    review: { scope: 'full' },
+    atomic: { max_lines: 20, max_adjacent_methods: 3 },
+    git: {
+      target_branch: 'main',
+      use_worktree: false,
+      push_per_round: false,
+      auto_merge: false,
+    },
+    validation: { command_whitelist: [], commands: {} },
+    reviewer: { output_schema_validation: true },
+  }
+}
+
+/**
+ * Recursively merge `override` on top of `base`.
+ * - Missing keys in `base` are added from `override`.
+ * - Present keys in `override` win.
+ * - Plain objects are merged recursively; arrays and scalars are replaced
+ *   wholesale by the override (arrays are NOT concatenated).
+ * Returns a NEW object; neither input is mutated.
+ */
+export function mergeConfig(
+  base: Record<string, unknown>,
+  override: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!override || typeof override !== 'object') return { ...base }
+  const out: Record<string, unknown> = { ...base }
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined) continue
+    const baseValue = out[key]
+    if (
+      baseValue &&
+      typeof baseValue === 'object' &&
+      !Array.isArray(baseValue) &&
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value)
+    ) {
+      out[key] = mergeConfig(
+        baseValue as Record<string, unknown>,
+        value as Record<string, unknown>,
+      )
+    } else {
+      out[key] = value
+    }
+  }
+  return out
+}
+
+/**
+ * Load the EFFECTIVE config for a project: project-root overrides merged on top
+ * of the built-in defaults ("Master + Overrides"). Never returns null — a
+ * project without a config file simply runs on the defaults (with an empty
+ * validation command set, so nothing untrusted can ever execute).
+ */
+export function loadEffectiveConfig(projectRoot: string): {
+  config: IterateConfig
+  source: 'defaults' | 'override'
+  override: IterateConfig | null
+} {
+  const override = loadConfig(projectRoot)
+  if (!override) {
+    return { config: defaultConfig(), source: 'defaults', override: null }
+  }
+  const merged = mergeConfig(
+    defaultConfig() as unknown as Record<string, unknown>,
+    override as unknown as Record<string, unknown>,
+  ) as unknown as IterateConfig
+  return { config: merged, source: 'override', override }
+}
+
+/**
+ * Check whether a command is in the predefined commands list.
+ * A command is allowed if it is EXACTLY (after trim) listed in any
+ * module's command array in `validation.commands`.
+ * This replaces the old prefix-based whitelist at runtime — the
+ * `command_whitelist` is still used for config-time validation only.
+ */
+export function isCommandAllowed(command: string, predefinedCommands: string[]): boolean {
   const trimmed = command.trim()
-  return whitelist.some((prefix) => trimmed.startsWith(prefix))
+  return predefinedCommands.includes(trimmed)
+}
+
+/**
+ * Flatten all commands from `validation.commands` into a single string array.
+ * Used for runtime exact-match checking.
+ */
+export function flattenCommands(
+  commands: Record<string, string[]> | undefined,
+): string[] {
+  if (!commands || typeof commands !== 'object') return []
+  const out: string[] = []
+  for (const v of Object.values(commands)) {
+    if (Array.isArray(v)) out.push(...v)
+  }
+  return out
 }
 
 /**

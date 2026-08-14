@@ -1,6 +1,6 @@
 import { exec } from 'node:child_process'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { loadConfig, isCommandAllowed } from '../config-loader.ts'
+import { loadEffectiveConfig, isCommandAllowed, flattenCommands } from '../config-loader.ts'
 import type { ValidationResult } from '../types.ts'
 
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -42,16 +42,16 @@ async function runCommand(
 
 /**
  * Register the `iterate_validate` tool.
- * Runs validation commands defined in iterate.config.yaml.
- * Enforces the command_whitelist — commands not matching any prefix are rejected.
+ * Runs validation commands defined in iterate.config.yaml `validation.commands`.
+ * Enforces exact-match — a command not listed there (exactly) is rejected.
  */
 export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<typeof defineTool>) => void } }): void {
   ctx.tools.register(
     defineTool({
       name: 'iterate_validate',
       description:
-        'Run a validation command from the project root. ' +
-        'Only commands matching the iterate.config.yaml command_whitelist are allowed. ' +
+        'Run a validation command that is PRECONFIGURED in iterate.config.yaml `validation.commands`. ' +
+        'The command must exactly match one of the configured commands (they are the only ones the user trusts). ' +
         'Returns exit code, stdout, stderr, and duration. ' +
         'Use this after making fixes to verify correctness.',
 
@@ -59,7 +59,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
         command: {
           type: 'string',
           required: true,
-          description: 'The shell command to run (e.g. "pytest tests/ -x -q").',
+          description: 'One of the commands listed in iterate.config.yaml validation.commands (exact match required, e.g. "pytest tests/ -x -q").',
         },
         path: {
           type: 'string',
@@ -108,10 +108,16 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
 
       async execute(args) {
         const projectRoot = args.path ?? process.cwd()
-        const config = loadConfig(projectRoot)
+        // Effective config = defaults merged with project overrides. Never null.
+        const { config, source } = loadEffectiveConfig(projectRoot)
         const timeout = args.timeout ?? DEFAULT_TIMEOUT_MS
 
-        if (!config) {
+        // Only commands predefined in validation.commands may run — the
+        // user trusts exactly these, and nothing else. This replaces the
+        // old prefix-match whitelist, which let e.g. `python3 -c "..."`
+        // slip through on a `python3` prefix.
+        const predefinedCommands = flattenCommands(config.validation.commands)
+        if (predefinedCommands.length === 0) {
           return {
             allowed: false,
             command: args.command,
@@ -120,13 +126,14 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
             stderr: '',
             timedOut: false,
             durationMs: 0,
-            rejectReason: 'iterate.config.yaml not found — cannot validate command whitelist.',
+            rejectReason:
+              (source === 'defaults'
+                ? 'No iterate.config.yaml at project root — running on built-in defaults, which configure NO trusted validation commands. '
+                : 'No validation.commands configured in iterate.config.yaml. ') +
+              'Nothing can be validated until you define trusted commands in `validation.commands`.',
           }
         }
-
-        // Check whitelist
-        const whitelist = config.validation.command_whitelist ?? []
-        if (!isCommandAllowed(args.command, whitelist)) {
+        if (!isCommandAllowed(args.command, predefinedCommands)) {
           return {
             allowed: false,
             command: args.command,
@@ -135,7 +142,9 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
             stderr: '',
             timedOut: false,
             durationMs: 0,
-            rejectReason: `Command does not match any whitelist prefix. Allowed: ${whitelist.join(', ')}`,
+            rejectReason:
+              `Command must exactly match a command predefined in iterate.config.yaml validation.commands. ` +
+              `Allowed commands: ${predefinedCommands.join(' | ')}`,
           }
         }
 

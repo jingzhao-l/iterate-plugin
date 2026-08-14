@@ -1,9 +1,44 @@
 import { readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
+/** How many ancestor directories we walk up looking for a SKILL.md. */
+const MAX_SKILL_DIR_LOOKUP_DEPTH = 12
+
 /**
- * Read a file from the project root, returning its content or null.
+ * The directory this source file lives in (…/src/tools). The plugin's own
+ * package root is one level up (…/src), and the skill root is typically a few
+ * levels above that. We use it as the anchor for auto-detecting where the
+ * original SKILL.md lives.
+ */
+const PLUGIN_SRC_DIR = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * Walk up from the plugin's own location until a directory containing SKILL.md
+ * is found. This is how the plugin locates the ORIGINAL skill (skill 目录)
+ * without any hardcoded absolute path — it works whether the plugin is mounted
+ * from the source tree or bundled next to the skill.
+ *
+ * Returns the absolute directory containing SKILL.md, or null if none found
+ * within `MAX_SKILL_DIR_LOOKUP_DEPTH` ancestors.
+ */
+function findSkillRoot(startDir: string): string | null {
+  let dir = resolve(startDir)
+  for (let depth = 0; depth < MAX_SKILL_DIR_LOOKUP_DEPTH; depth++) {
+    if (existsSync(join(dir, 'SKILL.md'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) break // reached the filesystem root
+    dir = parent
+  }
+  return null
+}
+
+/** Exported for unit tests. See the private `findSkillRoot` above. */
+export { findSkillRoot }
+
+/**
+ * Read a file from a candidate directory, returning its content or null.
  */
 function readProjectFile(projectRoot: string, filename: string): string | null {
   const filePath = join(projectRoot, filename)
@@ -16,8 +51,29 @@ function readProjectFile(projectRoot: string, filename: string): string | null {
 }
 
 /**
+ * Locate the first existing SKILL.md across the candidate directories, in
+ * priority order:
+ *   1. explicit skillDir (custom path / 自定义路径)
+ *   2. auto-detected skill root walking up from the plugin (skill 目录)
+ *   3. project root (项目根)
+ * Returns the file content plus the directory it was found in, or null.
+ */
+function findSkillMd(candidates: string[]): { content: string; sourceDir: string } | null {
+  for (const dir of candidates) {
+    if (!dir) continue
+    const content = readProjectFile(dir, 'SKILL.md')
+    if (content !== null) return { content, sourceDir: dir }
+  }
+  return null
+}
+
+/** Exported for unit tests. See the private `findSkillMd` above. */
+export { findSkillMd }
+
+/**
  * Register the `iterate_context` tool.
- * Reads SKILL.md and/or ITERATE.md from the project root.
+ * Reads SKILL.md (original skill instructions) from the skill directory,
+ * project root, or a custom path, and ITERATE.md from the project root.
  * Provides the model with the original skill instructions and project knowledge base.
  */
 export function registerContextTool(ctx: { tools: { register: (def: ReturnType<typeof defineTool>) => void } }): void {
@@ -25,8 +81,9 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
     defineTool({
       name: 'iterate_context',
       description:
-        'Read project context files (SKILL.md and/or ITERATE.md) from the project root. ' +
-        'SKILL.md contains the original iterate skill instructions. ' +
+        'Read project context files (SKILL.md and/or ITERATE.md). ' +
+        'SKILL.md contains the original iterate skill instructions; it is searched in ' +
+        'the skill directory (auto-detected), the project root, or an explicit `skillDir`. ' +
         'ITERATE.md contains the project-specific knowledge base and onboarding information. ' +
         'Use this to understand the skill workflow and project context.',
 
@@ -41,6 +98,12 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
           type: 'string',
           description: 'Project root directory (default: current working directory).',
         },
+        skillDir: {
+          type: 'string',
+          description:
+            'Custom directory to search for SKILL.md (highest priority). ' +
+            'When omitted, SKILL.md is auto-detected from the skill directory, then the project root.',
+        },
       },
 
       output: {
@@ -51,13 +114,17 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
             found: { type: 'boolean', required: true },
             skill: { oneOf: [{ type: 'string' }, { type: 'null' }] },
             project: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+            skillSource: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+            searched: { type: 'array', items: { type: 'string' } },
           },
         },
         render: (_args, value) => {
           const parts: string[] = []
-          if (value.skill) parts.push(`--- SKILL.md ---\n${value.skill}`)
+          if (value.skill) parts.push(`--- SKILL.md (${value.skillSource ?? '?source?'}) ---\n${value.skill}`)
           if (value.project) parts.push(`--- ITERATE.md ---\n${value.project}`)
-          if (!value.skill && !value.project) parts.push('No files found.')
+          if (!value.skill && !value.project) {
+            parts.push('No files found. Searched: ' + (value.searched?.join(', ') ?? 'none'))
+          }
           return [{ type: 'text', text: parts.join('\n\n') }]
         },
       },
@@ -69,10 +136,28 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
           .map((s) => s.trim().toLowerCase())
           .filter(Boolean)
 
-        const result: { found: boolean; skill?: string | null; project?: string | null } = { found: true }
+        const result: {
+          found: boolean
+          skill?: string | null
+          project?: string | null
+          skillSource?: string | null
+          searched: string[]
+        } = { found: true, searched: [] }
 
         if (requested.includes('skill') || requested.includes('skill.md')) {
-          result.skill = readProjectFile(projectRoot, 'SKILL.md')
+          // Candidate dirs in priority order: custom path → auto-detected skill
+          // root → project root. This is how "skill 目录、项目根、自定义路径"
+          // are all supported.
+          const skillRoot = findSkillRoot(PLUGIN_SRC_DIR)
+          const candidates: string[] = []
+          if (args.skillDir) candidates.push(args.skillDir)
+          if (skillRoot) candidates.push(skillRoot)
+          candidates.push(projectRoot)
+          result.searched = candidates
+
+          const found = findSkillMd(candidates)
+          result.skill = found ? found.content : null
+          result.skillSource = found ? found.sourceDir : null
         }
         if (requested.includes('project') || requested.includes('iterate.md')) {
           result.project = readProjectFile(projectRoot, 'ITERATE.md')
