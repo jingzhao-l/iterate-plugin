@@ -1,6 +1,6 @@
 {
   "name": "iterate-plugin",
-  "version": "2.3.4",
+  "version": "2.3.5",
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus a dry-run pure-review mode with multi-round convergence and a meta-review that audits the report and emits a final review report.",
   "type": "module",
   "private": true,
@@ -35,7 +35,7 @@
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "3.18.1",
-    "js-yaml": "4.1.0"
+    "js-yaml": "4.3.1"
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",

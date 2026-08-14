@@ -102,6 +102,42 @@ describe('metaReviewReport', () => {
     assert.ok(result.issues.some((i) => i.code === 'ROUND_GAP'))
   })
 
+  it('does NOT flag ROUND_EMPTY for a final converged round with zero findings', () => {
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'Improve quality',
+      dimensions: ['correctness', 'security'],
+      maxReviewRounds: 3,
+      rounds: [
+        {
+          round: 1,
+          findings: [
+            f({ dimension: 'security', severity: 'critical', summary: 'sql injection', line: 10 }),
+            f({ dimension: 'correctness', severity: 'low', summary: 'typo', line: 20 }),
+          ],
+        },
+        { round: 2, findings: [] }, // converged round: nothing new found
+      ],
+    })
+    const result = metaReviewReport(report)
+    // No ROUND_EMPTY / ROUND_GAP issue: an empty final round IS the convergence signal.
+    assert.equal(result.passed, true)
+    assert.equal(result.verdict, 'approved')
+    assert.ok(!result.issues.some((i) => i.code === 'ROUND_EMPTY'))
+    assert.ok(!result.issues.some((i) => i.code === 'ROUND_GAP'))
+  })
+
+  it('still flags ROUND_EMPTY for a non-final empty round', () => {
+    const report = goodReport()
+    report.rounds = [
+      { round: 1, findings: [f({ summary: 'r1' })] },
+      { round: 2, findings: [] }, // empty middle round, but a later round exists
+      { round: 3, findings: [f({ summary: 'r3' })] },
+    ]
+    const result = metaReviewReport(report)
+    assert.ok(result.issues.some((i) => i.code === 'ROUND_EMPTY'))
+  })
+
   it('handles a null/undefined report without crashing', () => {
     const result = metaReviewReport(null as unknown as ReviewReport)
     assert.equal(result.passed, false)

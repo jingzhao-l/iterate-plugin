@@ -80,8 +80,11 @@ export const META_REVIEW_CHECKS = 6
  *  4. SORT_ORDER: findings are severity-sorted (most severe first).
  *  5. CONVERGENCE: findingsByRound sums to totalFindings and the `converged`
  *     flag is consistent with the last round's new-finding count.
- *  6. ROUND_SHAPE: every round has a positive round number and at least one
- *     finding; no round is missing from the sequence.
+ *  6. ROUND_SHAPE: every round has a positive round number; no round is
+ *     missing from the sequence. A round with zero findings is only flagged
+ *     when it is NOT the last round — an empty FINAL round means the review
+ *     converged (the last pass found nothing new), which is the expected,
+ *     successful termination of a dry-run, not a defect.
  *
  * Returns a MetaReviewResult; `passed` is true only when all checks pass.
  */
@@ -217,7 +220,7 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
   // 6. ROUND_SHAPE
   const rounds = Array.isArray(report.rounds) ? report.rounds : []
   const seenRounds = new Set<number>()
-  for (const r of rounds) {
+  for (const [index, r] of rounds.entries()) {
     if (!r || typeof r.round !== 'number' || r.round < 1) {
       add(
         'ROUND_NUMBER',
@@ -228,12 +231,14 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
       continue
     }
     seenRounds.add(r.round)
-    if (!Array.isArray(r.findings) || r.findings.length === 0) {
+    const isLastRound = index === rounds.length - 1
+    if (!Array.isArray(r.findings) || (r.findings.length === 0 && !isLastRound)) {
       add(
         'ROUND_EMPTY',
         'low',
         `Round ${r.round} has no findings`,
-        'A recorded round should contain at least one finding.',
+        'A recorded round should contain at least one finding — except a final converged round, ' +
+          'which finding nothing new is the expected success signal.',
       )
     }
   }
