@@ -272,6 +272,7 @@ describe('reviewer tasks & schema', () => {
       scope: 'full',
       mode: 'dry-run',
       outputLanguage: 'English',
+      maxLines: 20,
     })
     assert.match(prompt, /MUST NOT modify/)
     assert.match(prompt, /round 1/)
@@ -287,10 +288,37 @@ describe('reviewer tasks & schema', () => {
       mode: 'dry-run',
       alreadyKnown: known,
       outputLanguage: 'Chinese (中文)',
+      maxLines: 20,
     })
     assert.match(prompt, /Already-known findings/)
     assert.match(prompt, /known issue/)
     assert.match(prompt, /NEW issues only/)
+  })
+
+  it('reviewerTaskPrompt interpolates the atomic max_lines threshold', () => {
+    const prompt = reviewerTaskPrompt({
+      dimension: 'security',
+      goal: 'g',
+      scope: 'full',
+      mode: 'dry-run',
+      outputLanguage: 'English',
+      maxLines: 42,
+    })
+    assert.match(prompt, /<= 42 lines/)
+    assert.doesNotMatch(prompt, /\{atomic\.max_lines\}/)
+  })
+
+  it('sortFindings guards against an out-of-spec severity without NaN ordering', () => {
+    // 'bogus' is not a valid severity; it must be ranked as low (not NaN), so
+    // ordering stays deterministic and the sort never crashes.
+    const bad = f({ severity: 'bogus' as ReviewFinding['severity'], file: 'zzz.ts', summary: 'zzz' })
+    const low = f({ severity: 'low', file: 'aaa.ts', summary: 'aaa' })
+    const sorted = sortFindings([bad, low])
+    assert.ok(sorted.every((x) => typeof x === 'object'))
+    assert.deepEqual(
+      sorted.map((x) => x.summary),
+      ['aaa', 'zzz'],
+    )
   })
 })
 

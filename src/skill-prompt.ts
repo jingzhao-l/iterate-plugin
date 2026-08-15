@@ -47,7 +47,8 @@ const plan = (planRes && planRes.plan) ? planRes.plan : null
 if (!plan || !Array.isArray(plan.dimensions)) throw new Error('plan failed: iterate_review did not return a valid plan')
 const dims = plan.dimensions.map(d => d.id)
 const maxRounds = plan.maxReviewRounds
-const known = []            // cumulative deduped findings across rounds
+const knownIntentional = (plan.knownIntentional || [])   // config personalization filter, applied in aggregate
+let known = []              // cumulative DEDUPED findings fed back to reviewers
 const rounds = []           // raw per-round findings
 
 phase('review')
@@ -60,13 +61,15 @@ for (let r = 1; r <= maxRounds; r++) {
   )))
   const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
   rounds.push(thisRound)
-  known.push(...thisRound.findings)   // rough accumulation; final dedupe is deterministic in aggregate
-  // Check convergence deterministically
+  // Deterministic aggregate: cross-round dedupe + known_intentional filter + severity sort.
   const agg = await agent(
-    'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + '}) and return the report JSON.',
+    'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
     { label: 'review:aggregate:r' + r }
   )
-  if (agg && agg.report && agg.report.convergence.findingsByRound[r-1] === 0) {
+  // Feed the DEDUPED + already-filtered set back (not raw findings) so the known
+  // list stays bounded and reviewers never see the same issue twice.
+  if (agg && agg.report && Array.isArray(agg.report.findings)) known = agg.report.findings
+  if (agg && agg.report && agg.report.convergence && agg.report.convergence.findingsByRound[r-1] === 0) {
     log('round ' + r + ' found 0 new findings — converged')
     break
   }
@@ -74,7 +77,7 @@ for (let r = 1; r <= maxRounds; r++) {
 
 phase('report')
 const finalAgg = await agent(
-  'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + '}) and return the report JSON.',
+  'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
   { label: 'review:aggregate:final' }
 )
 const report = (finalAgg && finalAgg.report) ? finalAgg.report : null
@@ -124,16 +127,19 @@ Canonical script — reproduce this structure exactly (adjust dims via the plan)
 \`\`\`js
 // args = { mode: "normal", maxRounds? }
 phase('plan')
-await agent(
+const configRes = await agent(
   'Call iterate_config({ validate: true }) and return the config JSON.',
   { label: 'config:read' }
 )
+const cfg = (configRes && configRes.config) ? configRes.config : null
+const atomicMaxLines = (cfg && cfg.atomic && cfg.atomic.max_lines) ? cfg.atomic.max_lines : 20
 const planRes = await agent(
   'Call iterate_review({operation:"plan", mode:"normal", maxReviewRounds:' + (args.maxRounds || 3) + '}) and return the plan JSON.',
   { label: 'review:plan' }
 )
 const plan = (planRes && planRes.plan) ? planRes.plan : null
 if (!plan || !Array.isArray(plan.dimensions)) throw new Error('plan failed: iterate_review did not return a valid plan')
+const knownIntentional = (plan.knownIntentional || [])   // config personalization filter, applied in aggregate
 const dims = plan.dimensions.map(d => d.id)
 const maxRounds = plan.maxReviewRounds
 const rounds = []          // findings per review round (each on the then-current code state)
@@ -154,7 +160,7 @@ for (let r = 1; r <= maxRounds; r++) {
 
   // Deterministic dedupe / known_intentional filter / severity sort for this round.
   const agg = await agent(
-    'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + '}) and return the report JSON.',
+    'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
     { label: 'review:aggregate:r' + r }
   )
   const findings = (agg && agg.report && agg.report.findings) ? agg.report.findings : thisRound.findings
@@ -162,14 +168,25 @@ for (let r = 1; r <= maxRounds; r++) {
   const remaining = findings.filter(f => f.is_atomic !== true)
 
   if (atomic.length > 0) {
-    await parallel(atomic.map(f => () => agent(
-      'Fix this finding with the smallest possible change (single file, single function, <=20 lines). ' +
-      JSON.stringify(f) + '. Verify the edit locally before finishing.',
-      { label: 'fix:' + f.file + ':' + (f.line || 0), phase: 'fix' }
+    // Group atomic fixes by file. All edits to the SAME file are applied by a
+    // single fixer agent (serial within a file), avoiding concurrent-write
+    // races; different files still run in parallel.
+    const byFile = {}
+    atomic.forEach(f => { (byFile[f.file] = byFile[f.file] || []).push(f) })
+    await parallel(Object.keys(byFile).map(file => () => agent(
+      'Apply ALL of these fixes to ' + file + ' in ONE pass with the smallest possible changes ' +
+      '(each <= ' + atomicMaxLines + ' lines, single function). ' + JSON.stringify(byFile[file]) + '. Verify the edit locally before finishing.',
+      { label: 'fix:' + file, phase: 'fix' }
     )))
     fixedCount += atomic.length
   }
-  architectural.push(...remaining)
+
+  // Cross-round dedupe of architectural findings before accumulating.
+  const seenKeys = architectural.map(a => a.file + '|' + a.dimension + '|' + a.summary)
+  for (const f of remaining) {
+    const key = f.file + '|' + f.dimension + '|' + f.summary
+    if (seenKeys.indexOf(key) < 0) { architectural.push(f); seenKeys.push(key) }
+  }
 
   await agent(
     'Call iterate_validate for each command in iterate.config.yaml validation.commands and return all {command, exitCode} results.',
@@ -209,6 +226,7 @@ return {
 Key rules for normal mode:
 - Fixers are the ONLY agents allowed to write files; reviewers read only. Architectural findings are reported, never auto-fixed.
 - Aggregate the current round deterministically (\`report.findings\`) before fixing, so fixes act on deduped/filtered/sorted findings.
+- Apply atomic fixes **per file**: one fixer agent handles all findings for a given file serially, so the same file is never edited concurrently; different files are fixed in parallel.
 - Validate after every round of fixes; validation results are logged, not silently dropped.
 - Stop when a round produces nothing to fix (converged) or maxReviewRounds is reached.
 - Every round and the final report go to the append-only decision log.
@@ -218,7 +236,7 @@ Key rules for normal mode:
   "severity": "critical" | "high" | "medium" | "low", "summary": string (one line),
   "failure_scenario": string (how/when it fails), "suggested_fix": string (the concrete fix),
   "is_atomic": boolean (true if fix ≤ max_lines within a single file/function) }
-Atomic = is_atomic true (single file, single function, ≤20 lines change). Architectural = everything else.
+Atomic = is_atomic true (single file, single function, ≤ config.atomic.max_lines lines change). Architectural = everything else.
 
 ### Workflow meta
 Always pass \`meta: { name: "iterate", description: "Autonomous iterate loop" }\`.

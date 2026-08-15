@@ -1,9 +1,29 @@
 import { exec } from 'node:child_process'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { loadEffectiveConfig, isCommandAllowed, flattenCommands } from '../config-loader.ts'
+import {
+  loadEffectiveConfig,
+  isCommandAllowed,
+  flattenCommands,
+  resolveProjectRoot,
+} from '../config-loader.ts'
 import type { ValidationResult } from '../types.ts'
 
 const DEFAULT_TIMEOUT_MS = 120_000
+/** Hard ceiling on a single validation command's runtime, so a model cannot
+ *  pin the tool open indefinitely via an unbounded `timeout` argument. */
+const MAX_TIMEOUT_MS = 600_000
+
+/**
+ * Clamp a caller-supplied timeout (ms) to a sane range.
+ * Non-finite / non-positive values fall back to the default; any value above
+ * the ceiling is capped. Pure function, unit-tested.
+ */
+export function clampTimeout(ms: number | undefined): number {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) {
+    return DEFAULT_TIMEOUT_MS
+  }
+  return Math.min(ms, MAX_TIMEOUT_MS)
+}
 
 /**
  * Run a single shell command with timeout and return structured results.
@@ -107,10 +127,23 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
       },
 
       async execute(args) {
-        const projectRoot = args.path ?? process.cwd()
+        const resolved = resolveProjectRoot(args.path)
+        if (!resolved.ok) {
+          return {
+            allowed: false,
+            command: args.command,
+            exitCode: -1,
+            stdout: '',
+            stderr: '',
+            timedOut: false,
+            durationMs: 0,
+            rejectReason: resolved.reason,
+          }
+        }
+        const projectRoot = resolved.root
         // Effective config = defaults merged with project overrides. Never null.
         const { config, source } = loadEffectiveConfig(projectRoot)
-        const timeout = args.timeout ?? DEFAULT_TIMEOUT_MS
+        const timeout = clampTimeout(args.timeout)
 
         // Only commands predefined in validation.commands may run — the
         // user trusts exactly these, and nothing else. This replaces the

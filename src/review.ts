@@ -36,7 +36,12 @@ export const SEVERITY_RANK: Record<ReviewFinding['severity'], number> = {
 /** Sort findings by severity (most severe first), then by file path. */
 export function sortFindings(findings: ReviewFinding[]): ReviewFinding[] {
   return [...findings].sort((a, b) => {
-    const bySeverity = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]
+    // Guard against an out-of-spec severity string (e.g. from a model that
+    // bypassed the schema): treat it as the least severe so NaN never enters
+    // the comparator and ordering stays deterministic.
+    const rankA = SEVERITY_RANK[a.severity] ?? SEVERITY_RANK.low
+    const rankB = SEVERITY_RANK[b.severity] ?? SEVERITY_RANK.low
+    const bySeverity = rankA - rankB
     if (bySeverity !== 0) return bySeverity
     const byFile = a.file.localeCompare(b.file)
     if (byFile !== 0) return byFile
@@ -288,6 +293,8 @@ export function reviewerTaskPrompt(input: {
   mode: 'normal' | 'dry-run'
   alreadyKnown?: ReviewFinding[]
   outputLanguage: string
+  /** Atomic fix threshold from config.atomic. */
+  maxLines: number
 }): string {
   const parts: string[] = []
   parts.push(
@@ -313,7 +320,7 @@ export function reviewerTaskPrompt(input: {
     `Each finding: dimension (must be "${input.dimension}"), file (relative path), ` +
       'line (optional integer), severity (critical/high/medium/low), summary (one line), ' +
       'failure_scenario (how/when it fails, specific evidence), suggested_fix (the concrete fix), ' +
-      'is_atomic (true if the fix is <= {atomic.max_lines} lines within a SINGLE file/function, else false).',
+      `is_atomic (true if the fix is <= ${input.maxLines} lines within a SINGLE file/function, else false).`,
     `Write summaries and details in ${input.outputLanguage}.`,
   )
   return parts.join('\n')
@@ -351,6 +358,7 @@ export function buildReviewPlan(input: {
         mode: input.mode,
         alreadyKnown: [],
         outputLanguage: language,
+        maxLines: input.config.atomic.max_lines,
       }),
       findingsSchema: findingsSchema(),
     })),

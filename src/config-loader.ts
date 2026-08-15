@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import yaml from 'js-yaml'
 import type { IterateConfig } from './types.ts'
 
@@ -159,4 +159,30 @@ export function validateConfig(config: unknown): string[] {
     if (!v.commands || typeof v.commands !== 'object') errors.push('validation.commands')
   }
   return errors
+}
+
+/** Result of resolving/validating a caller-supplied project root. */
+export type ProjectRootResult = { ok: true; root: string } | { ok: false; reason: string }
+
+/**
+ * Resolve a caller-supplied project root to a safe absolute path.
+ *
+ * Every tool accepts a model-controlled `path` argument. Before it is used in
+ * any file read/write or as a command `cwd`, it must be sanitized:
+ *  - an empty/missing `path` falls back to the current working directory;
+ *  - the path is resolved to an absolute path (collapsing `..` and symlinks);
+ *  - the filesystem root (`/`) is refused — it would let a prompt point tools
+ *    at arbitrary system directories (path-traversal escape).
+ *
+ * Returns `{ ok: true, root }` on success, or `{ ok: false, reason }` when the
+ * path is unsafe; callers must short-circuit on the failure and return a
+ * structured error instead of proceeding.
+ */
+export function resolveProjectRoot(input?: string): ProjectRootResult {
+  const raw = (input ?? '').trim()
+  const root = raw ? resolve(raw) : resolve(process.cwd())
+  if (!root || root === sep) {
+    return { ok: false, reason: 'Refusing filesystem root as project root.' }
+  }
+  return { ok: true, root }
 }

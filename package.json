@@ -1,6 +1,6 @@
 {
   "name": "iterate-plugin",
-  "version": "2.3.6",
+  "version": "2.3.7",
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus a dry-run pure-review mode with multi-round convergence and a meta-review that audits the report and emits a final review report.",
   "type": "module",
   "license": "MIT",
@@ -43,10 +43,6 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "test:script": "tsx --test test/script.test.ts",
-    "test:runtime": "tsx --test test/runtime.test.ts",
-    "test:loader": "tsx --test test/loader.test.ts",
-    "test:decisions": "tsx --test test/decisions.test.ts",
     "test:validate": "tsx --test test/validate.test.ts"
   },
   "dependencies": {

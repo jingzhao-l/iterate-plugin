@@ -2,6 +2,7 @@ import { appendFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
+import { resolveProjectRoot } from '../config-loader.ts'
 import type { DecisionLogEntry } from '../types.ts'
 
 const LOG_DIR = '.iterate'
@@ -116,7 +117,11 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
       },
 
       async execute(args) {
-        const projectRoot = args.path ?? process.cwd()
+        const resolved = resolveProjectRoot(args.path)
+        if (!resolved.ok) {
+          return { operation: args.operation, error: resolved.reason }
+        }
+        const projectRoot = resolved.root
 
         if (args.operation === 'read') {
           const entries = readEntries(projectRoot)

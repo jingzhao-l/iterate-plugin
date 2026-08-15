@@ -10,6 +10,7 @@ import {
   loadConfig,
   loadEffectiveConfig,
   mergeConfig,
+  resolveProjectRoot,
   validateConfig,
 } from '../src/config-loader.ts'
 import type { IterateConfig } from '../src/types.ts'
@@ -193,5 +194,32 @@ describe('validateConfig', () => {
       goal: 'g',
     }
     assert.deepEqual(validateConfig(c), [])
+  })
+})
+
+describe('resolveProjectRoot', () => {
+  it('resolves a caller-supplied absolute path untouched', () => {
+    const { dir } = tempDir()
+    const res = resolveProjectRoot(dir)
+    assert.equal(res.ok, true)
+    if (res.ok) assert.equal(res.root, dir)
+  })
+
+  it('falls back to the current working directory when path is empty', () => {
+    const res = resolveProjectRoot('')
+    assert.equal(res.ok, true)
+    if (res.ok) assert.equal(res.root, process.cwd())
+  })
+
+  it('refuses the filesystem root to block path-traversal escapes', () => {
+    const res = resolveProjectRoot('/')
+    assert.equal(res.ok, false)
+    if (!res.ok) assert.match(res.reason, /root/i)
+  })
+
+  it('collapses traversal that resolves up to the filesystem root', () => {
+    // '/etc/../../..' normalizes to '/', which must be refused.
+    const res = resolveProjectRoot('/etc/../../..')
+    assert.equal(res.ok, false)
   })
 })

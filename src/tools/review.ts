@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadEffectiveConfig } from '../config-loader.ts'
+import { loadEffectiveConfig, resolveProjectRoot } from '../config-loader.ts'
 import { buildReviewPlan, buildReviewReport } from '../review.ts'
 import { buildFinalReviewReport, metaReviewReport } from '../meta-review.ts'
 import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
@@ -98,7 +98,11 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
       },
 
       async execute(args) {
-        const projectRoot = args.path ?? process.cwd()
+        const resolved = resolveProjectRoot(args.path)
+        if (!resolved.ok) {
+          return { operation: args.operation, error: resolved.reason }
+        }
+        const projectRoot = resolved.root
         // Effective config = defaults merged with project overrides. Never
         // null, so `plan`/`aggregate` work even without a config file.
         const { config } = loadEffectiveConfig(projectRoot)

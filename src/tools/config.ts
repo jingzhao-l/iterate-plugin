@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadEffectiveConfig, validateConfig } from '../config-loader.ts'
+import { loadEffectiveConfig, validateConfig, resolveProjectRoot } from '../config-loader.ts'
 
 /**
  * Register the `iterate_config` tool.
@@ -53,7 +53,11 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
       },
 
       async execute(args) {
-        const projectRoot = args.path ?? process.cwd()
+        const resolved = resolveProjectRoot(args.path)
+        if (!resolved.ok) {
+          return { found: false, error: resolved.reason }
+        }
+        const projectRoot = resolved.root
         // Effective config = defaults (Master) merged with any project-root
         // overrides. Never null: a project without a config file runs on the
         // built-in defaults, so the workflow stays usable out of the box.
