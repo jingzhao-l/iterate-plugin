@@ -23,7 +23,7 @@ function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
 } {
-  let def: { execute: (a: unknown, e: unknown) => Promise<unknown>; render: (a: unknown, v: unknown) => unknown } | null = null
+  let def: { execute: (a: unknown, e: unknown) => Promise<unknown>; output: { render: (a: unknown, v: unknown) => unknown } } | null = null
   registerTriageTool({
     tools: { register: (d: never) => { def = d as typeof def } },
   } as never)
