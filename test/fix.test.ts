@@ -97,7 +97,7 @@ describe('diff helpers', () => {
     const h = hunks[0]!
     assert.equal(h.newLines, 1)
     assert.equal(h.oldLines, 0)
-    assert.match(h.content, /\+ if \(!name\) return "ANON"/)
+    assert.match(h.content, /\+\s+if \(!name\) return "ANON"/)
     assert.deepEqual(countChangedLines(ORIGINAL, FIXED), { added: 1, removed: 0 })
   })
 
@@ -316,10 +316,12 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
     const [fix] = captureTools([registerFixTool]) as [Tool]
     const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
     try {
+      // Fields that pass the schema but are invalid at runtime return { ok: false }.
       assert.equal(((await fix({ file: '', content: FIXED, finding: finding(), round: 1, path: dir })) as { ok: boolean }).ok, false)
-      assert.equal(((await fix({ file: 'src/app.ts', finding: finding(), round: 1, path: dir })) as { ok: boolean }).ok, false)
       assert.equal(((await fix({ file: 'src/app.ts', content: FIXED, finding: finding(), round: 0, path: dir })) as { ok: boolean }).ok, false)
-      assert.equal(((await fix({ file: 'src/app.ts', content: FIXED, round: 1, path: dir })) as { ok: boolean }).ok, false)
+      // Required fields missing are rejected by the tool schema (ToolArgsError).
+      await assert.rejects(() => fix({ file: 'src/app.ts', finding: finding(), round: 1, path: dir }), /content/)
+      await assert.rejects(() => fix({ file: 'src/app.ts', content: FIXED, round: 1, path: dir }), /finding/)
     } finally {
       cleanup()
     }
