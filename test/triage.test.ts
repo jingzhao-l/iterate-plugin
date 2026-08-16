@@ -31,7 +31,7 @@ function captureTool(): {
   const exec = { signal: new AbortController().signal }
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
-    render: (args, value) => def!.render(args, value) as Array<{ type: string; text: string }>,
+    render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
   }
 }
 
@@ -306,10 +306,9 @@ describe('iterate_triage execute', () => {
     }
   })
 
-  it('returns an error for an unknown operation', async () => {
+  it('rejects an unknown operation through args validation', async () => {
     const tool = captureTool()
-    const result = (await tool.execute({ operation: 'bogus' })) as Record<string, unknown>
-    assert.match(String(result.error), /Unknown operation/)
+    await assert.rejects(() => tool.execute({ operation: 'bogus' }), /must be one of/)
   })
 
   it('renders the canonical value as JSON text', async () => {

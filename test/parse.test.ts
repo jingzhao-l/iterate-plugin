@@ -289,7 +289,7 @@ describe('triage serialization helpers', () => {
     assert.equal(entries.length, 1)
     assert.equal(entries[0]!.file, 'src/auth.ts')
     assert.equal(entries[0]!.dimension, 'security')
-    assert.equal(entries[0]!.line, undefined)
+    assert.equal(entries[0]!.line, 12)
   })
 })
 
