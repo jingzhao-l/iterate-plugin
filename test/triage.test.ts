@@ -189,8 +189,8 @@ describe('iterate_triage execute', () => {
       assert.equal(parsed.goal, 'g')
       const known = (parsed.personalization as { known_intentional: KnownIntentional[] }).known_intentional
       assert.equal(known.length, 1)
-      assert.equal(known[0].file, 'src/x.ts')
-      assert.equal(known[0].line, 7)
+      assert.equal(known[0]!.file, 'src/x.ts')
+      assert.equal(known[0]!.line, 7)
 
       // A timestamped backup of the ORIGINAL config exists.
       const backups = readdirSync(dir).filter((f) => f.includes('.bak-'))
@@ -300,7 +300,7 @@ describe('iterate_triage execute', () => {
       assert.equal(result.operation, 'list')
       assert.equal(result.count, 1)
       const entries = result.entries as KnownIntentional[]
-      assert.equal(entries[0].file, 'src/a.ts')
+      assert.equal(entries[0]!.file, 'src/a.ts')
     } finally {
       cleanup()
     }

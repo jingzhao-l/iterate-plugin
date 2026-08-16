@@ -176,7 +176,14 @@ describe('normalizeReport', () => {
 
   it('does not mutate a partially-populated summary object', () => {
     const report = makeReport()
-    report.summary = { totalFindings: 2 } // partial: severity counts missing
+    report.summary = { totalFindings: 2 } as {
+      totalFindings: number
+      critical: number
+      high: number
+      medium: number
+      low: number
+      byDimension: Record<string, number>
+    } // partial: severity counts missing
     const snapshot = JSON.stringify(report)
     const norm = normalizeReport(report)
     // The input summary object must be left untouched…
