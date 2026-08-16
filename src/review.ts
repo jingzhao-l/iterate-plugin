@@ -344,21 +344,28 @@ export function buildReviewPlan(input: {
   maxReviewRounds: number
   knownIntentional: KnownIntentional[]
 } {
+  // Defensive reads: a malformed config (e.g. `dimensions` as a non-array, or
+  // `review`/`atomic` missing) must degrade to sane defaults instead of
+  // throwing an uncaught TypeError inside the tool's `execute`.
   const language = input.config.language === 'zh' ? 'Chinese (中文)' : 'English'
+  const goal = input.config.goal ?? ''
+  const scope = input.config.review?.scope ?? 'full'
+  const dimensions = Array.isArray(input.config.dimensions) ? input.config.dimensions : []
+  const maxLines = input.config.atomic?.max_lines ?? 20
   return {
     mode: input.mode,
-    goal: input.config.goal,
-    scope: input.config.review.scope,
-    dimensions: input.config.dimensions.map((d) => ({
+    goal,
+    scope,
+    dimensions: dimensions.map((d) => ({
       id: d,
       reviewerPrompt: reviewerTaskPrompt({
         dimension: d,
-        goal: input.config.goal,
-        scope: input.config.review.scope,
+        goal,
+        scope,
         mode: input.mode,
         alreadyKnown: [],
         outputLanguage: language,
-        maxLines: input.config.atomic.max_lines,
+        maxLines,
       }),
       findingsSchema: findingsSchema(),
     })),

@@ -337,4 +337,18 @@ describe('buildReviewPlan', () => {
       assert.ok(d.findingsSchema)
     }
   })
+
+  it('degrades gracefully when config.dimensions is not an array', () => {
+    const bad = { ...baseConfig, dimensions: 'not-an-array' as unknown as string[] }
+    const plan = buildReviewPlan({ config: bad, mode: 'dry-run', maxReviewRounds: 3 })
+    assert.deepEqual(plan.dimensions, [])
+    assert.equal(plan.scope, 'full')
+  })
+
+  it('degrades gracefully when config.review / config.atomic are missing', () => {
+    const bad = { ...baseConfig, review: undefined as unknown as IterateConfig['review'] }
+    const plan = buildReviewPlan({ config: bad, mode: 'dry-run', maxReviewRounds: 3 })
+    assert.equal(plan.scope, 'full')
+    assert.ok(Array.isArray(plan.dimensions))
+  })
 })
