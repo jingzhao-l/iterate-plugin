@@ -26,10 +26,17 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
     }
   },
   "files": [
     "src",
+    "lib",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -38,7 +45,8 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    }
+    },
+    "./client": "./lib/client.js"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
