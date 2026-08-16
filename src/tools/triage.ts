@@ -165,17 +165,18 @@ export function backupSuffix(now = new Date()): string {
 
 // ─── File I/O ───────────────────────────────────────────────────────────────
 
-/** Load the raw config object (empty when the file is missing/unparsable). */
+/** Load the raw config object (empty when the file is missing). */
 function readConfigFile(configPath: string): Record<string, unknown> {
   if (!existsSync(configPath)) return {}
-  try {
-    const content = readFileSync(configPath, 'utf-8')
-    const parsed = yaml.load(content)
-    if (!parsed || typeof parsed !== 'object') return {}
-    return parsed as Record<string, unknown>
-  } catch {
-    return {}
+  const content = readFileSync(configPath, 'utf-8')
+  const parsed = yaml.load(content)
+  if (!parsed || typeof parsed !== 'object') {
+    // A config that exists but is not a YAML mapping must NOT be silently
+    // treated as empty: writing over it would destroy user data. Callers
+    // surface this as an error and refuse to write.
+    throw new Error('existing iterate.config.yaml is not a valid YAML mapping')
   }
+  return parsed as Record<string, unknown>
 }
 
 /** Apply the triage entries: backup, merge, write, rollback on failure. */
@@ -194,7 +195,13 @@ function applyEntries(
   error: string
 } {
   const configPath = join(projectRoot, CONFIG_FILE)
-  const config = readConfigFile(configPath)
+  let config: Record<string, unknown>
+  try {
+    config = readConfigFile(configPath)
+  } catch (err) {
+    // The file exists but is malformed — refuse to overwrite user data.
+    return { ok: false, error: `Failed to read config: ${String(err)}` }
+  }
   const existing = readKnownIntentional(config)
   const { merged, added, skipped } = mergeKnownIntentional(existing, incoming)
   const nextConfig = buildConfigWithKnownIntentional(config, merged)
@@ -308,7 +315,12 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
         const configPath = join(projectRoot, CONFIG_FILE)
 
         if (args.operation === 'list') {
-          const config = readConfigFile(configPath)
+          let config: Record<string, unknown>
+          try {
+            config = readConfigFile(configPath)
+          } catch (err) {
+            return { operation: 'list', error: `Failed to read config: ${String(err)}` }
+          }
           const entries = readKnownIntentional(config)
           return {
             operation: 'list',

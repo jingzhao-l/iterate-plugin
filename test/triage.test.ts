@@ -239,6 +239,38 @@ describe('iterate_triage execute', () => {
     }
   })
 
+  it('refuses to overwrite an existing but unparsable config', async () => {
+    const tool = captureTool()
+    const malformed = 'goal: [unclosed'
+    const { dir, cleanup } = tempProject(malformed)
+    try {
+      const result = (await tool.execute({
+        operation: 'apply',
+        path: dir,
+        entries: [entry()],
+      })) as Record<string, unknown>
+      assert.equal(result.added, undefined)
+      assert.match(String(result.error), /Failed to read config|not a valid YAML/)
+      // The file is untouched and no backup was created.
+      assert.equal(readFileSync(join(dir, 'iterate.config.yaml'), 'utf-8'), malformed)
+      const backups = readdirSync(dir).filter((f) => f.includes('.bak-'))
+      assert.equal(backups.length, 0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('list reports an error for an unparsable config', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject('goal: [unclosed')
+    try {
+      const result = (await tool.execute({ operation: 'list', path: dir })) as Record<string, unknown>
+      assert.match(String(result.error), /Failed to read config/)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('rejects invalid entries without touching the config', async () => {
     const tool = captureTool()
     const { dir, cleanup } = tempProject('goal: "g"\n')

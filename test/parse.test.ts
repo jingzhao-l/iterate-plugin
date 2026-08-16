@@ -173,6 +173,20 @@ describe('normalizeReport', () => {
     normalizeReport(report)
     assert.equal(JSON.stringify(report), snapshot)
   })
+
+  it('does not mutate a partially-populated summary object', () => {
+    const report = makeReport()
+    report.summary = { totalFindings: 2 } // partial: severity counts missing
+    const snapshot = JSON.stringify(report)
+    const norm = normalizeReport(report)
+    // The input summary object must be left untouched…
+    assert.equal(JSON.stringify(report), snapshot)
+    // …while the normalized summary still carries the full computed fields.
+    const sum = norm.summary as { totalFindings: number; high: number; byDimension: Record<string, number> }
+    assert.equal(sum.totalFindings, 2)
+    assert.equal(sum.high, 1)
+    assert.equal(sum.byDimension.security, 1)
+  })
 })
 
 // ─── Convergence helpers ─────────────────────────────────────────────────────
@@ -192,6 +206,14 @@ describe('convergence helpers', () => {
       findings: [],
     })
     assert.equal(computeConvergenceProgress(report), 100)
+  })
+
+  it('returns 0 (not NaN) when total rounds is missing or 0', () => {
+    const empty = normalizeReport({ convergence: {}, rounds: [], findings: [] })
+    assert.equal(computeConvergenceProgress(empty), 0)
+    const zero = normalizeReport({ convergence: { totalRounds: 0 }, rounds: [], findings: [] })
+    assert.equal(computeConvergenceProgress(zero), 0)
+    assert.ok(Number.isFinite(computeConvergenceProgress(empty)))
   })
 })
 
