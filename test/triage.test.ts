@@ -315,7 +315,7 @@ describe('iterate_triage execute', () => {
   it('renders the canonical value as JSON text', async () => {
     const tool = captureTool()
     const blocks = tool.render({ operation: 'list' }, { operation: 'list', count: 0, entries: [] })
-    assert.equal(blocks[0].type, 'text')
-    assert.match(blocks[0].text, /"operation": "list"/)
+    assert.equal(blocks[0]!.type, 'text')
+    assert.match(blocks[0]!.text, /"operation": "list"/)
   })
 })

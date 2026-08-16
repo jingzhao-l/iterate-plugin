@@ -227,8 +227,8 @@ describe('severityStats / groupByDimension', () => {
 
   it('groups findings by dimension', () => {
     const groups = groupByDimension(makeReport())
-    assert.equal(groups.correctness.length, 1)
-    assert.equal(groups.security.length, 1)
+    assert.equal(groups.correctness?.length, 1)
+    assert.equal(groups.security?.length, 1)
   })
 })
 
@@ -237,7 +237,7 @@ describe('severityStats / groupByDimension', () => {
 describe('buildTriageState / hashReport', () => {
   it('initializes every finding to keep', () => {
     const report = makeReport()
-    assert.deepEqual(buildTriageState(report), { '0': 'keep', '1': 'keep' })
+    assert.deepEqual(buildTriageState(report), { '0': 'keep', '1': 'keep' } as Record<string, 'keep' | 'skip' | 'ignore'>)
   })
 
   it('produces a deterministic hash', () => {
@@ -277,12 +277,12 @@ describe('triage serialization helpers', () => {
 
   it('collects ignored entries from triage state', () => {
     const report = makeReport()
-    const state = { '0': 'keep', '1': 'ignore' }
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep', '1': 'ignore' }
     const entries = collectIgnoredEntries(state, report.findings)
     assert.equal(entries.length, 1)
-    assert.equal(entries[0].file, 'src/auth.ts')
-    assert.equal(entries[0].dimension, 'security')
-    assert.equal(entries[0].line, undefined)
+    assert.equal(entries[0]!.file, 'src/auth.ts')
+    assert.equal(entries[0]!.dimension, 'security')
+    assert.equal(entries[0]!.line, undefined)
   })
 })
 
@@ -292,8 +292,9 @@ describe('constants', () => {
   it('defines a consistent severity taxonomy', () => {
     assert.deepEqual(SEVERITY_ORDER, ['critical', 'high', 'medium', 'low'])
     for (const sev of SEVERITY_ORDER) {
-      assert.ok(typeof SEVERITY_LABEL[sev] === 'string')
-      assert.match(SEVERITY_COLOR[sev], /^#/)
+      const key = sev as keyof typeof SEVERITY_LABEL
+      assert.ok(typeof SEVERITY_LABEL[key] === 'string')
+      assert.match(SEVERITY_COLOR[key], /^#/)
     }
   })
 })
