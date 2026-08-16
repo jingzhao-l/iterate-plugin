@@ -23,7 +23,7 @@ function logPath(projectRoot: string): string {
  * Append one entry to the decision log (JSONL format).
  * Returns the entry count after appending.
  */
-function appendEntry(projectRoot: string, entry: DecisionLogEntry): { count: number; path: string } {
+export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry): { count: number; path: string } {
   const filePath = logPath(projectRoot)
   const line = JSON.stringify(entry) + '\n'
   appendFileSync(filePath, line, 'utf-8')
@@ -41,7 +41,7 @@ function appendEntry(projectRoot: string, entry: DecisionLogEntry): { count: num
 /**
  * Read all entries from the decision log.
  */
-function readEntries(projectRoot: string): DecisionLogEntry[] {
+export function readDecisionEntries(projectRoot: string): DecisionLogEntry[] {
   const filePath = join(projectRoot, LOG_DIR, LOG_FILE)
   if (!existsSync(filePath)) return []
   try {
@@ -134,7 +134,7 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
         const projectRoot = resolved.root
 
         if (args.operation === 'read') {
-          const entries = readEntries(projectRoot)
+          const entries = readDecisionEntries(projectRoot)
           return {
             operation: 'read',
             entryCount: entries.length,
@@ -158,7 +158,7 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
             data: (args.data as Record<string, unknown>) ?? {},
           }
 
-          const result = appendEntry(projectRoot, entry)
+          const result = appendDecisionEntry(projectRoot, entry)
           return {
             operation: 'append',
             success: true,

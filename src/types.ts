@@ -98,3 +98,67 @@ export interface KnownIntentional {
   dimension: string
   reason: string
 }
+
+/** ─── Fix system ──────────────────────────────────────────────────────────── */
+
+/** A single fix record: one finding → one fix operation on one file. */
+export interface FixRecord {
+  id: string
+  timestamp: string
+  round: number
+  finding: ReviewFinding
+  backupPath: string
+  diffSummary: string
+  linesAdded: number
+  linesRemoved: number
+  success: boolean
+  error?: string
+}
+
+/** Fix registry metadata (per-round summary). */
+export interface FixRegistry {
+  rounds: FixRoundRecord[]
+}
+export interface FixRoundRecord {
+  round: number
+  fixedCount: number
+  failedCount: number
+  records: FixRecord[]
+}
+
+/** Hunk-level diff for a single file. */
+export interface FileDiffHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  content: string
+}
+
+/** ─── Checkpoint / resume ─────────────────────────────────────────────────── */
+
+export interface IterationCheckpoint {
+  mode: 'dry-run' | 'normal'
+  round: number
+  maxRounds: number
+  fixedCount: number
+  architecturalCount: number
+  findings: ReviewFinding[]
+  startedAt: string
+  updatedAt: string
+}
+
+/** ─── Status summary ──────────────────────────────────────────────────────── */
+
+export interface IterationStatus {
+  mode: 'dry-run' | 'normal' | null
+  currentRound: number
+  totalRounds: number
+  fixedCount: number
+  architecturalCount: number
+  findingsCount: number
+  totalDecisionLogEntries: number
+  hasCheckpoint: boolean
+  checkpoint: IterationCheckpoint | null
+  lastUpdated: string | null
+}

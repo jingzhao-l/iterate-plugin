@@ -28,19 +28,26 @@ import { registerDecisionLogTool } from './tools/decision-log.ts'
 import { registerContextTool } from './tools/context.ts'
 import { registerReviewTool } from './tools/review.ts'
 import { registerTriageTool } from './tools/triage.ts'
+import { registerFixTool, registerDiffTool, registerRollbackTool } from './tools/fix.ts'
+import { registerCheckpointTool, registerStatusTool } from './tools/checkpoint.ts'
 import { ITERATE_SKILL_PROMPT } from './skill-prompt.ts'
 
 export const name = 'iterate-plugin'
 export const inject = ['tools', 'systemPrompt']
 
 export function apply(ctx: Context): void {
-  // 1. Register the 6 core tools
+  // 1. Register the 11 tools
   registerConfigTool(ctx)
   registerValidateTool(ctx)
   registerDecisionLogTool(ctx)
   registerContextTool(ctx)
   registerReviewTool(ctx)
   registerTriageTool(ctx)
+  registerFixTool(ctx)
+  registerDiffTool(ctx)
+  registerRollbackTool(ctx)
+  registerCheckpointTool(ctx)
+  registerStatusTool(ctx)
 
   // 2. Inject the iterate skill prompt as a system prompt section
   // This teaches the model how to write iterate workflow scripts using the tools.

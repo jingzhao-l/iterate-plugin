@@ -1,10 +1,18 @@
+import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadEffectiveConfig, validateConfig, resolveProjectRoot } from '../config-loader.ts'
+import {
+  applyConfigUpdates,
+  readRawConfig,
+  validateConfigUpdates,
+  writeConfigFile,
+} from '../config-write.ts'
 
 /**
  * Register the `iterate_config` tool.
- * Reads and returns the iterate.config.yaml configuration.
+ * Reads and returns the iterate.config.yaml configuration, or writes a
+ * validated partial update back to it (with backup + rollback).
  * Model-facing: returns JSON with the full config, a specific section, or validation errors.
  */
 export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<typeof defineTool>) => void } }): void {
@@ -12,11 +20,17 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
     defineTool({
       name: 'iterate_config',
       description:
-        'Read the iterate.config.yaml configuration from the project root. ' +
+        'Read or update the iterate.config.yaml configuration from the project root. ' +
         'Returns the full parsed config, a specific section, or validation errors. ' +
-        'Use this to discover available dimensions, validation commands, git settings, and personalization rules.',
+        'Use this to discover available dimensions, validation commands, git settings, and personalization rules, ' +
+        'or to write back validated changes (goal, dimensions, max_rounds, review, atomic, validation, git, etc.).',
 
       parameters: {
+        operation: {
+          type: 'string',
+          description: 'Default "read". "write" validates and applies a partial config update (backed up first).',
+          enum: ['read', 'write'],
+        },
         path: {
           type: 'string',
           description: 'Project root directory (default: current working directory).',
@@ -29,6 +43,13 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
         validate: {
           type: 'boolean',
           description: 'If true, validate the config schema and return any missing fields.',
+        },
+        updates: {
+          type: 'json',
+          description:
+            'For operation "write": a partial config object to merge in, e.g. ' +
+            '{"goal":"...","dimensions":["correctness","security"],"max_rounds":5}. ' +
+            'Supported keys: goal, language, dimensions, max_rounds, review, atomic, git, validation, personalization, onboarding.',
         },
       },
 
@@ -44,6 +65,9 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
             data: { type: 'json' },
             config: { type: 'json' },
             availableSections: { type: 'array', items: { type: 'string' } },
+            operation: { type: 'string' },
+            ok: { type: 'boolean' },
+            backupPath: { type: 'string' },
             error: { type: 'string' },
           },
         },
@@ -58,9 +82,43 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
           return { found: false, error: resolved.reason }
         }
         const projectRoot = resolved.root
-        // Effective config = defaults (Master) merged with any project-root
-        // overrides. Never null: a project without a config file runs on the
-        // built-in defaults, so the workflow stays usable out of the box.
+
+        // ── Write operation ────────────────────────────────────────────────
+        if (args.operation === 'write') {
+          const updates = args.updates as Record<string, unknown> | undefined
+          const updateErrors = validateConfigUpdates(updates ?? {})
+          if (updateErrors.length > 0) {
+            return { operation: 'write', ok: false, found: false, errors: updateErrors }
+          }
+          let base: Record<string, unknown>
+          try {
+            base = readRawConfig(join(projectRoot, 'iterate.config.yaml'))
+          } catch (err) {
+            return { operation: 'write', ok: false, found: false, error: `failed to read config: ${String(err)}` }
+          }
+          const merged = applyConfigUpdates(base, updates ?? {})
+          const schemaErrors = validateConfig(merged)
+          if (schemaErrors.length > 0) {
+            return {
+              operation: 'write',
+              ok: false,
+              found: false,
+              errors: schemaErrors.map((e) => `missing/required field: ${e}`),
+            }
+          }
+          const result = writeConfigFile(projectRoot, merged)
+          if (!result.ok) return { operation: 'write', ok: false, found: false, error: result.error }
+          const { config } = loadEffectiveConfig(projectRoot)
+          return {
+            operation: 'write',
+            ok: true,
+            found: true,
+            backupPath: result.backupPath ?? undefined,
+            config: config as unknown as JsonValue,
+          }
+        }
+
+        // ── Read operations (original behavior) ────────────────────────────
         const { config, source } = loadEffectiveConfig(projectRoot)
         const hasOverride = source === 'override'
 

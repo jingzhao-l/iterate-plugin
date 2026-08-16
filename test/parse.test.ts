@@ -18,6 +18,22 @@ import {
   toKnownIntentionalYaml,
   buildApplyInstruction,
   collectIgnoredEntries,
+  normalizeFindingFilter,
+  findingMatches,
+  filterFindings,
+  filterFindingsWithIndices,
+  buildFilterOptions,
+  countVerdicts,
+  batchSetVerdict,
+  setAllVerdicts,
+  buildRoundHistory,
+  buildFindingTrend,
+  computeTrendMetrics,
+  trendMax,
+  buildCompletionSummary,
+  buildConfigEditGuide,
+  buildConfigEditInstruction,
+  keyToVerdict,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -303,5 +319,168 @@ describe('constants', () => {
       assert.ok(typeof SEVERITY_LABEL[key] === 'string')
       assert.match(SEVERITY_COLOR[key], /^#/)
     }
+  })
+})
+
+// ─── Finding filtering ───────────────────────────────────────────────────────
+
+describe('finding filtering', () => {
+  it('normalizes filters (drops unknown severities, trims search)', () => {
+    assert.deepEqual(
+      normalizeFindingFilter({ severities: ['high', 'bogus'], dimensions: ['', 'security'], search: '  Guard  ' }),
+      { severities: ['high'], dimensions: ['security'], search: 'guard' },
+    )
+    assert.deepEqual(normalizeFindingFilter(null), { severities: [], dimensions: [], search: '' })
+    assert.deepEqual(normalizeFindingFilter(undefined), { severities: [], dimensions: [], search: '' })
+  })
+
+  it('findingMatches respects severity, dimension, and search filters', () => {
+    const f = makeFinding()
+    assert.equal(findingMatches(f, { severities: ['high'], dimensions: [], search: '' }), true)
+    assert.equal(findingMatches(f, { severities: ['critical'], dimensions: [], search: '' }), false)
+    assert.equal(findingMatches(f, { severities: [], dimensions: ['correctness'], search: '' }), true)
+    assert.equal(findingMatches(f, { severities: [], dimensions: ['security'], search: '' }), false)
+    assert.equal(findingMatches(f, { severities: [], dimensions: [], search: 'null deref' }), true)
+    assert.equal(findingMatches(f, { severities: [], dimensions: [], search: 'zzz' }), false)
+  })
+
+  it('filterFindings returns matches only', () => {
+    const report = makeReport()
+    const criticalOnly = filterFindings(report.findings, { severities: ['critical'], dimensions: [], search: '' })
+    assert.equal(criticalOnly.length, 1)
+    assert.equal(criticalOnly[0]!.dimension, 'security')
+  })
+
+  it('filterFindingsWithIndices keeps original indices for batch ops', () => {
+    const report = makeReport() // findings[0]=correctness/high, findings[1]=security/critical
+    const { filtered, indices } = filterFindingsWithIndices(report.findings, {
+      severities: [],
+      dimensions: ['security'],
+      search: '',
+    })
+    assert.equal(filtered.length, 1)
+    assert.deepEqual(indices, [1])
+  })
+})
+
+// ─── Filter options / verdicts / batch ops ───────────────────────────────────
+
+describe('filter options & batch verdicts', () => {
+  it('buildFilterOptions counts severities and dimensions', () => {
+    const report = makeReport()
+    const opts = buildFilterOptions(report.findings)
+    assert.equal(opts.severities.find((s) => s.value === 'critical')!.count, 1)
+    assert.equal(opts.severities.find((s) => s.value === 'high')!.count, 1)
+    assert.equal(opts.dimensions.find((d) => d.value === 'security')!.count, 1)
+  })
+
+  it('countVerdicts tallies each verdict', () => {
+    assert.deepEqual(countVerdicts({ '0': 'keep', '1': 'ignore', '2': 'skip' }), { keep: 1, skip: 1, ignore: 1 })
+    assert.deepEqual(countVerdicts({}), { keep: 0, skip: 0, ignore: 0 })
+  })
+
+  it('batchSetVerdict returns a NEW state without mutating the input', () => {
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep', '1': 'keep', '2': 'keep' }
+    const snapshot = JSON.stringify(state)
+    const next = batchSetVerdict(state, [1, 2], 'ignore')
+    assert.equal(state[1], 'keep')
+    assert.equal(JSON.stringify(state), snapshot)
+    assert.deepEqual(next, { '0': 'keep', '1': 'ignore', '2': 'ignore' })
+  })
+
+  it('batchSetVerdict ignores invalid verdicts / indices', () => {
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep' }
+    assert.equal(batchSetVerdict(state, [0], 'bogus' as 'keep' | 'skip' | 'ignore'), state)
+    assert.equal(batchSetVerdict(state, [], 'ignore'), state)
+    assert.deepEqual(batchSetVerdict(state, [0, -1, 1.5], 'skip'), { '0': 'skip' })
+  })
+
+  it('setAllVerdicts can target the whole state or a whitelist', () => {
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep', '1': 'keep' }
+    assert.deepEqual(setAllVerdicts(state, 'skip'), { '0': 'skip', '1': 'skip' })
+    assert.deepEqual(setAllVerdicts(state, 'ignore', [0]), { '0': 'ignore', '1': 'keep' })
+  })
+})
+
+// ─── History & trend ─────────────────────────────────────────────────────────
+
+describe('history & trend', () => {
+  it('buildRoundHistory produces per-round counts with severity breakdown', () => {
+    const report = makeReport()
+    const history = buildRoundHistory(report)
+    assert.equal(history.length, 2)
+    assert.deepEqual(history[0], { round: 1, count: 1, critical: 0, high: 1, medium: 0, low: 0 })
+    assert.deepEqual(history[1], { round: 2, count: 1, critical: 1, high: 0, medium: 0, low: 0 })
+  })
+
+  it('buildFindingTrend prefers convergence.findingsByRound', () => {
+    const report = makeReport()
+    assert.deepEqual(buildFindingTrend(report), [
+      { round: 1, count: 1 },
+      { round: 2, count: 1 },
+      { round: 3, count: 0 },
+    ])
+  })
+
+  it('computeTrendMetrics derives reduction and convergence', () => {
+    const report = makeReport()
+    const metrics = computeTrendMetrics(report)
+    assert.equal(metrics.total, 2)
+    assert.equal(metrics.firstRound, 1)
+    assert.equal(metrics.lastRound, 0)
+    assert.equal(metrics.reductionPercent, 100)
+    assert.equal(metrics.converged, true)
+  })
+
+  it('computeTrendMetrics handles an empty trend without division by zero', () => {
+    const metrics = computeTrendMetrics(normalizeReport({ convergence: {}, rounds: [], findings: [] }))
+    assert.equal(metrics.firstRound, 0)
+    assert.equal(metrics.reductionPercent, 0)
+  })
+
+  it('trendMax returns a positive baseline even for an empty / all-zero series', () => {
+    assert.equal(trendMax([]), 1)
+    assert.equal(trendMax([{ round: 1, count: 0 }]), 1)
+    assert.equal(trendMax([{ round: 1, count: 3 }, { round: 2, count: 7 }]), 7)
+  })
+})
+
+// ─── Completion summary / config guide / shortcuts ───────────────────────────
+
+describe('completion & guidance helpers', () => {
+  it('buildCompletionSummary describes convergence or max rounds', () => {
+    const report = makeReport()
+    assert.match(buildCompletionSummary(report), /2\/3 轮/)
+    assert.match(buildCompletionSummary(report), /已收敛/)
+    const notConverged = normalizeReport({
+      convergence: { totalRounds: 3, converged: false },
+      rounds: [{ round: 1, findings: [makeFinding()] }],
+      findings: [makeFinding()],
+    })
+    assert.match(buildCompletionSummary(notConverged), /已达最大轮数 3/)
+  })
+
+  it('buildConfigEditGuide lists the editable fields', () => {
+    const guide = buildConfigEditGuide()
+    assert.match(guide, /iterate.config.yaml/)
+    assert.match(guide, /max_rounds/)
+    assert.match(guide, /atomic.max_lines/)
+    assert.match(guide, /iterate_config/)
+  })
+
+  it('buildConfigEditInstruction serializes the desired update', () => {
+    const text = buildConfigEditInstruction({ max_rounds: 5, dimensions: ['correctness'] })
+    assert.match(text, /iterate_config/)
+    assert.match(text, /"operation": "write"/)
+    assert.match(text, /"max_rounds": 5/)
+  })
+
+  it('keyToVerdict maps y/n/a shortcuts and returns null otherwise', () => {
+    assert.equal(keyToVerdict('y'), 'keep')
+    assert.equal(keyToVerdict('Y'), 'keep')
+    assert.equal(keyToVerdict('n'), 'skip')
+    assert.equal(keyToVerdict('a'), 'ignore')
+    assert.equal(keyToVerdict('ArrowDown'), null)
+    assert.equal(keyToVerdict('x'), null)
   })
 })

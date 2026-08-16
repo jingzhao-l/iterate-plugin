@@ -3,18 +3,24 @@
  *
  * This teaches the model how to write a correct `workflow` script that
  * performs the iterate autonomous closed-loop (or dry-run pure review),
- * using the 5 registered tools via subagents.
+ * using the registered tools via subagents.
  */
 
 export const ITERATE_SKILL_PROMPT = `
 ## Iterate Workflow (autonomous code iteration)
 
 You have the iterate plugin installed, which registers these tools:
-- \`iterate_config\` — read iterate.config.yaml (dimensions, validation commands, personalization)
+- \`iterate_config\` — read iterate.config.yaml (dimensions, validation commands, personalization) or write a validated partial update (operation:"write", with automatic backup + rollback)
 - \`iterate_validate\` — run a whitelisted validation command
-- \`iterate_decision_log\` — append to the decision log
+- \`iterate_decision_log\` — append to the decision log, or read entries back for review
 - \`iterate_context\` — read SKILL.md / ITERATE.md project context
 - \`iterate_review\` — deterministic review engine: \`plan\` builds the review plan; \`aggregate\` dedupes/merges findings and computes convergence. Purely computational.
+- \`iterate_triage\` — manage "known_intentional" entries in the config (list / apply, with dedupe + backup + rollback)
+- \`iterate_fix\` — apply ONE atomic fix: backs up the file, enforces the atomic max_lines threshold, writes the new content, and records the fix (id + diff summary) in \`.iterate/fixes/registry.json\`
+- \`iterate_diff\` — show the accumulated diff for a fixed file (vs its original backup) or a per-file summary of all fixes
+- \`iterate_rollback\` — revert a fix by id: restore the file from its backup, remove the fix from the registry, log a \`revert\` entry. Use when a round's validation fails
+- \`iterate_checkpoint\` — save / load / clear an iteration checkpoint (\`.iterate/checkpoint.json\`) so a long run can resume where it left off
+- \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence
 
 ### When to use
 When the user asks to review or iterate on the project (e.g. "review this project", "iterate on error handling", "check the codebase for issues", "dry-run review", "反复审查"), run an iterate **workflow** by calling the \`workflow\` tool.
@@ -121,11 +127,20 @@ Key rules for dry-run:
 - Only a single \`report\` entry may be appended to the decision log; nothing else is written.
 
 ### Normal-mode workflow (autonomous closed loop)
-Set \`args.mode = "normal"\`. Loop: plan → parallel review ×N → fix atomic issues → validate → loop → auto-stop when zero findings remain.
+Set \`args.mode = "normal"\`. Loop: resume → plan → parallel review ×N → atomic fixes via \`iterate_fix\` → validate → rollback on failure → checkpoint → loop → auto-stop when zero findings remain.
 Canonical script — reproduce this structure exactly (adjust dims via the plan):
 
 \`\`\`js
 // args = { mode: "normal", maxRounds? }
+phase('resume')
+// If a previous run was interrupted, resume from its checkpoint instead of restarting.
+const ckRes = await agent(
+  'Call iterate_checkpoint({ operation: "load" }) and return the checkpoint JSON.',
+  { label: 'checkpoint:load' }
+)
+const checkpoint = (ckRes && ckRes.checkpoint) ? ckRes.checkpoint : null
+const startRound = (checkpoint && typeof checkpoint.round === 'number') ? checkpoint.round + 1 : 1
+
 phase('plan')
 const configRes = await agent(
   'Call iterate_config({ validate: true }) and return the config JSON.',
@@ -144,12 +159,14 @@ const dims = plan.dimensions.map(d => d.id)
 const maxRounds = plan.maxReviewRounds
 const rounds = []          // findings per review round (each on the then-current code state)
 const architectural = []   // findings deliberately left unfixed (reported at the end)
-let fixedCount = 0
+let fixedCount = (checkpoint && typeof checkpoint.fixedCount === 'number') ? checkpoint.fixedCount : 0
 let converged = false
+let abortedByValidation = false
+let failedCommands = []
 
 phase('loop')
-for (let r = 1; r <= maxRounds; r++) {
-  log('round ' + r + ' of ' + maxRounds + ' — review current state, fix atomics, validate')
+for (let r = startRound; r <= maxRounds; r++) {
+  log('round ' + r + ' of ' + maxRounds + ' — review current state, fix atomics via iterate_fix, validate')
   const raw = await parallel(dims.map(dim => () => agent(
     'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed). ' +
     'Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + '\\nReturn the findings JSON object.',
@@ -167,18 +184,34 @@ for (let r = 1; r <= maxRounds; r++) {
   const atomic = findings.filter(f => f.is_atomic === true)
   const remaining = findings.filter(f => f.is_atomic !== true)
 
+  const roundFixIds = []
   if (atomic.length > 0) {
-    // Group atomic fixes by file. All edits to the SAME file are applied by a
-    // single fixer agent (serial within a file), avoiding concurrent-write
-    // races; different files still run in parallel.
+    // Group atomic fixes by file. One fixer agent handles a whole file serially —
+    // calling iterate_fix per finding (the ONLY sanctioned writer), then
+    // iterate_diff to verify — so the same file is never edited concurrently;
+    // different files still run in parallel.
     const byFile = {}
     atomic.forEach(f => { (byFile[f.file] = byFile[f.file] || []).push(f) })
-    await parallel(Object.keys(byFile).map(file => () => agent(
-      'Apply ALL of these fixes to ' + file + ' in ONE pass with the smallest possible changes ' +
-      '(each <= ' + atomicMaxLines + ' lines, single function). ' + JSON.stringify(byFile[file]) + '. Verify the edit locally before finishing.',
-      { label: 'fix:' + file, phase: 'fix' }
+    const fixRes = await parallel(Object.keys(byFile).map(file => () => agent(
+      'Apply the fixes for ' + file + ' using iterate_fix. For EACH finding in this list, ' +
+      'read the current file, compute the edited full content (change <= ' + atomicMaxLines + ' lines), and call ' +
+      'iterate_fix({ file: "' + file + '", content: <full new file content>, finding: <that finding>, round: ' + r + ' }). ' +
+      'Apply the findings IN ORDER. After all fixes, call iterate_diff({ file: "' + file + '" }) to verify the accumulated diff. ' +
+      'Findings: ' + JSON.stringify(byFile[file]) + '. Return the array of {id, ok, error} per iterate_fix call.',
+      { label: 'fix:' + file, phase: 'fix', schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          fixes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' } }, required: ['id', 'ok'] } }
+        },
+        required: ['fixes'] } }
     )))
-    fixedCount += atomic.length
+    for (const res of fixRes) {
+      if (res && Array.isArray(res.fixes)) {
+        for (const fx of res.fixes) {
+          if (fx && fx.ok === true) { fixedCount += 1; roundFixIds.push(fx.id) }
+        }
+      }
+    }
   }
 
   // Cross-round dedupe of architectural findings before accumulating.
@@ -188,14 +221,49 @@ for (let r = 1; r <= maxRounds; r++) {
     if (seenKeys.indexOf(key) < 0) { architectural.push(f); seenKeys.push(key) }
   }
 
-  await agent(
-    'Call iterate_validate for each command in iterate.config.yaml validation.commands and return all {command, exitCode} results.',
-    { label: 'validate:r' + r, phase: 'validate' }
+  // Validate every configured command; on ANY failure roll back this round's fixes.
+  const valRes = await agent(
+    'Read iterate.config.yaml validation.commands, then call iterate_validate({ command: <cmd> }) for EACH configured command ' +
+    '(one tool call per command). Return all results as {command, exitCode} entries.',
+    { label: 'validate:r' + r, phase: 'validate', schema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        results: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { command: { type: 'string' }, exitCode: { type: 'integer' } }, required: ['command', 'exitCode'] } }
+      },
+      required: ['results'] } }
   )
+  failedCommands = (valRes && Array.isArray(valRes.results)) ? valRes.results.filter(v => v.exitCode !== 0).map(v => v.command) : []
+  if (failedCommands.length > 0) {
+    log('round ' + r + ' validation FAILED on: ' + failedCommands.join(', ') + ' — rolling back this round')
+    abortedByValidation = true
+    if (roundFixIds.length > 0) {
+      await agent(
+        'Call iterate_rollback({ id: <id> }) for EACH of these fix ids (one call per id): ' + JSON.stringify(roundFixIds) + '. Return the array of {id, ok, error}.',
+        { label: 'rollback:r' + r, phase: 'rollback', schema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            results: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' } }, required: ['id', 'ok'] } }
+          },
+          required: ['results'] } }
+      )
+    }
+    await agent(
+      'Call iterate_decision_log({operation:"append", type:"round_failed", round:' + r + ', data:{failedCommands:' + JSON.stringify(failedCommands) + ', rolledBack:' + roundFixIds.length + '}})',
+      { label: 'log:failed:r' + r }
+    )
+    break
+  }
+
   await agent(
     'Call iterate_decision_log({operation:"append", type:"review_result", round:' + r +
     ', data:{atomic:' + atomic.length + ', architectural:' + remaining.length + ', fixedSoFar:' + fixedCount + '}})',
     { label: 'log:r' + r }
+  )
+
+  // Persist progress so an interrupted run can resume from the next round.
+  await agent(
+    'Call iterate_checkpoint({ operation: "save", mode: "normal", round:' + r + ', maxRounds:' + maxRounds + ', fixedCount:' + fixedCount + ', architecturalCount:' + architectural.length + ', findings:' + JSON.stringify(architectural) + ' }) and return the checkpoint JSON.',
+    { label: 'checkpoint:save:r' + r }
   )
 
   if (atomic.length === 0 && remaining.length === 0) {
@@ -211,25 +279,50 @@ await agent(
   ', data:{mode:"normal", fixed:' + fixedCount + ', architectural:' + architectural.length + '}})',
   { label: 'report:log' }
 )
+const statusRes = await agent(
+  'Call iterate_status() and return the status JSON.',
+  { label: 'status:final' }
+)
+const status = (statusRes && statusRes.ok) ? statusRes : null
+if (!abortedByValidation) {
+  // Iteration finished cleanly → clear the checkpoint so the next run starts fresh.
+  await agent(
+    'Call iterate_checkpoint({ operation: "clear" }) and return {ok, existed}.',
+    { label: 'checkpoint:clear' }
+  )
+}
 return {
   mode: 'normal',
   goal: plan.goal,
   roundsExecuted: rounds.length,
   maxRounds: maxRounds,
   converged: converged,
+  abortedByValidation: abortedByValidation,
+  failedCommands: failedCommands,
   findingsFixed: fixedCount,
   remainingArchitecturalCount: architectural.length,
-  remainingArchitectural: architectural
+  remainingArchitectural: architectural,
+  status: status ? {
+    currentRound: status.currentRound,
+    totalRounds: status.totalRounds,
+    fixedCount: status.fixedCount,
+    architecturalCount: status.architecturalCount,
+    findingsCount: status.findingsCount,
+    hasCheckpoint: status.hasCheckpoint
+  } : null
 }
 \`\`\`
 
 Key rules for normal mode:
-- Fixers are the ONLY agents allowed to write files; reviewers read only. Architectural findings are reported, never auto-fixed.
+- Fixers are the ONLY agents allowed to write files, and they must go through \`iterate_fix\` — never edit files directly. That is what gives every change a backup, a diff, and a rollback path. Reviewers read only. Architectural findings are reported, never auto-fixed.
 - Aggregate the current round deterministically (\`report.findings\`) before fixing, so fixes act on deduped/filtered/sorted findings.
-- Apply atomic fixes **per file**: one fixer agent handles all findings for a given file serially, so the same file is never edited concurrently; different files are fixed in parallel.
-- Validate after every round of fixes; validation results are logged, not silently dropped.
+- Apply atomic fixes **per file**: one fixer agent handles all findings for a given file serially (so the same file is never edited concurrently); different files are fixed in parallel.
+- **Resume**: load the checkpoint first; if a previous run left one, continue from \`checkpoint.round + 1\` (its \`fixedCount\` and deduped \`findings\` are carried forward).
+- **Validate after every round** of fixes; on ANY validation failure, roll back the round's fixes via \`iterate_rollback\` and stop (the checkpoint is left in place so the run can be resumed).
+- **Checkpoint after every round**; clear it only when the iteration completes cleanly.
 - Stop when a round produces nothing to fix (converged) or maxReviewRounds is reached.
-- Every round and the final report go to the append-only decision log.
+- Every round, every rollback, and the final report go to the append-only decision log.
+- Close with \`iterate_status\` metrics and surface the convergence indicators (fixed count, remaining architectural count, abort reason) in the final summary.
 
 ### Finding schema (for reviewer agents)
 { "dimension": string, "file": string (relative path), "line": number (optional),
