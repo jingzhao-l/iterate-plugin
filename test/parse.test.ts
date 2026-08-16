@@ -182,7 +182,7 @@ describe('normalizeReport', () => {
       high: number
       medium: number
       low: number
-      byDimension: Record<string, number>
+      byDimension: { correctness: number; security: number }
     } // partial: severity counts missing
     const snapshot = JSON.stringify(report)
     const norm = normalizeReport(report)
