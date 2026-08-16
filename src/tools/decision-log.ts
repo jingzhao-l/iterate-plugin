@@ -82,6 +82,16 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
           description:
             'Entry type (required for append): round_start, review_result, atomic_fix, ' +
             'architectural_fix, revert, validation, decision, report.',
+          enum: [
+            'round_start',
+            'review_result',
+            'atomic_fix',
+            'architectural_fix',
+            'revert',
+            'validation',
+            'decision',
+            'report',
+          ],
         },
         round: {
           type: 'integer',

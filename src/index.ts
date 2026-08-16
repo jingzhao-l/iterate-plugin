@@ -2,11 +2,11 @@
  * iterate-plugin — dsh plugin for the iterate autonomous closed-loop workflow
  *
  * Architecture:
- * - The plugin registers 4 tools (config, validate, decision-log, context)
+ * - The plugin registers 5 tools (config, validate, decision-log, context, review)
  * - The plugin injects a system prompt section teaching the iterate workflow pattern
  * - The model (prompted by the skill) writes a workflow script using dsh's `workflow` tool
  * - The workflow script uses `agent()` / `parallel()` / `phase()` / `log()` to orchestrate
- * - Subagents use the 4 tools to do real work (read config, run validation, log decisions)
+ * - Subagents use the 5 tools to do real work (read config, run validation, log decisions, review)
  *
  * Tool invocation model:
  * - Workflow script CANNOT call tools directly (sandboxed vm, no Node API)
@@ -16,7 +16,7 @@
  *
  * Key files:
  * - src/index.ts      — Plugin entry: register tools + inject skill prompt
- * - src/tools/        — 4 tool implementations
+ * - src/tools/        — 5 tool implementations + meta-review/review engines
  * - src/config-loader.ts — YAML config loading
  * - src/types.ts     — Shared types
  */
