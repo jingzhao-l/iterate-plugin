@@ -37,6 +37,7 @@
   "files": [
     "src",
     "lib",
+    "dist",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -44,11 +45,13 @@
   "exports": {
     ".": {
       "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "default": "./dist/index.js"
     },
     "./client": "./lib/client.js"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "test:validate": "tsx --test test/validate.test.ts"

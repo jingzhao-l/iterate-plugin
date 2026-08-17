@@ -1,0 +1,3 @@
+# iterate-plugin: dist/ 是宿主编译产物，dsh `github:owner/repo#ref` 安装是 git clone，
+# 直接加载源码（Node 26 不擦除 node_modules 下 TS 类型），故 dist 必须入库随包分发。
+!dist/
