@@ -12,6 +12,9 @@ const CONFIG_FILE = 'iterate.config.yaml'
 const PERSONALIZATION_KEY = 'personalization'
 const KNOWN_INTENTIONAL_KEY = 'known_intentional'
 
+/** Max entries per single `apply` call. */
+const MAX_ENTRIES = 500
+
 /** Whole-file marker line (matches review.ts filterKnownIntentional semantics). */
 const WHOLE_FILE_LINE = 0
 
@@ -43,6 +46,10 @@ export function validateTriageEntries(entries: unknown): string[] {
   const errors: string[] = []
   if (!Array.isArray(entries)) {
     errors.push('entries must be an array')
+    return errors
+  }
+  if (entries.length > MAX_ENTRIES) {
+    errors.push(`entries must not exceed ${MAX_ENTRIES} items (got ${entries.length})`)
     return errors
   }
   for (let i = 0; i < entries.length; i++) {

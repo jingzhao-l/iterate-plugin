@@ -30,6 +30,8 @@ import { registerReviewTool } from './tools/review.ts'
 import { registerTriageTool } from './tools/triage.ts'
 import { registerFixTool, registerDiffTool, registerRollbackTool } from './tools/fix.ts'
 import { registerCheckpointTool, registerStatusTool } from './tools/checkpoint.ts'
+import { registerHistoryTool } from './tools/history.ts'
+import { registerPruneTool } from './tools/prune.ts'
 import { ITERATE_SKILL_PROMPT } from './skill-prompt.ts'
 
 export const name = 'iterate-plugin'
@@ -48,6 +50,8 @@ export function apply(ctx: Context): void {
   registerRollbackTool(ctx)
   registerCheckpointTool(ctx)
   registerStatusTool(ctx)
+  registerHistoryTool(ctx)
+  registerPruneTool(ctx)
 
   // 2. Inject the iterate skill prompt as a system prompt section
   // This teaches the model how to write iterate workflow scripts using the tools.

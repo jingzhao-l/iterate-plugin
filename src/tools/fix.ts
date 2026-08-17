@@ -26,6 +26,11 @@ import { fixBackupPath, fixRegistryPath, fixesDir } from '../paths.ts'
 import { appendDecisionEntry } from './decision-log.ts'
 import type { FileDiffHunk, FixRecord, FixRegistry, ReviewFinding } from '../types.ts'
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+/** Upper bound for a single fix `content` payload (characters). */
+export const MAX_FIX_CONTENT_CHARS = 1_000_000
+
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
 
 /**
@@ -288,6 +293,12 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         const file = typeof args.file === 'string' ? args.file : ''
         if (!file) return { ok: false, error: 'file is required' }
         if (typeof args.content !== 'string') return { ok: false, error: 'content must be a string' }
+        if (args.content.length > MAX_FIX_CONTENT_CHARS) {
+          return {
+            ok: false,
+            error: `content exceeds the ${MAX_FIX_CONTENT_CHARS}-character limit (got ${args.content.length})`,
+          }
+        }
         if (typeof args.round !== 'number' || !Number.isInteger(args.round) || args.round < 1) {
           return { ok: false, error: 'round must be a positive integer' }
         }

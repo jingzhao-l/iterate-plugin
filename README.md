@@ -2,7 +2,7 @@
 
 > **开发与评审在 [iterate-skill 主仓库](https://github.com/jingzhao-l/iterate-skill) 完成**：插件代码由主仓库统一维护，通过 `git subtree` 同步到本仓库；**版本发版与 npm 发布在本仓库（插件仓库）进行**，作为 dsh 生态的正式发布位。欢迎 **star / fork 主仓库** 并在 [主仓库 Issues](https://github.com/jingzhao-l/iterate-skill/issues) 反馈问题。
 
-`iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 技能的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件，提供**自治闭环代码迭代**和 **dry-run 纯多轮审查**能力。除 11 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。
+`iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 技能的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件，提供**自治闭环代码迭代**和 **dry-run 纯多轮审查**能力。除 13 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。
 
 ## 特性
 
@@ -24,22 +24,24 @@
 
 ### 工具层
 
-- **11 个注册工具**：`iterate_config` / `iterate_validate` / `iterate_decision_log` / `iterate_context` / `iterate_review` / `iterate_triage` / `iterate_fix` / `iterate_diff` / `iterate_rollback` / `iterate_checkpoint` / `iterate_status`
+- **13 个注册工具**：`iterate_config` / `iterate_validate` / `iterate_decision_log` / `iterate_context` / `iterate_review` / `iterate_triage` / `iterate_fix` / `iterate_diff` / `iterate_rollback` / `iterate_checkpoint` / `iterate_status` / `iterate_history` / `iterate_prune`
 - **findings 分诊闭环**：审查 → UI 分诊（y/n/a）→ `iterate_triage` 写回 `known_intentional` → 下一轮自动过滤
 - **结构化修复系统**：每次修复先备份、写注册表、记录 diff，验证失败可 `iterate_rollback` 还原
 - **断点续跑**：长迭代在每轮开头保存 checkpoint，中断后可恢复进度
+- **历史审计**：`iterate_history` 读取决策日志（按类型/时间/数量过滤）与修复注册表汇总，审查运行过程与修复明细
+- **运行时清理**：`iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份与空轮次；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
 - **配置读写**：`iterate_config` 支持带校验、备份、回滚的局部写入
 
 ### UI 层（客户端免构建槽位）
 
 | UI 组件 | 挂载槽位 | 功能 |
 |---------|---------|------|
-| 收敛看板 `ConvergenceDashboard` | `conversation.input.dock` | 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图 |
-| Findings 分诊面板 `TriagePanel` | `conversation.chat.turnTail` | 逐条 y/n/a 判定，支持筛选、批量、键盘快捷键、localStorage 持久化、复制 YAML/应用指令 |
+| 收敛看板 `ConvergenceDashboard` | `conversation.input.dock` | 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图，normal 模式另显示修复计数徽章 |
+| Findings 分诊面板 `TriagePanel` | `conversation.chat.turnTail` | 逐条 y/n/a 判定，支持筛选、批量（含一键全选所有 findings）、键盘快捷键、localStorage 持久化、复制 YAML/应用指令 |
 | 收敛统计卡片 `StatsCard` | `conversation.chat.turnTail` | 无 findings 时显示收敛统计、历史轮次表、趋势图、完成摘要 |
 | iterate 主题皮肤 | `theme.overrideTokens` | 暖琥珀配色的 13 个 dsw token 覆盖，明暗双模式，可在设置页开关 |
 | 进度胶囊 `ProgressCapsule` | `shell.overlay` | 每轮完成/收敛时右下角弹出通知（含收敛确认） |
-| iterate 设置区 `SettingsPanel` | `settings.section` | 主题开关、分诊持久化说明、配置管理指引 |
+| iterate 设置区 `SettingsPanel` | `settings.section` | 主题开关、分诊持久化说明、配置管理指引、运行时状态概览（产物布局 + 查看/清理工具指引）、一键清空分诊数据 |
 
 UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自动降级，不会崩溃客户端。
 
@@ -140,7 +142,7 @@ validation:
 
 > 配置可通过 `iterate_config` 工具读取与**校验式局部写入**（自动备份，写入失败自动回滚）。
 
-## 注册工具（11 个）
+## 注册工具（13 个）
 
 | 工具 | 功能 |
 |------|------|
@@ -155,6 +157,8 @@ validation:
 | `iterate_rollback` | 回滚一个已应用的修复：从备份还原文件、从注册表移除该 FixRecord、追加 `revert` 日志。用于某轮验证失败后 |
 | `iterate_checkpoint` | 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`clear` 清除。长迭代可中断续跑 |
 | `iterate_status` | 汇总当前迭代状态：模式、当前轮/总轮、已修复数、剩余 architectural、决策日志条数、是否存在 checkpoint |
+| `iterate_history` | 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数）。用于审查运行过程、审计日志、盘点修复 |
+| `iterate_prune` | 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志 |
 
 ## 运行时产物布局
 
@@ -173,10 +177,10 @@ validation:
 
 插件遵循 dsh "everything-is-a-plugin" 架构：
 
-- **只做两件事**：注入系统 prompt 教模型写 iterate workflow + 注册 11 个纯函数工具
+- **只做两件事**：注入系统 prompt 教模型写 iterate workflow + 注册 13 个纯函数工具
 - **所有 orchestration 通过 dsh 原生 `workflow` + `agent` + `parallel` 完成**
-- **核心逻辑全部纯函数**（去重/过滤/排序/收敛/meta-audit/diff 计算），可单元测试，无 I/O
-- **安全模型**：文件写入限定在解析后的项目根目录内（路径遍历防护）；写文件前必备份，失败回滚；配置写入同样备份 + 回滚
+- **核心逻辑全部纯函数**（去重/过滤/排序/收敛/meta-audit/diff 计算/历史过滤/清理报告），可单元测试，无 I/O
+- **安全模型**：文件写入限定在解析后的项目根目录内（路径遍历防护）；写文件前必备份，失败回滚；配置写入同样备份 + 回滚；`iterate_prune` 默认 dry-run、只清理 `.iterate/` 下产物、每次清理写日志；`iterate_fix` 对 content 设字符上限、`iterate_triage` 对 entries 设数量上限，防止异常超大负载
 - **UI 免构建**：`lib/client.js` 用 `React.createElement` 树 + 注入 `<style>` 标签，全部颜色走 `--dsw-*` 令牌，缺服务自动降级
 - 遵循 iterate 原技能的设计原则：确定性收敛，可审计，最小权限
 
@@ -191,8 +195,8 @@ npm test
 
 所有测试通过：
 
-- **177 个单元测试全绿**，类型检查通过
-- 覆盖：去重、过滤、排序、多轮收敛、meta-review 审计、路径安全、超时钳制、配置读写与回滚、triage 合并、diff 计算、checkpoint 校验、修复注册表等
+- **212 个单元测试全绿**，类型检查通过
+- 覆盖：去重、过滤、排序、多轮收敛、meta-review 审计、路径安全、超时钳制、配置读写与回滚、triage 合并、diff 计算、checkpoint 校验、修复注册表、历史读取与过滤、prune 清理报告与 dry-run 语义、UI 纯函数（select-all 键、运行时状态指引）等
 
 ## License
 

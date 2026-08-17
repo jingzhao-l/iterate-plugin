@@ -34,6 +34,9 @@ import {
   buildConfigEditGuide,
   buildConfigEditInstruction,
   keyToVerdict,
+  allVerdictKeys,
+  RUNTIME_ARTIFACTS,
+  buildRuntimeStatusGuide,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -482,5 +485,45 @@ describe('completion & guidance helpers', () => {
     assert.equal(keyToVerdict('a'), 'ignore')
     assert.equal(keyToVerdict('ArrowDown'), null)
     assert.equal(keyToVerdict('x'), null)
+  })
+})
+
+// ─── Select-all keys & runtime status guide ──────────────────────────────────
+
+describe('select-all keys & runtime status guide', () => {
+  it('allVerdictKeys returns all numeric indices sorted ascending', () => {
+    assert.deepEqual(allVerdictKeys({ 3: 'keep', 0: 'skip', 1: 'ignore' }), [0, 1, 3])
+  })
+
+  it('allVerdictKeys ignores non-numeric and negative keys', () => {
+    assert.deepEqual(allVerdictKeys({ '-1': 'keep', foo: 'skip', 2: 'ignore' }), [2])
+  })
+
+  it('allVerdictKeys handles null / undefined / non-object input', () => {
+    assert.deepEqual(allVerdictKeys(null), [])
+    assert.deepEqual(allVerdictKeys(undefined), [])
+    assert.deepEqual(allVerdictKeys({} as Record<string, 'keep' | 'skip' | 'ignore'>), [])
+  })
+
+  it('RUNTIME_ARTIFACTS covers the four expected artifacts', () => {
+    const keys = RUNTIME_ARTIFACTS.map((a) => a.key)
+    assert.deepEqual(keys, ['decision-log.jsonl', 'checkpoint.json', 'fixes/registry.json', 'fixes/*.bak'])
+    for (const a of RUNTIME_ARTIFACTS) {
+      assert.equal(typeof a.label, 'string')
+      assert.ok(a.label.length > 0)
+      assert.equal(typeof a.hint, 'string')
+      assert.ok(a.hint.length > 0)
+    }
+  })
+
+  it('buildRuntimeStatusGuide mentions artifacts and inspect/prune tools', () => {
+    const guide = buildRuntimeStatusGuide()
+    assert.match(guide, /\.iterate\//)
+    assert.match(guide, /decision-log\.jsonl/)
+    assert.match(guide, /checkpoint\.json/)
+    assert.match(guide, /iterate_status/)
+    assert.match(guide, /iterate_history/)
+    assert.match(guide, /iterate_prune/)
+    assert.match(guide, /dry-run/)
   })
 })
