@@ -55,6 +55,16 @@ dsh plugin --profile web add iterate-plugin
 pnpm add iterate-plugin
 ```
 
+### 从 GitHub 安装（dsh 生态第三方安装方式）
+
+dsh 官方支持从 GitHub 插件仓库直接安装：`dsh plugin --profile web add "github:owner/repo#ref"`（仓库根即插件，声明 `dsh.bundle` 后自动启用）。本插件在 [iterate-plugin 独立仓库](https://github.com/jingzhao-l/iterate-plugin) 维护仓库根即插件的发布位，由主仓库通过 `git subtree` 同步，内容与 npm 包一致：
+
+```bash
+dsh plugin --profile web add "github:jingzhao-l/iterate-plugin#main"
+```
+
+安装完成后需重启 dsh 服务（建议 `dsh web --patch`）并刷新页面，宿主与客户端 UI 层才会加载。
+
 ### 本地开发 / 源码挂载
 
 ```bash
