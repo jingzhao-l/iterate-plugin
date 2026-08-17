@@ -2,7 +2,7 @@
 
 > **开发与评审在 [iterate-skill 主仓库](https://github.com/jingzhao-l/iterate-skill) 完成**：插件代码由主仓库统一维护，通过 `git subtree` 同步到本仓库；**版本发版与 npm 发布在本仓库（插件仓库）进行**，作为 dsh 生态的正式发布位。欢迎 **star / fork 主仓库** 并在 [主仓库 Issues](https://github.com/jingzhao-l/iterate-skill/issues) 反馈问题。
 
-`iterate-plugin` 是 [iterate](https://github.com/iterate-skill/iterate-skill) 技能的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件，提供**自治闭环代码迭代**和 **dry-run 纯多轮审查**能力。除 11 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。
+`iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 技能的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件，提供**自治闭环代码迭代**和 **dry-run 纯多轮审查**能力。除 11 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。
 
 ## 特性
 
