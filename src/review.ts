@@ -106,7 +106,12 @@ export function filterKnownIntentional(
  * Merge per-round findings into one globally-deduped stream while tracking
  * which round first surfaced each finding. This is the deterministic core of
  * "反复多轮审查直至收敛":
- *  - `findingsByRound[r]` = number of GLOBALLY new findings first seen in round r
+ *  - `findingsByRound` = number of GLOBALLY new findings first seen in round r,
+ *    indexed by the actual `round` number (round r → index r-1). The array is
+ *    sized to the highest round number encountered, so non-contiguous round
+ *    numbers (e.g. a resumed run that starts at round 5, or a caller that only
+ *    passes `[{round: 3}]`) still yield correct counts instead of being
+ *    collapsed onto wrong indices.
  *  - `converged` = the last executed round produced 0 new findings
  *  - `stoppedReason` = 'converged' | 'max_rounds_reached'
  */
@@ -122,7 +127,12 @@ export function aggregateRounds(
   const firstRoundByKey = new Map<string, number>()
   const merged: ReviewFinding[] = []
 
+  // Guard: round numbers are expected to be positive integers. Skip malformed
+  // entries defensively rather than letting `firstRoundByKey` key on NaN/0.
+  let maxRound = 0
   for (const round of rounds) {
+    if (typeof round.round !== 'number' || !Number.isInteger(round.round) || round.round < 1) continue
+    if (round.round > maxRound) maxRound = round.round
     for (const f of round.findings) {
       const key = findingKey(f)
       if (seen.has(key)) continue
@@ -133,7 +143,7 @@ export function aggregateRounds(
   }
 
   const findingsByRound: number[] = []
-  for (let r = 1; r <= rounds.length; r++) {
+  for (let r = 1; r <= maxRound; r++) {
     let count = 0
     for (const key of firstRoundByKey.keys()) {
       if (firstRoundByKey.get(key) === r) count++
@@ -153,7 +163,13 @@ export function computeConvergence(
 ): ReviewReport['convergence'] {
   const { findingsByRound } = aggregateRounds(rounds, maxReviewRounds)
   const totalRounds = rounds.length
-  const lastRoundCount = totalRounds > 0 ? findingsByRound[totalRounds - 1] ?? 0 : 0
+  // `findingsByRound` is indexed by the actual round number (round r → index
+  // r-1), so convergence must read the LAST PRESENT round's count using its
+  // reported round number — not `totalRounds - 1`, which is only valid for
+  // contiguous 1..N round numbers.
+  const lastRound = totalRounds > 0 ? rounds[totalRounds - 1]!.round : 0
+  const lastRoundCount =
+    lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0
   const converged = totalRounds > 0 && lastRoundCount === 0
   return {
     totalRounds,
@@ -218,6 +234,18 @@ export function buildReviewReport(input: {
   // 3. Severity sort the global result.
   const sorted = sortFindings(findings)
 
+  // 4. Convergence. Must be identical to `computeConvergence`: `findingsByRound`
+  //    is indexed by the actual round number (round r → index r-1) and sized to
+  //    the highest round, so convergence reads the LAST PRESENT round's count
+  //    using its reported round number — NOT `filteredRounds.length - 1`, which
+  //    is only valid for contiguous 1..N round numbers (resumed iterations and
+  //    non-contiguous round sets would otherwise read the wrong count).
+  const lastRound =
+    filteredRounds.length > 0 ? filteredRounds[filteredRounds.length - 1]!.round : 0
+  const lastRoundCount =
+    lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0
+  const converged = filteredRounds.length > 0 && lastRoundCount === 0
+
   return {
     mode: input.mode,
     goal: input.goal,
@@ -228,11 +256,11 @@ export function buildReviewReport(input: {
     convergence: {
       totalRounds: filteredRounds.length,
       findingsByRound,
-      converged: filteredRounds.length > 0 && (findingsByRound[filteredRounds.length - 1] ?? 0) === 0,
+      converged,
       stoppedReason:
         filteredRounds.length === 0
           ? 'max_rounds_reached'
-          : (findingsByRound[filteredRounds.length - 1] ?? 0) === 0
+          : converged
             ? 'converged'
             : 'max_rounds_reached',
     },

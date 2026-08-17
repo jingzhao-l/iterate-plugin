@@ -96,6 +96,26 @@ describe('metaReviewReport', () => {
     assert.ok(result.issues.some((i) => i.code === 'CONVERGENCE_FLAG'))
   })
 
+  it('does NOT false-flag CONVERGENCE_FLAG for non-contiguous round reports', () => {
+    // `findingsByRound` is index-by-round-number, so the flag must be checked
+    // against the LAST RECORDED round's count (round 3 → index 2 = 1 new), which
+    // matches buildReviewReport. ROUND_GAP may fire (the audit flags gaps), but
+    // CONVERGENCE_FLAG must stay consistent with the report's own computation.
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'Improve quality',
+      dimensions: ['correctness'],
+      maxReviewRounds: 5,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'first issue' })] },
+        { round: 3, findings: [f({ summary: 'new issue in resumed round 3' })] },
+      ],
+    })
+    const result = metaReviewReport(report)
+    assert.equal(report.convergence.converged, false)
+    assert.ok(!result.issues.some((i) => i.code === 'CONVERGENCE_FLAG'))
+  })
+
   it('detects a ROUND_GAP failure when the round sequence skips a number', () => {
     const report = goodReport()
     report.rounds = [{ round: 1, findings: [f({ summary: 'r1' })] }, { round: 3, findings: [f({ summary: 'r3' })] }]

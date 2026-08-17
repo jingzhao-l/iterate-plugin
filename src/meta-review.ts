@@ -205,7 +205,20 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
         `but totalFindings is ${total}.`,
     )
   }
-  const lastRoundNew = findingsByRound.length > 0 ? Number(findingsByRound[findingsByRound.length - 1]) : null
+  // `findingsByRound` is indexed by the actual round number (round r → index
+  // r-1), so the "last round" is the LAST RECORDED round's reported number, not
+  // the array's last index (the array is sized to the highest round, which only
+  // equals the record count for contiguous 1..N round numbers). Read the flag
+  // consistency the same way buildReviewReport/computeConvergence set it.
+  const reportRounds = Array.isArray(report.rounds) ? report.rounds : []
+  const lastRecordedRound =
+    reportRounds.length > 0 && typeof reportRounds[reportRounds.length - 1]?.round === 'number'
+      ? reportRounds[reportRounds.length - 1]!.round
+      : null
+  const lastRoundNew =
+    lastRecordedRound !== null && lastRecordedRound > 0
+      ? Number(findingsByRound[lastRecordedRound - 1] ?? 0)
+      : null
   const expectedConverged = lastRoundNew === 0
   if (report.convergence?.converged !== expectedConverged) {
     add(

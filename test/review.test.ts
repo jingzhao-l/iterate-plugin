@@ -248,6 +248,41 @@ describe('buildReviewReport', () => {
     )
     assert.equal(report.findings[0]?.summary, 'sql injection')
   })
+
+  it('computes convergence from the LAST RECORDED round number, not the array index', () => {
+    // Non-contiguous round numbers (e.g. a resumed iteration that skips earlier
+    // round numbers): findingsByRound is sized to the HIGHEST round, so the
+    // last round's count must be read by its reported number, not by
+    // `length - 1`. Round 3 found a new finding, so it must NOT converge.
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'Improve quality',
+      dimensions: ['correctness'],
+      maxReviewRounds: 5,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'first issue' })] },
+        { round: 3, findings: [f({ summary: 'new issue in resumed round 3' })] },
+      ],
+    })
+    assert.deepEqual(report.convergence.findingsByRound, [1, 0, 1])
+    assert.equal(report.convergence.totalRounds, 2)
+    assert.equal(report.convergence.converged, false)
+    assert.equal(report.convergence.stoppedReason, 'max_rounds_reached')
+    // And the mirror: when the last recorded round finds nothing new, converge.
+    const converged = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'Improve quality',
+      dimensions: ['correctness'],
+      maxReviewRounds: 5,
+      rounds: [
+        { round: 3, findings: [f({ summary: 'found in round 3' })] },
+        { round: 5, findings: [f({ summary: 'FOUND IN ROUND 3' })] }, // dup → 0 new
+      ],
+    })
+    assert.deepEqual(converged.convergence.findingsByRound, [0, 0, 1, 0, 0])
+    assert.equal(converged.convergence.converged, true)
+    assert.equal(converged.convergence.stoppedReason, 'converged')
+  })
 })
 
 describe('reviewer tasks & schema', () => {
