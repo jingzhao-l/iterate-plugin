@@ -2,7 +2,15 @@
 
 > **开发与评审在 [iterate-skill 主仓库](https://github.com/jingzhao-l/iterate-skill) 完成**：插件代码由主仓库统一维护，通过 `git subtree` 同步到本仓库；**版本发版与 npm 发布在本仓库（插件仓库）进行**，作为 dsh 生态的正式发布位。欢迎 **star / fork 主仓库** 并在 [主仓库 Issues](https://github.com/jingzhao-l/iterate-skill/issues) 反馈问题。
 
-`iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 技能的 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 插件，提供**自治闭环代码迭代**和 **dry-run 纯多轮审查**能力。除 13 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。
+## 这是什么 / About This Plugin
+
+**iterate** 是一个让 AI 编程助手具备多轮自主代码审查与修复能力的开源项目。它解决很具体的痛点：
+
+> AI 助手往往"说得多、做得浅"：一次对话只改几行、看过一个文件就不再管全局，也很少回头复核自己改坏的东西。iterate 把这些收尾工作——逐项审查、分维度排查、修复、验证、再迭代——自动化，让 AI 真正像资深工程师一样把改动做完、做对。
+
+`iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 项目在 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 桌面客户端中的落地插件。它把 iterate 的开环审查闭环（review → triage → fix → validate → 收敛）直接带进 dsh 的界面：提供**自治闭环代码迭代**（normal 模式）与 **dry-run 纯多轮审查**（只读）两种能力。
+
+除 13 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（技能 / 无头引擎）完全一致，迁移零成本。
 
 ## 特性
 
@@ -81,7 +89,7 @@ pnpm add /path/to/iterate-skill/harness/iterate-plugin
     name: 'iterate-plugin'
 ```
 
-> 插件包自带 `dsh.bundle.patch`（即 `cordis.patch.yml`），npm 包内 `files` 已白名单化（`src` / `lib` / `cordis.patch.yml` / `README.md` / `LICENSE`）。
+> 插件包自带 `dsh.bundle.patch`（即 `cordis.patch.yml`），npm 包内 `files` 已白名单化（`src` / `lib` / `dist` / `cordis.patch.yml` / `README.md` / `LICENSE`）。其中 `dist/` 为 TypeScript 服务端逻辑的编译产物，随包分发以兼容 dsh 的 `github:owner/repo#ref` git-clone 安装方式（Node 不擦除 `node_modules` 下的 TS 类型）。
 
 ## 使用
 
