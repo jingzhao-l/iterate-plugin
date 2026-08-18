@@ -62,6 +62,11 @@ export function registerReviewTool(ctx) {
                 description: 'For `meta-review`: the ReviewReport JSON (as returned by `aggregate`) to audit for ' +
                     'internal consistency and produce the final review report.',
             },
+            fixedCount: {
+                type: 'integer',
+                description: 'For `aggregate` (normal mode only): number of atomic fixes applied so far. ' +
+                    'Surfaces a running "fixes applied" metric on the report summary.',
+            },
             path: {
                 type: 'string',
                 description: 'Project root directory (default: current working directory).',
@@ -128,6 +133,7 @@ export function registerReviewTool(ctx) {
                     maxReviewRounds,
                     rounds,
                     knownIntentional: args.knownIntentional,
+                    fixedCount: typeof args.fixedCount === 'number' ? args.fixedCount : undefined,
                 });
                 return { operation: 'aggregate', mode, report: report };
             }

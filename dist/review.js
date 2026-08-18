@@ -208,6 +208,11 @@ export function buildReviewReport(input) {
     const lastRound = filteredRounds.length > 0 ? filteredRounds[filteredRounds.length - 1].round : 0;
     const lastRoundCount = lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0;
     const converged = filteredRounds.length > 0 && lastRoundCount === 0;
+    // Attach the normal-mode fix count to the summary (dry-run leaves it absent).
+    const computed = summarize(sorted);
+    if (input.mode === 'normal' && typeof input.fixedCount === 'number' && Number.isInteger(input.fixedCount)) {
+        computed.fixedCount = input.fixedCount;
+    }
     return {
         mode: input.mode,
         goal: input.goal,
@@ -225,7 +230,7 @@ export function buildReviewReport(input) {
                     ? 'converged'
                     : 'max_rounds_reached',
         },
-        summary: summarize(sorted),
+        summary: computed,
     };
 }
 /**

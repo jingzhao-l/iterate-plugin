@@ -13,13 +13,15 @@ You have the iterate plugin installed, which registers these tools:
 - \`iterate_validate\` — run a whitelisted validation command
 - \`iterate_decision_log\` — append to the decision log, or read entries back for review
 - \`iterate_context\` — read SKILL.md / ITERATE.md project context
-- \`iterate_review\` — deterministic review engine: \`plan\` builds the review plan; \`aggregate\` dedupes/merges findings and computes convergence. Purely computational.
+- \`iterate_review\` — deterministic review engine: \`plan\` builds the review plan; \`aggregate\` dedupes/merges findings and computes convergence; \`meta-review\` audits a built report for internal consistency (counts, buckets, sorting, convergence math) and returns a final report with an \`approved\` / \`needs_revision\` verdict. Purely computational.
 - \`iterate_triage\` — manage "known_intentional" entries in the config (list / apply, with dedupe + backup + rollback)
 - \`iterate_fix\` — apply ONE atomic fix: backs up the file, enforces the atomic max_lines threshold, writes the new content, and records the fix (id + diff summary) in \`.iterate/fixes/registry.json\`
 - \`iterate_diff\` — show the accumulated diff for a fixed file (vs its original backup) or a per-file summary of all fixes
 - \`iterate_rollback\` — revert a fix by id: restore the file from its backup, remove the fix from the registry, log a \`revert\` entry. Use when a round's validation fails
 - \`iterate_checkpoint\` — save / load / clear an iteration checkpoint (\`.iterate/checkpoint.json\`) so a long run can resume where it left off
 - \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence
+- \`iterate_history\` — inspect the runtime state in detail: decision-log entries and applied fixes (optionally scoped to a round or a fixed file)
+- \`iterate_prune\` — remove stale runtime artifacts (\`.iterate/\` entries). Defaults to a read-only dry-run that reports what WOULD be removed; pass \`dryRun:false\` to actually prune.
 
 ### When to use
 When the user asks to review or iterate on the project (e.g. "review this project", "iterate on error handling", "check the codebase for issues", "dry-run review", "反复审查"), run an iterate **workflow** by calling the \`workflow\` tool.
@@ -175,8 +177,10 @@ for (let r = startRound; r <= maxRounds; r++) {
   rounds.push(thisRound)
 
   // Deterministic dedupe / known_intentional filter / severity sort for this round.
+  // \`fixedCount\` is threaded into the report summary so the client dashboard can
+  // show a running "fixes applied" metric for normal mode.
   const agg = await agent(
-    'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
+    'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + ', fixedCount:' + fixedCount + '}) and return the report JSON.',
     { label: 'review:aggregate:r' + r }
   )
   const findings = (agg && agg.report && agg.report.findings) ? agg.report.findings : thisRound.findings

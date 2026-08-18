@@ -4,6 +4,34 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRoot } from "../config-loader.js";
 const LOG_DIR = '.iterate';
 const LOG_FILE = 'decision-log.jsonl';
+/** All valid DecisionLogEntry `type` values (must stay in sync with Types). */
+const VALID_ENTRY_TYPES = new Set([
+    'round_start',
+    'review_result',
+    'atomic_fix',
+    'architectural_fix',
+    'revert',
+    'round_failed',
+    'validation',
+    'decision',
+    'report',
+]);
+/**
+ * Validate a candidate (type, round, data) triple for an append operation.
+ * Returns an error string on failure, or null when the entry is well-formed.
+ */
+function validateEntryInput(type, round, data) {
+    if (typeof type !== 'string' || !VALID_ENTRY_TYPES.has(type)) {
+        return `type must be one of: ${[...VALID_ENTRY_TYPES].join(', ')}.`;
+    }
+    if (typeof round !== 'number' || !Number.isInteger(round) || round < 1) {
+        return 'round must be a positive integer.';
+    }
+    if (data !== undefined && data !== null && typeof data !== 'object') {
+        return 'data must be an object (or omitted).';
+    }
+    return null;
+}
 /**
  * Resolve the log file path, creating the directory if needed.
  */
@@ -73,13 +101,14 @@ export function registerDecisionLogTool(ctx) {
             type: {
                 type: 'string',
                 description: 'Entry type (required for append): round_start, review_result, atomic_fix, ' +
-                    'architectural_fix, revert, validation, decision, report.',
+                    'architectural_fix, revert, round_failed, validation, decision, report.',
                 enum: [
                     'round_start',
                     'review_result',
                     'atomic_fix',
                     'architectural_fix',
                     'revert',
+                    'round_failed',
                     'validation',
                     'decision',
                     'report',
@@ -132,17 +161,23 @@ export function registerDecisionLogTool(ctx) {
                 };
             }
             if (args.operation === 'append') {
-                if (!args.type || !args.round) {
+                const invalid = validateEntryInput(args.type, args.round, args.data);
+                if (invalid !== null) {
                     return {
                         operation: 'append',
-                        error: 'type and round are required for append operation.',
+                        error: invalid,
                     };
                 }
+                const type = args.type;
+                const round = args.round;
+                const data = args.data === undefined || args.data === null
+                    ? {}
+                    : args.data;
                 const entry = {
                     timestamp: new Date().toISOString(),
-                    round: args.round,
-                    type: args.type,
-                    data: args.data ?? {},
+                    round,
+                    type,
+                    data,
                 };
                 const result = appendDecisionEntry(projectRoot, entry);
                 return {

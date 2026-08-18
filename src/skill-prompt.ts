@@ -178,7 +178,7 @@ for (let r = startRound; r <= maxRounds; r++) {
   rounds.push(thisRound)
 
   // Deterministic dedupe / known_intentional filter / severity sort for this round.
-  // `fixedCount` is threaded into the report summary so the client dashboard can
+  // \`fixedCount\` is threaded into the report summary so the client dashboard can
   // show a running "fixes applied" metric for normal mode.
   const agg = await agent(
     'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + ', fixedCount:' + fixedCount + '}) and return the report JSON.',
