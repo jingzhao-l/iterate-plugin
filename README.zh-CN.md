@@ -7,6 +7,13 @@
 
 > **开发与评审在 [iterate-skill 主仓库](https://github.com/jingzhao-l/iterate-skill) 完成**：插件代码由主仓库统一维护，通过 `git subtree` 同步到本仓库；**版本发版与 npm 发布在本仓库（插件仓库）进行**，作为 dsh 生态的正式发布位。欢迎 **star / fork 主仓库** 并在 [主仓库 Issues](https://github.com/jingzhao-l/iterate-skill/issues) 反馈问题。
 
+<p align="center">
+  <a href="https://github.com/jingzhao-l/iterate-plugin"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-plugin?style=social&label=Star" alt="Stars"></a>
+  <a href="https://github.com/jingzhao-l/iterate-skill"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-skill?style=social&label=主仓库%20Star" alt="主仓库 Stars"></a>
+</p>
+
+> ⭐ 如果这个插件对你的 dsh 工作流有帮助，欢迎为主仓库点亮 Star，这是对开源维护最大的支持！
+
 ## 这是什么 / About This Plugin
 
 **iterate** 是一个让 AI 编程助手具备多轮自主代码审查与修复能力的开源项目。它解决很具体的痛点：

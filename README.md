@@ -7,6 +7,13 @@
 
 > **Developed and reviewed in the [iterate-skill monorepo](https://github.com/jingzhao-l/iterate-skill)**: the plugin code is maintained in the main repository and synced here via `git subtree`; **releases and npm publishing happen in this (plugin) repository**, which is the canonical publish point for the dsh ecosystem. Please **star / fork the main repository** and file issues at the [main repository Issues](https://github.com/jingzhao-l/iterate-skill/issues).
 
+<p align="center">
+  <a href="https://github.com/jingzhao-l/iterate-plugin"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-plugin?style=social&label=Star" alt="Stars"></a>
+  <a href="https://github.com/jingzhao-l/iterate-skill"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-skill?style=social&label=Main%20Repo%20Star" alt="Main Repo Stars"></a>
+</p>
+
+> ⭐ If this helps your dsh workflow, give the main repo a star — it means a lot!
+
 ## About This Plugin
 
 **iterate** is an open-source project that gives AI coding assistants the ability to review and fix code in multi-round autonomous loops. It targets a concrete pain point:
