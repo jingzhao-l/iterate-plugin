@@ -7,6 +7,10 @@ import {
   isReviewReport,
   findReportInObject,
   scanSessionForReport,
+  isRunSummary,
+  findRunSummaryInObject,
+  scanSessionForRunSummary,
+  extractVerdict,
   normalizeReport,
   computeConvergenceProgress,
   getCurrentRound,
@@ -525,5 +529,104 @@ describe('select-all keys & runtime status guide', () => {
     assert.match(guide, /iterate_history/)
     assert.match(guide, /iterate_prune/)
     assert.match(guide, /dry-run/)
+  })
+})
+
+// ─── Run-summary / meta-review verdict ───────────────────────────────────────
+
+describe('run-summary / meta-review verdict detection', () => {
+  function makeRunSummary(overrides = {}) {
+    return {
+      mode: 'dry-run',
+      goal: 'Improve code quality',
+      rounds: 3,
+      converged: true,
+      totalFindings: 2,
+      report: makeReport(),
+      metaReview: { verdict: 'approved', issues: [], checksRun: 6 },
+      finalReport: {
+        verdict: 'approved',
+        source: {},
+        metaReview: { verdict: 'approved', checksRun: 6, issues: [] },
+        summary: { totalFindings: 2, converged: true, totalRounds: 3, reportIssues: 0, verdict: 'approved' },
+      },
+      ...overrides,
+    }
+  }
+
+  it('isRunSummary recognizes the closing dry-run object', () => {
+    assert.equal(isRunSummary(makeRunSummary()), true)
+    assert.equal(isRunSummary(null), false)
+    assert.equal(isRunSummary(makeReport()), false) // ReviewReport ≠ run-summary
+    const needsRevision = makeRunSummary({ finalReport: { verdict: 'needs_revision' } })
+    assert.equal(isRunSummary(needsRevision), true)
+    const bogus = makeRunSummary({ finalReport: { verdict: 'pending' } })
+    assert.equal(isRunSummary(bogus), false)
+  })
+
+  it('findRunSummaryInObject finds a run-summary nested in the session tree', () => {
+    const run = makeRunSummary()
+    const session = { latest: { result: { run } } }
+    assert.equal(findRunSummaryInObject(session), run)
+    assert.equal(findRunSummaryInObject({ a: { b: [1, 2, 3] } }), null)
+    assert.equal(findRunSummaryInObject(null), null)
+  })
+
+  it('scanSessionForRunSummary finds the run-summary from a workflow result', () => {
+    const run = makeRunSummary()
+    const session = { toolCalls: [{ tool: 'workflow', result: run }] }
+    assert.equal(scanSessionForRunSummary(session), run)
+    assert.equal(scanSessionForRunSummary({ toolCalls: [{ tool: 'iterate_review', result: { report: makeReport() } }] }), null)
+    assert.equal(scanSessionForRunSummary(null), null)
+  })
+
+  it('extractVerdict yields an approved verdict summary', () => {
+    const v = extractVerdict(makeRunSummary())
+    assert.equal(v?.verdict, 'approved')
+    assert.equal(v?.totalRounds, 3)
+    assert.equal(v?.totalFindings, 2)
+    assert.equal(v?.checksRun, 6)
+    assert.equal(v?.reportIssues, 0)
+    assert.equal(v?.converged, true)
+  })
+
+  it('extractVerdict reports needs_revision with issue counts', () => {
+    const v = extractVerdict(makeRunSummary({
+      converged: false,
+      finalReport: {
+        verdict: 'needs_revision',
+        metaReview: { verdict: 'revise', checksRun: 6, issues: [{ code: 'SEVERITY_SUM' }] },
+      },
+    }))
+    assert.equal(v?.verdict, 'needs_revision')
+    assert.equal(v?.reportIssues, 1)
+    assert.equal(v?.converged, false)
+  })
+
+  it('extractVerdict returns null for non-run-summary input', () => {
+    assert.equal(extractVerdict(null), null)
+    assert.equal(extractVerdict(makeReport()), null)
+  })
+})
+
+// ─── fixedCount threading through normalization ─────────────────────────────
+
+describe('normalizeReport preserves normal-mode fixedCount', () => {
+  it('carries fixedCount through when the summary provides it', () => {
+    const report = makeReport()
+    report.mode = 'normal'
+    report.summary = {
+      ...(report.summary as Record<string, unknown>),
+      fixedCount: 7,
+    } as typeof report.summary & { fixedCount: number }
+    const norm = normalizeReport(report)
+    const sum = norm.summary as { fixedCount?: number }
+    assert.equal(sum.fixedCount, 7)
+  })
+
+  it('leaves fixedCount absent when the summary does not provide it', () => {
+    const norm = normalizeReport(makeReport())
+    const sum = norm.summary as { fixedCount?: number }
+    assert.equal(sum.fixedCount, undefined)
   })
 })

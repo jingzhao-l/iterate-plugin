@@ -218,6 +218,8 @@ export function buildReviewReport(input: {
   maxReviewRounds: number
   rounds: ReviewRound[]
   knownIntentional?: KnownIntentional[]
+  /** Number of atomic fixes applied so far. Normal mode only; omitted in dry-run. */
+  fixedCount?: number
 }): ReviewReport {
   // 1. Filter known-intentional per round (before cross-round dedupe).
   const filteredRounds = input.rounds.map((r) => ({
@@ -246,6 +248,12 @@ export function buildReviewReport(input: {
     lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0
   const converged = filteredRounds.length > 0 && lastRoundCount === 0
 
+  // Attach the normal-mode fix count to the summary (dry-run leaves it absent).
+  const computed = summarize(sorted)
+  if (input.mode === 'normal' && typeof input.fixedCount === 'number' && Number.isInteger(input.fixedCount)) {
+    computed.fixedCount = input.fixedCount
+  }
+
   return {
     mode: input.mode,
     goal: input.goal,
@@ -264,7 +272,7 @@ export function buildReviewReport(input: {
             ? 'converged'
             : 'max_rounds_reached',
     },
-    summary: summarize(sorted),
+    summary: computed,
   }
 }
 

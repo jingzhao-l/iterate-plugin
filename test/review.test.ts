@@ -283,6 +283,38 @@ describe('buildReviewReport', () => {
     assert.equal(converged.convergence.converged, true)
     assert.equal(converged.convergence.stoppedReason, 'converged')
   })
+
+  it('threads fixedCount into the summary for normal mode only', () => {
+    const rounds = [{ round: 1, findings: [f({ summary: 'issue' })] }]
+    const dryRun = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds,
+      fixedCount: 5,
+    })
+    assert.equal(dryRun.summary.fixedCount, undefined)
+
+    const normal = buildReviewReport({
+      mode: 'normal',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds,
+      fixedCount: 5,
+    })
+    assert.equal(normal.summary.fixedCount, 5)
+
+    const noCount = buildReviewReport({
+      mode: 'normal',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds,
+    })
+    assert.equal(noCount.summary.fixedCount, undefined)
+  })
 })
 
 describe('reviewer tasks & schema', () => {

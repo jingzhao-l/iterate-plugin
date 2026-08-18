@@ -34,6 +34,7 @@ export interface DecisionLogEntry {
     | 'validation'
     | 'decision'
     | 'report'
+    | 'round_failed'
   data: Record<string, unknown>
 }
 
@@ -82,6 +83,8 @@ export interface ReviewReport {
     medium: number
     low: number
     byDimension: Record<string, number>
+    /** Number of atomic fixes applied so far (normal mode only; absent in dry-run). */
+    fixedCount?: number
   }
 }
 
