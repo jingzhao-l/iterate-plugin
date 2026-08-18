@@ -10,6 +10,7 @@
 <p align="center">
   <a href="https://github.com/jingzhao-l/iterate-plugin"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-plugin?style=social&label=Star" alt="Stars"></a>
   <a href="https://github.com/jingzhao-l/iterate-skill"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-skill?style=social&label=Main%20Repo%20Star" alt="Main Repo Stars"></a>
+  <a href="https://www.npmjs.com/package/iterate-plugin"><img src="https://img.shields.io/npm/dt/iterate-plugin?label=Downloads&logo=npm&logoColor=white" alt="npm downloads"></a>
 </p>
 
 > ⭐ If this helps your dsh workflow, give the main repo a star — it means a lot!

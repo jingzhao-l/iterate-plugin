@@ -10,6 +10,7 @@
 <p align="center">
   <a href="https://github.com/jingzhao-l/iterate-plugin"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-plugin?style=social&label=Star" alt="Stars"></a>
   <a href="https://github.com/jingzhao-l/iterate-skill"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-skill?style=social&label=主仓库%20Star" alt="主仓库 Stars"></a>
+  <a href="https://www.npmjs.com/package/iterate-plugin"><img src="https://img.shields.io/npm/dt/iterate-plugin?label=Downloads&logo=npm&logoColor=white" alt="npm downloads"></a>
 </p>
 
 > ⭐ 如果这个插件对你的 dsh 工作流有帮助，欢迎为主仓库点亮 Star，这是对开源维护最大的支持！
