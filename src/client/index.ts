@@ -72,8 +72,8 @@ import {
 /** Loader id this client module registers under. */
 export const name = 'iterate-plugin'
 
-/** Required services: the slot registry must be up before this plugin applies. */
-export const inject = ['slots'] as const
+/** Required services: slots + theme must be up before this plugin applies. */
+export const inject = ['slots', 'theme'] as const
 
 // ─── Client context / service types ─────────────────────────────────────────
 

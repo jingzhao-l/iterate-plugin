@@ -75,7 +75,7 @@ test('lib/client.js exports the standard module contract (name / inject / apply)
   assert.equal(snapshot.exports.name, 'iterate-plugin')
   // `inject` is an array from the vm realm — copy it into the host realm so
   // deepEqual compares plain values (prototypes differ across realms).
-  assert.deepEqual([...(snapshot.exports.inject as unknown[])], ['slots'])
+  assert.deepEqual([...(snapshot.exports.inject as unknown[])], ['slots', 'theme'])
   assert.equal(typeof snapshot.exports.apply, 'function')
 })
 
