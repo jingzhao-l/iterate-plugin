@@ -256,8 +256,6 @@ const ITERATE_CSS = `
 @keyframes iterate-fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
 .iterate-settings { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 12px; }
-.iterate-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-.iterate-settings-row:last-child { border-bottom: none; }
 .iterate-settings-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .iterate-settings-desc { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-top: 3px; line-height: 1.5; }
 .iterate-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
@@ -292,7 +290,6 @@ const ITERATE_CSS = `
 .iterate-completion[data-ok] { border: 1px solid var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
 .iterate-completion[data-warn] { border: 1px solid var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); }
 .iterate-capsule[data-ok] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
-.iterate-settings-guide { white-space: pre-wrap; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px; max-height: 180px; overflow: auto; }
 .iterate-chip[data-ok] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
 .iterate-batch-check { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
 .iterate-batch-check input { margin: 0; cursor: pointer; }
@@ -305,6 +302,36 @@ const ITERATE_CSS = `
 .iterate-verdict-detail { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--dsw-alias-label-secondary); }
 .iterate-verdict-item { white-space: nowrap; }
 .iterate-verdict-item b { color: var(--dsw-alias-label-primary); font-weight: 600; }
+
+/* Settings page redesign: grouped cards + switch + code blocks. */
+.iterate-settings { display: flex; flex-direction: column; gap: 14px; padding: 6px 2px 16px; }
+.iterate-scard { border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); padding: 14px 16px; }
+.iterate-scard-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.iterate-scard-title { font-size: 14px; font-weight: 650; color: var(--dsw-alias-label-primary); letter-spacing: -0.01em; }
+.iterate-scard-desc { font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); margin-top: 4px; }
+.iterate-scard-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* Status pill */
+.iterate-pill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
+.iterate-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* Accessibility-switch toggle */
+.iterate-switch { position: relative; width: 42px; height: 24px; border-radius: 999px; padding: 0; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); transition: background-color 160ms ease, border-color 160ms ease; }
+.iterate-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.iterate-switch-knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-label-secondary); transition: transform 160ms ease, background-color 160ms ease; }
+.iterate-switch[data-on] { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.iterate-switch[data-on] .iterate-switch-knob { transform: translateX(18px); background: #FFFFFF; }
+
+/* Button variants */
+.iterate-btn[data-ghost] { background: transparent; }
+.iterate-btn[data-danger] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent); color: var(--dsw-alias-state-error-primary); background: transparent; }
+.iterate-btn[data-danger]:hover { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); }
+.iterate-btn[data-confirm] { border-color: var(--dsw-alias-state-error-primary); color: #FFFFFF; background: var(--dsw-alias-state-error-primary); }
+
+/* Collapsible guide / status code blocks */
+.iterate-guide { margin-top: 4px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; background: var(--dsw-alias-bg-layer-2); }
+.iterate-guide-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--dsw-alias-bg-layer-2); border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.iterate-guide-body { padding: 12px 14px; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11.5px; line-height: 1.75; white-space: pre-wrap; color: var(--dsw-alias-label-primary); max-height: 260px; overflow: auto; }
 `
 
 // ─── Small helpers ───────────────────────────────────────────────────────────
@@ -949,12 +976,14 @@ function ProgressCapsule() {
 }
 
 /** Settings page section (root scope; reads localStorage + latest known data). */
-function SettingsPanel() {
+function SettingsPanel(_props: SlotProps) {
   const [enabled, setEnabled] = React.useState(themeEnabled)
-  const [copied, setCopied] = React.useState(false)
+  const [guideCopied, setGuideCopied] = React.useState(false)
+  const [statusCopied, setStatusCopied] = React.useState(false)
   const [showGuide, setShowGuide] = React.useState(false)
-  const [clearedCount, setClearedCount] = React.useState<number | null>(null)
   const [showStatus, setShowStatus] = React.useState(false)
+  const [confirming, setConfirming] = React.useState(false)
+  const [clearedInfo, setClearedInfo] = React.useState<number | null>(null)
   const guide = buildConfigEditGuide()
   const statusGuide = buildRuntimeStatusGuide()
 
@@ -964,70 +993,139 @@ function SettingsPanel() {
     setThemeEnabled(next)
   }
 
-  const doCopyGuide = () => {
-    copyText(guide)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1600)
+  /** Flash a per-slot "已复制" state for the given duration. */
+  const flashCopied = (slot: 'guide' | 'status') => {
+    const setter = slot === 'guide' ? setGuideCopied : setStatusCopied
+    setter(true)
+    setTimeout(() => setter(false), 1600)
   }
 
-  const doClearTriage = () => {
-    const count = removeStorageByPrefix(TRIAGE_STORAGE_PREFIX)
-    setClearedCount(count)
-    setTimeout(() => setClearedCount(null), 3000)
+  /** Copy a guide/status block; keep the copy button state in sync. */
+  const doCopy = (text: string, slot: 'guide' | 'status') => {
+    copyText(text)
+    flashCopied(slot)
   }
 
-  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'settings', className: 'iterate-settings' },
-    React.createElement('div', { className: 'iterate-settings-title' }, 'iterate 设置'),
-    React.createElement('div', { className: 'iterate-settings-row' },
-      React.createElement('div', {},
-        React.createElement('div', { className: 'iterate-settings-title' }, 'iterate 主题'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '启用暖琥珀配色的 iterate 专属皮肤（覆盖 dsh 默认主题令牌）。'),
-      ),
-      React.createElement('button', {
+  /** Two-step destroy guard: first click arms, second click clears. */
+  const requestClear = () => {
+    if (confirming) {
+      const count = removeStorageByPrefix(TRIAGE_STORAGE_PREFIX)
+      setClearedInfo(count)
+      setConfirming(false)
+      setTimeout(() => setClearedInfo(null), 3000)
+      return
+    }
+    setConfirming(true)
+    setTimeout(() => setConfirming(false), 3000)
+  }
+
+  const clearButton = clearedInfo !== null
+    ? React.createElement('button', { className: 'iterate-btn', 'data-copied': '', disabled: true }, `已清除 ${clearedInfo} 条`)
+    : React.createElement('button', {
         className: 'iterate-btn',
-        'data-primary': enabled ? '' : undefined,
-        onClick: toggleTheme,
-      }, enabled ? '已启用' : '已关闭'),
+        'data-danger': confirming ? undefined : '',
+        'data-confirm': confirming ? '' : undefined,
+        onClick: requestClear,
+        title: confirming ? '再次点击以确认清除全部判定' : '清除所有分诊判定记录（需要二次确认）',
+      }, confirming ? '确认清除？' : '清除分诊')
+
+  const themeCard = React.createElement('div', { key: 'theme', className: 'iterate-scard' },
+    React.createElement('div', { className: 'iterate-scard-head' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, '迭代主题'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '启用暖琥珀配色的 iterate 专属皮肤，覆盖 dsh 默认主题令牌。'),
+      ),
+      React.createElement('div', { className: 'iterate-scard-actions' },
+        React.createElement('span', { className: 'iterate-chip', 'data-ok': enabled ? '' : undefined }, enabled ? '已启用' : '已关闭'),
+        React.createElement('button', {
+          role: 'switch',
+          'aria-checked': enabled,
+          'aria-label': '开关 iterate 主题',
+          className: 'iterate-switch',
+          'data-on': enabled ? '' : undefined,
+          onClick: toggleTheme,
+        }, React.createElement('span', { className: 'iterate-switch-knob' })),
+      ),
     ),
-    React.createElement('div', { className: 'iterate-settings-row' },
+  )
+
+  const dataCard = React.createElement('div', { key: 'data', className: 'iterate-scard' },
+    React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
         React.createElement('div', { className: 'iterate-settings-title' }, '分诊持久化'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '分诊面板的 y/n/a 判定保存在本地浏览器（localStorage），刷新会话后仍保留。'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, 'y / n / a 判定保存在本地浏览器（localStorage），刷新会话后仍保留。'),
       ),
-      React.createElement('span', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+      React.createElement('div', { className: 'iterate-scard-actions' },
         React.createElement('span', { className: 'iterate-chip' }, '本地保存'),
-        React.createElement('button', {
-          className: 'iterate-btn',
-          onClick: doClearTriage,
-          title: '清除所有分诊判定记录',
-          'data-primary': clearedCount !== null ? '' : undefined,
-          'data-copied': clearedCount !== null ? '' : undefined,
-        }, clearedCount !== null ? `已清除 ${clearedCount} 条` : '清除分诊'),
+        clearButton,
       ),
     ),
-    React.createElement('div', { className: 'iterate-settings-row' },
+  )
+
+  const guideCard = React.createElement('div', { key: 'guide', className: 'iterate-scard' },
+    React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
         React.createElement('div', { className: 'iterate-settings-title' }, '配置管理'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '目标 / 维度 / 最大轮数写在项目的 iterate.config.yaml。复制指引让模型为你调整，或展开查看可编辑字段。'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '目标 / 维度 / 最大轮数写在项目的 iterate.config.yaml，复制指引可让模型按需调整。'),
       ),
-      React.createElement('span', { style: { display: 'flex', gap: 6 } },
-        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': copied ? '' : undefined, onClick: doCopyGuide }, copied ? '已复制' : '复制指引'),
-        React.createElement('button', { className: 'iterate-btn', onClick: () => setShowGuide((v) => !v) }, showGuide ? '收起' : '查看'),
+      React.createElement('div', { className: 'iterate-scard-actions' },
+        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': guideCopied ? '' : undefined, onClick: () => doCopy(guide, 'guide') }, guideCopied ? '已复制' : '复制指引'),
+        React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowGuide((v) => !v) }, showGuide ? '收起' : '展开'),
       ),
     ),
     showGuide
-      ? React.createElement('div', { className: 'iterate-settings-guide' }, guide)
+      ? React.createElement('div', { className: 'iterate-guide' },
+          React.createElement('div', { className: 'iterate-guide-bar' },
+            React.createElement('span', {}, 'iterate.config.yaml 可编辑字段'),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(guide, 'guide') }, '复制'),
+          ),
+          React.createElement('div', { className: 'iterate-guide-body' }, guide),
+        )
       : null,
-    React.createElement('div', { className: 'iterate-settings-row' },
+  )
+
+  const statusCard = React.createElement('div', { key: 'status', className: 'iterate-scard' },
+    React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
         React.createElement('div', { className: 'iterate-settings-title' }, '状态概览'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '运行时产物布局与清理指引。iterate_status / iterate_history / iterate_prune 工具用于查看和管理。'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '查看运行时产物布局与清理指引。iterate_status / iterate_history / iterate_prune 工具用于查看和管理。'),
       ),
-      React.createElement('button', { className: 'iterate-btn', onClick: () => setShowStatus((v) => !v) }, showStatus ? '收起' : '查看'),
+      React.createElement('div', { className: 'iterate-scard-actions' },
+        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': statusCopied ? '' : undefined, onClick: () => doCopy(statusGuide, 'status') }, statusCopied ? '已复制' : '复制指引'),
+        React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowStatus((v) => !v) }, showStatus ? '收起' : '展开'),
+      ),
     ),
     showStatus
-      ? React.createElement('div', { className: 'iterate-settings-guide' }, statusGuide)
+      ? React.createElement('div', { className: 'iterate-guide' },
+          React.createElement('div', { className: 'iterate-guide-bar' },
+            React.createElement('span', {}, '运行时布局与清理'),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(statusGuide, 'status') }, '复制'),
+          ),
+          React.createElement('div', { className: 'iterate-guide-body' }, statusGuide),
+        )
       : null,
+  )
+
+  const banner = React.createElement('div', { key: 'banner', className: 'iterate-scard' },
+    React.createElement('div', { className: 'iterate-scard-head' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, 'iterate'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '为每次代码评审生成 Review 报告与交互式分诊视图，专注 AI 自我审查与修正。'),
+      ),
+      React.createElement('span', { className: 'iterate-pill' },
+        React.createElement('span', { className: 'iterate-pill-dot' }),
+        '就绪',
+      ),
+    ),
+  )
+
+  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'settings', className: 'iterate-settings' },
+    React.createElement('div', { className: 'iterate-settings-title', style: { fontSize: 15, fontWeight: 700 } }, 'iterate 设置'),
+    banner,
+    themeCard,
+    dataCard,
+    guideCard,
+    statusCard,
   )
 }
 
