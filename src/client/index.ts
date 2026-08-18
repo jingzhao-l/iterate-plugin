@@ -1,0 +1,1120 @@
+/**
+ * src/client/index.ts — iterate-plugin browser half.
+ *
+ * Built by `scripts/build-client.mjs` (esbuild) into `lib/client.js`, a
+ * single-file artifact for the dsh web shell's GUI loader:
+ *
+ *   window.__ModuleLoader__.load({ id: "iterate-plugin", factory: (require) => {...} })
+ *
+ * The factory's injected `require` resolves externals (react and co) from the
+ * shell's frozen platform module table. All local code — this module plus the
+ * pure parse helpers imported from `lib/parse.js` — is bundled inline, so the
+ * artifact has no relative imports at runtime. This mirrors the dsh-hooks
+ * client contract exactly (see tsdown.config.ts in PeterBon/dsh-hooks).
+ *
+ * Module contract (same as dsh-hooks / task-board plugins):
+ *   - `name`: loader id this module registers under.
+ *   - `inject`: services the shell must have up before `apply` runs.
+ *   - `apply(ctx)`: called by the client runtime with the ClientContext.
+ *
+ * Implements the §14.4 / §16 six-part UI layer:
+ *   1. Convergence dashboard  -> conversation.input.dock
+ *   2. Findings triage panel  -> conversation.chat.turnTail
+ *   3. Iteration stats card   -> conversation.chat.turnTail (same chain, empty-findings case)
+ *   4. iterate theme skin     -> theme.overrideTokens
+ *   5. Progress event linkage -> ctx.on('slots/changed') + round-pulse + shell.overlay capsule
+ *   6. Settings page section  -> settings.section
+ *
+ * Design notes:
+ *   - All styles are injected via one <style> tag; colors use dsh token
+ *     variables (`--dsw-*`).
+ *   - Defensive by design: every service lookup is optional and guarded, so a
+ *     missing slot/theme degrades gracefully instead of crashing the UI.
+ */
+
+import * as React from 'react'
+import {
+  findReportInObject,
+  scanSessionForReport,
+  scanSessionForRunSummary,
+  extractVerdict,
+  normalizeReport,
+  computeConvergenceProgress,
+  getCurrentRound,
+  getTotalRounds,
+  severityStats,
+  groupByDimension,
+  buildTriageState,
+  hashReport,
+  toKnownIntentionalYaml,
+  buildApplyInstruction,
+  collectIgnoredEntries,
+  filterFindingsWithIndices,
+  buildFilterOptions,
+  countVerdicts,
+  batchSetVerdict,
+  setAllVerdicts,
+  buildRoundHistory,
+  buildFindingTrend,
+  computeTrendMetrics,
+  trendMax,
+  buildCompletionSummary,
+  buildConfigEditGuide,
+  keyToVerdict,
+  allVerdictKeys,
+  buildRuntimeStatusGuide,
+  SEVERITY_LABEL,
+  SEVERITY_COLOR,
+} from '../../lib/parse.js'
+
+// ─── Module contract ─────────────────────────────────────────────────────────
+
+/** Loader id this client module registers under. */
+export const name = 'iterate-plugin'
+
+/** Required services: the slot registry must be up before this plugin applies. */
+export const inject = ['slots'] as const
+
+// ─── Client context / service types ─────────────────────────────────────────
+
+/** A single finding produced by the harness review. */
+interface IterateFinding {
+  [key: string]: unknown
+  dimension?: string
+  file?: string
+  line?: number
+  severity?: string
+  summary?: string
+  failure_scenario?: string
+  suggested_fix?: string
+}
+
+/** Normalized review report consumed by the triage / dashboard components. */
+interface ReviewReport {
+  [key: string]: unknown
+  mode?: string
+  findings?: IterateFindings
+  rounds?: unknown[]
+  convergence?: {
+    converged?: boolean
+    totalRounds?: number
+    findingsByRound?: number[]
+    stoppedReason?: string
+  }
+  summary?: {
+    totalFindings?: number
+    critical?: number
+    high?: number
+    medium?: number
+    low?: number
+    fixedCount?: number
+    byDimension?: Record<string, number>
+  }
+}
+
+/** Non-null findings list (index-signature compatible). */
+type IterateFindings = IterateFinding[]
+
+/** Registration metadata handed to the slots `register` call. */
+interface SlotsRegistrationMeta {
+  name: string
+  id: string
+  order?: number
+  label?: () => string
+  select?: (owner: SlotProps) => { matched: boolean } | null
+}
+
+/** Client slots service (same surface dsh-hooks relies on). */
+interface SlotsService {
+  inject(slot: string, getLayer?: () => void): void
+  register(meta: SlotsRegistrationMeta, render: (props: SlotProps) => unknown): () => void
+}
+
+/** Client theme service exposing token overrides. */
+interface ThemeService {
+  overrideTokens(source: string, tokens: IterateTokenMap): () => void
+}
+
+/** Opaque slot props: heterogeneous per-slot payloads. */
+type SlotProps = Record<string, unknown>
+
+/** Token map passed to theme.overrideTokens (light + dark per dsw token). */
+type IterateTokenMap = Record<string, { light: string; dark: string }>
+
+/** Subset of the dsh client runtime context used by this plugin. */
+interface ClientContext {
+  slots?: SlotsService
+  theme?: ThemeService
+  get?(service: string, optional?: boolean): unknown
+  on?(event: string, listener: (...args: unknown[]) => void): void | (() => void)
+  effect?(task: () => void | (() => void), label?: string): () => void
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const PLUGIN_TAG = 'iterate-ui'
+
+/** localStorage key prefix for triage verdicts. */
+const TRIAGE_STORAGE_PREFIX = 'iterate.triage.'
+
+/** localStorage key for the theme skin toggle. */
+const THEME_STORAGE_KEY = 'iterate.theme.enabled'
+
+/** Theme override source name (matches the doc §16.1). */
+const THEME_SOURCE = 'iterate'
+
+/** Theme tokens: 13 dsw tokens, each with light + dark values (warm amber accent). */
+const ITERATE_TOKENS: IterateTokenMap = {
+  '--dsw-alias-bg-base': { light: '#FAF8F5', dark: '#171412' },
+  '--dsw-alias-bg-layer-1': { light: '#FFFFFF', dark: '#1F1B17' },
+  '--dsw-alias-bg-layer-2': { light: '#F4F1EA', dark: '#27221C' },
+  '--dsw-alias-bg-overlay': { light: 'rgba(255,255,255,0.96)', dark: 'rgba(23,20,18,0.96)' },
+  '--dsw-alias-border-l1': { light: '#E8E2D8', dark: '#332C25' },
+  '--dsw-alias-border-l2': { light: '#DDD5C9', dark: '#3C342B' },
+  '--dsw-alias-brand-primary': { light: '#B45309', dark: '#F59E0B' },
+  '--dsw-alias-label-primary': { light: '#1C1917', dark: '#F5F0EA' },
+  '--dsw-alias-label-secondary': { light: '#57534E', dark: '#A9A29B' },
+  '--dsw-alias-state-error-primary': { light: '#DC2626', dark: '#F87171' },
+  '--dsw-alias-state-success-primary': { light: '#15803D', dark: '#4ADE80' },
+  '--dsw-alias-state-warn-primary': { light: '#D97706', dark: '#FBBF24' },
+  '--dsw-specific-sidebar-fill': { light: '#F5F2EC', dark: '#14110E' },
+}
+
+/** Injected stylesheet. Every selector is prefixed to avoid clobbering dsh. */
+const ITERATE_CSS = `
+[data-iterate-root] { box-sizing: border-box; font-family: var(--dsw-font-sans, system-ui, sans-serif); }
+[data-iterate-root] * , [data-iterate-root] *::before, [data-iterate-root] *::after { box-sizing: border-box; }
+
+.iterate-dashboard {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 14px; margin: 6px 0;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 12px; color: var(--dsw-alias-label-primary);
+}
+.iterate-round-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+  color: var(--dsw-alias-brand-primary); font-weight: 600; white-space: nowrap;
+}
+.iterate-round-badge[data-pulse] { animation: iterate-pulse 700ms ease-out; }
+@keyframes iterate-pulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--dsw-alias-brand-primary) 60%, transparent); }
+  50% { transform: scale(1.12); box-shadow: 0 0 0 6px color-mix(in srgb, var(--dsw-alias-brand-primary) 0%, transparent); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 transparent; }
+}
+.iterate-progress { flex: 1 1 120px; min-width: 120px; height: 6px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); overflow: hidden; }
+.iterate-progress-fill { height: 100%; border-radius: 999px; background: var(--dsw-alias-brand-primary); transition: width 300ms ease; }
+.iterate-metric { display: inline-flex; align-items: center; gap: 5px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.iterate-sev-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.iterate-dim-badge {
+  padding: 2px 8px; border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary); font-size: 11px; white-space: nowrap;
+}
+
+.iterate-triage { margin: 10px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); overflow: hidden; }
+.iterate-triage-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.iterate-triage-hint { font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-secondary); }
+.iterate-finding { padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.iterate-finding:last-child { border-bottom: none; }
+.iterate-finding-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.iterate-finding-file { font-family: var(--dsw-font-mono, ui-monospace, monospace); color: var(--dsw-alias-label-primary); }
+.iterate-finding-summary { margin-top: 4px; font-size: 12px; color: var(--dsw-alias-label-primary); line-height: 1.5; }
+.iterate-finding-actions { display: flex; gap: 6px; margin-top: 8px; }
+.iterate-vbtn {
+  padding: 3px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary);
+  font-size: 11px; cursor: pointer;
+}
+.iterate-vbtn[data-active="keep"] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); }
+.iterate-vbtn[data-active="skip"] { border-color: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); }
+.iterate-vbtn[data-active="ignore"] { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
+.iterate-triage-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 10px 14px; background: var(--dsw-alias-bg-layer-2); font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.iterate-btn {
+  padding: 4px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 11px; cursor: pointer;
+}
+.iterate-btn[data-primary] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.iterate-btn[data-copied] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
+.iterate-payload { width: 100%; margin-top: 8px; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px; white-space: pre-wrap; }
+
+.iterate-stats { margin: 10px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); padding: 12px 14px; }
+.iterate-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin-top: 8px; }
+.iterate-stat { padding: 8px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); text-align: center; }
+.iterate-stat-num { font-size: 18px; font-weight: 700; color: var(--dsw-alias-label-primary); }
+.iterate-stat-label { font-size: 10px; color: var(--dsw-alias-label-secondary); margin-top: 2px; }
+
+.iterate-capsule {
+  position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+  padding: 8px 14px; border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary); font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  animation: iterate-fadein 200ms ease-out; pointer-events: auto;
+}
+@keyframes iterate-fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+.iterate-settings { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 12px; }
+.iterate-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.iterate-settings-row:last-child { border-bottom: none; }
+.iterate-settings-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.iterate-settings-desc { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-top: 3px; line-height: 1.5; }
+.iterate-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
+
+/* Filter bar + batch toolbar (triage) */
+.iterate-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.iterate-filter-select { padding: 4px 8px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 11px; }
+.iterate-filter-search { padding: 4px 8px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 11px; min-width: 140px; }
+.iterate-filter-search::placeholder { color: var(--dsw-alias-label-secondary); }
+.iterate-filter-count { margin-left: auto; white-space: nowrap; }
+.iterate-batch { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.iterate-batch-label { margin-right: 2px; }
+.iterate-batch-btn { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+.iterate-batch-btn:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.iterate-finding[data-selected] { outline: 1px solid var(--dsw-alias-brand-primary); outline-offset: -1px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 6%, transparent); }
+
+/* Trend chart (inline SVG) */
+.iterate-trend { display: flex; align-items: flex-end; gap: 3px; height: 26px; padding: 2px 0; }
+.iterate-trend-bar { width: 6px; border-radius: 2px 2px 0 0; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 70%, var(--dsw-alias-bg-layer-2)); }
+.iterate-trend-bar[data-hot] { background: var(--dsw-alias-brand-primary); }
+
+/* History panel */
+.iterate-history { margin: 10px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); overflow: hidden; }
+.iterate-history-body { padding: 10px 14px; }
+.iterate-history-table { width: 100%; border-collapse: collapse; font-size: 11px; color: var(--dsw-alias-label-primary); }
+.iterate-history-table th { text-align: left; font-weight: 600; color: var(--dsw-alias-label-secondary); padding: 4px 8px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.iterate-history-table td { padding: 4px 8px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.iterate-history-table tr:last-child td { border-bottom: none; }
+.iterate-history-num { font-weight: 600; }
+.iterate-history-trendline { margin-top: 10px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.iterate-completion { margin-top: 8px; padding: 6px 10px; border-radius: 8px; font-size: 11px; }
+.iterate-completion[data-ok] { border: 1px solid var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
+.iterate-completion[data-warn] { border: 1px solid var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); }
+.iterate-capsule[data-ok] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
+.iterate-settings-guide { white-space: pre-wrap; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px; max-height: 180px; overflow: auto; }
+.iterate-chip[data-ok] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
+.iterate-batch-check { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+.iterate-batch-check input { margin: 0; cursor: pointer; }
+
+/* Meta-review verdict banner (dry-run closing result) */
+.iterate-verdict { margin: 10px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.iterate-verdict-tag { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+.iterate-verdict-tag[data-ok] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); }
+.iterate-verdict-tag[data-warn] { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent); }
+.iterate-verdict-detail { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--dsw-alias-label-secondary); }
+.iterate-verdict-item { white-space: nowrap; }
+.iterate-verdict-item b { color: var(--dsw-alias-label-primary); font-weight: 600; }
+`
+
+// ─── Small helpers ───────────────────────────────────────────────────────────
+
+/** Namespaced logger (kept minimal; only errors/warnings, no debug spam). */
+function log(...args: unknown[]): void {
+  if (typeof console !== 'undefined' && typeof console.error === 'function') {
+    console.error(`[${PLUGIN_TAG}]`, ...args)
+  }
+}
+
+/** Safe localStorage wrapper (never throws in private mode / SSR). */
+function createStorage(): {
+  get(key: string): string | null
+  set(key: string, value: string): void
+  remove(key: string): void
+  keys(): string[]
+} {
+  try {
+    const testKey = '__iterate_storage_test__'
+    window.localStorage.setItem(testKey, '1')
+    window.localStorage.removeItem(testKey)
+    return {
+      get(key) { return window.localStorage.getItem(key) },
+      set(key, value) { window.localStorage.setItem(key, value) },
+      remove(key) { window.localStorage.removeItem(key) },
+      keys() { return Object.keys(window.localStorage) },
+    }
+  } catch {
+    const mem = new Map<string, string>()
+    return {
+      get(key) { return mem.has(key) ? mem.get(key) as string : null },
+      set(key, value) { mem.set(key, value) },
+      remove(key) { mem.delete(key) },
+      keys() { return [...mem.keys()] },
+    }
+  }
+}
+
+/**
+ * Remove every stored key with the given prefix (e.g. all triage verdicts).
+ * Returns how many keys were removed.
+ */
+function removeStorageByPrefix(prefix: string): number {
+  if (!storage) return 0
+  let removed = 0
+  try {
+    for (const key of storage.keys()) {
+      if (key.startsWith(prefix)) {
+        storage.remove(key)
+        removed++
+      }
+    }
+  } catch (err) {
+    log('failed to clear storage prefix', prefix, err)
+  }
+  return removed
+}
+
+/** Copy text to the clipboard, returning whether it succeeded. */
+function copyText(text: string): boolean {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(text).then(
+      () => true,
+      () => false,
+    )
+    return true
+  }
+  return false
+}
+
+/** Literal severity keys recognized by SEVERITY_LABEL / SEVERITY_COLOR. */
+const SEVERITY_KEYS = ['critical', 'high', 'medium', 'low'] as const
+
+/** Coerce an arbitrary severity string to a known key, defaulting to `low`. */
+function coerceSeverity(severity: string | undefined): (typeof SEVERITY_KEYS)[number] {
+  return (SEVERITY_KEYS as readonly string[]).includes(severity ?? '')
+    ? (severity as (typeof SEVERITY_KEYS)[number])
+    : 'low'
+}
+
+/** Severity accent color with safe fallback. */
+function severityColor(severity: string | undefined): string {
+  return SEVERITY_COLOR[coerceSeverity(severity)]
+}
+
+/** Severity short label with safe fallback. */
+function severityLabel(severity: string | undefined): string {
+  return SEVERITY_LABEL[coerceSeverity(severity)]
+}
+
+/** Resolve the slots service: prefer the typed `ctx.slots`, fall back to `ctx.get`. */
+function readSlots(ctx: ClientContext): SlotsService | undefined {
+  if (ctx && ctx.slots && typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
+    return ctx.slots
+  }
+  const raw = ctx && typeof ctx.get === 'function' ? ctx.get('slots', false) : undefined
+  if (raw && typeof (raw as SlotsService).inject === 'function' && typeof (raw as SlotsService).register === 'function') {
+    return raw as SlotsService
+  }
+  return undefined
+}
+
+/** Resolve the theme service: prefer the typed `ctx.theme`, fall back to `ctx.get`. */
+function readTheme(ctx: ClientContext): ThemeService | undefined {
+  if (ctx && ctx.theme && typeof ctx.theme.overrideTokens === 'function') {
+    return ctx.theme
+  }
+  const raw = ctx && typeof ctx.get === 'function' ? ctx.get('theme', false) : undefined
+  if (raw && typeof (raw as ThemeService).overrideTokens === 'function') {
+    return raw as ThemeService
+  }
+  return undefined
+}
+
+// ─── Module-level runtime state (shared across slots) ────────────────────────
+
+let slotsSvc: SlotsService | undefined = undefined
+let themeSvc: ThemeService | undefined = undefined
+let storage: ReturnType<typeof createStorage> | null = null
+let themeDisposer: (() => void) | null = null
+let themeEnabled = true
+const roundPulseListeners: Array<(payload: { round: number; converged: boolean }) => void> = []
+
+/**
+ * Emit a "round changed" pulse to subscribed components.
+ * The payload is `{ round, converged }` so the overlay capsule can surface
+ * completion AND convergence in one notification.
+ */
+function emitRoundPulse(round: number, converged: boolean): void {
+  const payload = { round, converged: converged === true }
+  for (const fn of roundPulseListeners.slice()) fn(payload)
+}
+
+/** Apply the iterate theme skin (idempotent). */
+function applyThemeSkin(): void {
+  if (!themeSvc || typeof themeSvc.overrideTokens !== 'function') return
+  // Never stack disposers: drop any previously applied override first.
+  clearThemeSkin()
+  themeDisposer = themeSvc.overrideTokens(THEME_SOURCE, ITERATE_TOKENS)
+}
+
+/** Remove the iterate theme skin (idempotent). */
+function clearThemeSkin(): void {
+  if (themeDisposer) {
+    try { themeDisposer() } catch (err) { log('theme disposer failed', err) }
+    themeDisposer = null
+  }
+}
+
+/** Persist + apply the theme preference. */
+function setThemeEnabled(enabled: boolean): void {
+  themeEnabled = enabled
+  if (storage) storage.set(THEME_STORAGE_KEY, enabled ? '1' : '0')
+  if (enabled) applyThemeSkin()
+  else clearThemeSkin()
+}
+
+// ─── Components (React.createElement trees) ──────────────────────────────────
+
+/** Obtain a session snapshot defensively from the slot props. */
+function sessionSnapshot(props: SlotProps) {
+  let session: unknown = null
+  const useSession = props && typeof props.useSession === 'function' ? props.useSession as () => unknown : null
+  if (useSession) {
+    try { session = useSession() } catch (err) { log('useSession failed', err) }
+  }
+  if (!session && props && props.session) session = props.session
+  return session
+}
+
+/** Find the latest report inside a session snapshot (normalized). */
+function latestReport(session: unknown): ReviewReport | null {
+  if (!session) return null
+  const raw = scanSessionForReport(session) || findReportInObject(session, undefined, 24)
+  return raw ? normalizeReport(raw) as ReviewReport : null
+}
+
+/** Inline bar chart of findings-by-round (pure divs, no SVG needed). */
+function TrendChart({ points }: { points: Array<{ round: number; count: number }> }) {
+  if (!points || points.length === 0) return null
+  const max = trendMax(points)
+  const bars = points.map((p) =>
+    React.createElement('div', {
+      key: p.round,
+      className: 'iterate-trend-bar',
+      'data-hot': p.count > 0 ? '' : undefined,
+      title: `Round ${p.round}：${p.count} 项`,
+      style: { height: `${Math.max(4, Math.round((p.count / max) * 24))}px` },
+    }),
+  )
+  return React.createElement('div', { className: 'iterate-trend', title: '各轮发现数量趋势' }, ...bars)
+}
+
+/** Dashboard: live convergence strip above the composer. */
+function ConvergenceDashboard(props: SlotProps) {
+  const [pulseKey, setPulseKey] = React.useState(0)
+  const report = latestReport(sessionSnapshot(props))
+
+  React.useEffect(() => {
+    if (!report) return
+    const cur = getCurrentRound(report)
+    const conv = report.convergence
+    emitRoundPulse(cur, conv?.converged === true)
+    setPulseKey((k) => k + 1)
+  }, [report && hashReport(report) + ':' + getCurrentRound(report)])
+
+  if (!report) return null
+
+  const round = getCurrentRound(report)
+  const total = getTotalRounds(report)
+  const progress = computeConvergenceProgress(report)
+  const stats = severityStats(report)
+  const dims = groupByDimension(report)
+  const trend = computeTrendMetrics(report)
+
+  const dimBadges = Object.keys(dims).slice(0, 6).map((dim) =>
+    React.createElement(
+      'span',
+      { key: dim, className: 'iterate-dim-badge' },
+      `${dim} · ${(dims[dim]?.length ?? 0)}`,
+    ),
+  )
+
+  // Fix-count badge: show a running "fixes applied" metric when the report
+  // carries a number (normal mode only — threaded through `fixedCount`).
+  const mode = report.mode
+  const summary = report.summary
+  const isNormal = mode === 'normal'
+  const fixCount = isNormal && summary && typeof summary.fixedCount === 'number' ? summary.fixedCount : null
+  const fixBadge = fixCount !== null
+    ? React.createElement('span', {
+        className: 'iterate-metric',
+        key: 'fixes',
+        title: '本轮已应用的原子修复数（正常模式）',
+      }, `${String(fixCount)} fixes`)
+    : null
+
+  return React.createElement(
+    'div',
+    { 'data-iterate-root': '', 'data-iterate': 'dashboard', className: 'iterate-dashboard' },
+    React.createElement(
+      'span',
+      { className: 'iterate-round-badge', 'data-pulse': pulseKey > 0 ? '' : undefined, key: `round-${round}` },
+      `Round ${round} / ${total}`,
+    ),
+    React.createElement('div', { className: 'iterate-progress' },
+      React.createElement('div', { className: 'iterate-progress-fill', style: { width: `${progress}%` } }),
+    ),
+    React.createElement('span', { className: 'iterate-metric' },
+      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR.critical } }),
+      stats.critical,
+    ),
+    React.createElement('span', { className: 'iterate-metric' },
+      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR.high } }),
+      stats.high,
+    ),
+    React.createElement('span', { className: 'iterate-metric' },
+      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR.medium } }),
+      stats.medium,
+    ),
+    fixBadge,
+    React.createElement(TrendChart, { points: trend.points }),
+    ...dimBadges,
+  )
+}
+
+/** Stats card (empty-findings case of the turn-tail chain). */
+function StatsCard(props: SlotProps) {
+  const report = props.report as ReviewReport
+  const [showHistory, setShowHistory] = React.useState(false)
+  const stats = severityStats(report)
+  const total = stats.critical + stats.high + stats.medium + stats.low
+  const rows = [
+    { label: 'Critical', value: stats.critical, color: SEVERITY_COLOR.critical },
+    { label: 'High', value: stats.high, color: SEVERITY_COLOR.high },
+    { label: 'Medium', value: stats.medium, color: SEVERITY_COLOR.medium },
+    { label: 'Low', value: stats.low, color: SEVERITY_COLOR.low },
+  ].map((r) =>
+    React.createElement('div', { key: r.label, className: 'iterate-stat' },
+      React.createElement('div', { className: 'iterate-stat-num', style: { color: r.color } }, String(r.value)),
+      React.createElement('div', { className: 'iterate-stat-label' }, r.label),
+    ),
+  )
+
+  const history = buildRoundHistory(report)
+  const trend = computeTrendMetrics(report)
+  const historyRows = history.map((h) =>
+    React.createElement('tr', { key: h.round },
+      React.createElement('td', { className: 'iterate-history-num' }, `Round ${h.round}`),
+      React.createElement('td', {}, String(h.count)),
+      React.createElement('td', { style: { color: SEVERITY_COLOR.critical } }, String(h.critical)),
+      React.createElement('td', { style: { color: SEVERITY_COLOR.high } }, String(h.high)),
+      React.createElement('td', { style: { color: SEVERITY_COLOR.medium } }, String(h.medium)),
+      React.createElement('td', { style: { color: SEVERITY_COLOR.low } }, String(h.low)),
+    ),
+  )
+  const trendLine = `首轮 ${trend.firstRound} → 末轮 ${trend.lastRound} 项，降幅 ${trend.reductionPercent}%${trend.converged ? '，已收敛' : ''}`
+  const completion = buildCompletionSummary(report)
+
+  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'stats', className: 'iterate-stats' },
+    React.createElement('div', { className: 'iterate-triage-head' },
+      React.createElement('span', {}, 'Iterate · 收敛统计'),
+      React.createElement('span', { className: 'iterate-triage-hint' },
+        `Round ${getCurrentRound(report)}/${getTotalRounds(report)} · ${total} findings · ${report.convergence && report.convergence.converged ? '已收敛' : '未收敛'}`,
+      ),
+    ),
+    React.createElement('div', { className: 'iterate-stats-grid' }, ...rows),
+    React.createElement('div', { className: 'iterate-completion', 'data-ok': trend.converged ? '' : undefined, 'data-warn': trend.converged ? undefined : '' }, completion),
+    React.createElement('div', { className: 'iterate-triage-foot', style: { marginTop: 8, borderRadius: 8 } },
+      React.createElement('span', {}, trendLine),
+      React.createElement('button', {
+        className: 'iterate-btn',
+        'data-primary': showHistory ? '' : undefined,
+        onClick: () => setShowHistory((v) => !v),
+      }, showHistory ? '收起历史' : '历史 / 趋势'),
+    ),
+    showHistory
+      ? React.createElement('div', { className: 'iterate-history-body' },
+          React.createElement('table', { className: 'iterate-history-table' },
+            React.createElement('thead', {},
+              React.createElement('tr', {},
+                React.createElement('th', {}, '轮次'),
+                React.createElement('th', {}, '发现'),
+                React.createElement('th', { style: { color: SEVERITY_COLOR.critical } }, 'CRIT'),
+                React.createElement('th', { style: { color: SEVERITY_COLOR.high } }, 'HIGH'),
+                React.createElement('th', { style: { color: SEVERITY_COLOR.medium } }, 'MED'),
+                React.createElement('th', { style: { color: SEVERITY_COLOR.low } }, 'LOW'),
+              ),
+            ),
+            React.createElement('tbody', {}, ...historyRows),
+          ),
+          React.createElement('div', { className: 'iterate-history-trendline' },
+            React.createElement(TrendChart, { points: trend.points }),
+          ),
+        )
+      : null,
+  )
+}
+
+/** Triage panel: per-finding y / n / a with filters, batch ops, keyboard shortcuts. */
+function TriagePanel(props: SlotProps) {
+  const report = props.report as ReviewReport
+  const findings = report.findings || []
+  const storageKey = TRIAGE_STORAGE_PREFIX + hashReport(report)
+  const [verdicts, setVerdicts] = React.useState<Record<string, 'keep' | 'skip' | 'ignore'>>(() => {
+    const initial = buildTriageState(report)
+    const saved = storage ? storage.get(storageKey) : null
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved) as Record<string, string>
+        if (parsed && typeof parsed === 'object') {
+          for (const key of Object.keys(initial)) {
+            if (parsed[key] === 'keep' || parsed[key] === 'skip' || parsed[key] === 'ignore') {
+              initial[key] = parsed[key] as 'keep' | 'skip' | 'ignore'
+            }
+          }
+        }
+      } catch { /* corrupt storage, fall back to defaults */ }
+    }
+    return initial
+  })
+  const [payload, setPayload] = React.useState<string | null>(null)
+  const [copied, setCopied] = React.useState(false)
+  const [filter, setFilter] = React.useState<{ severities: string[]; dimensions: string[]; search: string }>({ severities: [], dimensions: [], search: '' })
+  const [selected, setSelected] = React.useState<number | null>(null)
+  const [selectAll, setSelectAll] = React.useState(false)
+
+  /** Persist + return the next verdicts state. */
+  const persistVerdicts = (next: Record<string, 'keep' | 'skip' | 'ignore'>) => {
+    if (storage) storage.set(storageKey, JSON.stringify(next))
+    return next
+  }
+
+  const setVerdict = (index: number, verdict: 'keep' | 'skip' | 'ignore') => {
+    setVerdicts((prev) => persistVerdicts({ ...prev, [String(index)]: verdict }))
+  }
+
+  // ── Filtering (visible findings + their original indices) ───────────────
+  const { filtered, indices } = filterFindingsWithIndices(findings, filter)
+  const indicesKey = indices.join(',')
+  const options = buildFilterOptions(findings)
+  const isFilterActive = filter.severities.length > 0 || filter.dimensions.length > 0 || filter.search !== ''
+
+  const setSeverityFilter = (value: string) => setFilter((f) => ({ ...f, severities: value ? [value] : [] }))
+  const setDimensionFilter = (value: string) => setFilter((f) => ({ ...f, dimensions: value ? [value] : [] }))
+  const setSearchFilter = (value: string) => setFilter((f) => ({ ...f, search: value }))
+  const clearFilter = () => setFilter({ severities: [], dimensions: [], search: '' })
+
+  // ── Batch operations (apply to the currently VISIBLE findings, or to ALL
+  //    findings when the select-all toggle is on) ──────────────────────────
+  const allIndices = allVerdictKeys(verdicts)
+  const batchTarget = selectAll ? allIndices : indices
+  const applyBatch = (verdict: 'keep' | 'skip' | 'ignore') => {
+    setVerdicts((prev) => persistVerdicts(batchSetVerdict(prev, batchTarget, verdict)))
+  }
+  const applyBatchAll = (verdict: 'keep' | 'skip' | 'ignore') => {
+    setVerdicts((prev) => persistVerdicts(setAllVerdicts(prev, verdict)))
+  }
+  const doResetVerdicts = () => {
+    setVerdicts((prev) => persistVerdicts(setAllVerdicts(prev, 'keep')))
+    setSelectAll(false)
+  }
+
+  // ── Keyboard shortcuts (y / n / a on the selected finding, ↑/↓ to move) ──
+  React.useEffect(() => {
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!doc) return
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const t = ev.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
+      const verdict = keyToVerdict(ev.key)
+      if (verdict && selected !== null && indices.includes(selected)) {
+        ev.preventDefault()
+        setVerdict(selected, verdict)
+        const pos = indices.indexOf(selected)
+        const nextIdx = indices[pos + 1]
+        if (nextIdx !== undefined) setSelected(nextIdx)
+        return
+      }
+      if (ev.key === 'ArrowDown' && indices.length > 0) {
+        ev.preventDefault()
+        const pos = selected === null ? -1 : indices.indexOf(selected)
+        setSelected(indices[Math.min(pos + 1, indices.length - 1)] ?? null)
+        return
+      }
+      if (ev.key === 'ArrowUp' && indices.length > 0) {
+        ev.preventDefault()
+        const pos = selected === null ? 0 : indices.indexOf(selected)
+        setSelected(indices[Math.max(pos - 1, 0)] ?? null)
+      }
+    }
+    doc.addEventListener('keydown', onKeyDown)
+    return () => doc.removeEventListener('keydown', onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, indicesKey])
+
+  const ignored = collectIgnoredEntries(verdicts, findings)
+  const ignoredCount = ignored.length
+  const counts = countVerdicts(verdicts)
+
+  const doCopyYaml = () => {
+    const yaml = toKnownIntentionalYaml(ignored)
+    if (!yaml) return
+    const ok = copyText(yaml)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1600)
+    if (!ok) setPayload(yaml)
+  }
+
+  const doBuildInstruction = () => {
+    const text = buildApplyInstruction(ignored)
+    setPayload(text)
+    if (text) copyText(text)
+  }
+
+  const rows = (filtered as IterateFinding[]).map((finding, i) => {
+    const index = indices[i] as number
+    const severity = finding.severity || 'low'
+    const verdict = verdicts[String(index)] || 'keep'
+    const isSelected = selected === index
+    const btn = (label: string, value: 'keep' | 'skip' | 'ignore', title: string) =>
+      React.createElement(
+        'button',
+        {
+          key: value,
+          className: 'iterate-vbtn',
+          'data-active': verdict === value ? value : undefined,
+          title,
+          onClick: () => setVerdict(index, value),
+        },
+        label,
+      )
+
+    return React.createElement('div', {
+      key: String(index),
+      className: 'iterate-finding',
+      'data-selected': isSelected ? '' : undefined,
+      onClick: () => setSelected(index),
+    },
+      React.createElement('div', { className: 'iterate-finding-meta' },
+        React.createElement('span', { className: 'iterate-sev-dot', style: { background: severityColor(severity) } }),
+        React.createElement('span', {}, severityLabel(severity)),
+        React.createElement('span', { className: 'iterate-finding-file' }, String(finding.file || '?')),
+        finding.line ? React.createElement('span', {}, `:${finding.line}`) : null,
+        React.createElement('span', {}, String(finding.dimension || '')),
+      ),
+      React.createElement('div', { className: 'iterate-finding-summary' }, String(finding.summary || '')),
+      React.createElement('div', { className: 'iterate-finding-actions' },
+        btn('y 修复', 'keep', '保留该 finding，进入修复'),
+        btn('n 跳过', 'skip', '跳过该 finding'),
+        btn('a 已知有意', 'ignore', '标记为已知有意并写入 known_intentional'),
+      ),
+    )
+  })
+
+  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'triage', className: 'iterate-triage' },
+    React.createElement('div', { className: 'iterate-triage-head' },
+      React.createElement('span', {}, `Iterate · Findings 分诊 (${filtered.length}/${findings.length})`),
+      React.createElement('span', { className: 'iterate-triage-hint' }, 'y=修复 · n=跳过 · a=已知有意 · ↑/↓ 选择'),
+    ),
+    React.createElement('div', { className: 'iterate-filter' },
+      React.createElement('select', { className: 'iterate-filter-select', value: filter.severities[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setSeverityFilter(e.target.value), title: '按严重度筛选' },
+        React.createElement('option', { value: '' }, '全部严重度'),
+        ...options.severities.map((s) =>
+          React.createElement('option', { key: s.value, value: s.value }, `${severityLabel(s.value)} (${s.count})`),
+        ),
+      ),
+      React.createElement('select', { className: 'iterate-filter-select', value: filter.dimensions[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDimensionFilter(e.target.value), title: '按维度筛选' },
+        React.createElement('option', { value: '' }, '全部维度'),
+        ...options.dimensions.map((d) =>
+          React.createElement('option', { key: d.value, value: d.value }, `${d.value} (${d.count})`),
+        ),
+      ),
+      React.createElement('input', {
+        className: 'iterate-filter-search',
+        type: 'search',
+        placeholder: '搜索文件 / 摘要…',
+        value: filter.search,
+        onChange: (e: React.ChangeEvent<HTMLInputElement>) => setSearchFilter(e.target.value),
+      }),
+      React.createElement('span', { className: 'iterate-filter-count' },
+        isFilterActive
+          ? React.createElement('button', { className: 'iterate-batch-btn', onClick: clearFilter }, `清除筛选（显示 ${filtered.length}）`)
+          : `共 ${findings.length} 项`,
+      ),
+    ),
+    React.createElement('div', { className: 'iterate-batch' },
+      React.createElement('span', { className: 'iterate-batch-label' }, '批量：'),
+      React.createElement('label', { className: 'iterate-batch-check', title: '勾选后批量按钮作用于全部 findings，否则仅当前可见' },
+        React.createElement('input', { type: 'checkbox', checked: selectAll, onChange: (e) => setSelectAll(e.target.checked) }),
+        selectAll ? `全部 ${allIndices.length}` : '全选',
+      ),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('keep') }, '全部 y'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('skip') }, '全部 n'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('ignore') }, '全部 a'),
+      React.createElement('span', { className: 'iterate-batch-label', style: { marginLeft: 8 } }, '全部：'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatchAll('keep') }, 'y'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatchAll('skip') }, 'n'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatchAll('ignore') }, 'a'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: doResetVerdicts, title: '把所有判定恢复为默认 y（修复）' }, '重置'),
+    ),
+    ...rows,
+    React.createElement('div', { className: 'iterate-triage-foot' },
+      React.createElement('span', {}, `y ${counts.keep} · n ${counts.skip} · a ${counts.ignore} · 待写回 known_intentional：${ignoredCount} 条`),
+      React.createElement('span', { style: { display: 'flex', gap: 6 } },
+        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': copied ? '' : undefined, onClick: doCopyYaml }, copied ? '已复制' : '复制 known_intentional'),
+        React.createElement('button', { className: 'iterate-btn', onClick: doBuildInstruction }, '生成应用指令'),
+      ),
+    ),
+    payload
+      ? React.createElement('div', { className: 'iterate-payload' }, payload)
+      : null,
+  )
+}
+
+/** Meta-review verdict banner: surfaces the closing dry-run audit result. */
+function VerdictBanner(props: SlotProps) {
+  const verdict = props.verdict as { verdict?: string; totalFindings?: number; totalRounds?: number; checksRun?: number; reportIssues?: number; converged?: boolean } | null
+  if (!verdict) return null
+  const ok = verdict.verdict === 'approved'
+  const item = (num: number | undefined, unit: string) =>
+    React.createElement('span', { className: 'iterate-verdict-item' },
+      React.createElement('b', {}, String(num)), ` ${unit}`)
+  const phrase = (text: string) =>
+    React.createElement('span', { className: 'iterate-verdict-item' }, text)
+  return React.createElement(
+    'div',
+    { 'data-iterate-root': '', 'data-iterate': 'verdict', className: 'iterate-verdict' },
+    React.createElement('span', { className: 'iterate-verdict-tag', 'data-ok': ok ? '' : undefined, 'data-warn': ok ? undefined : '' },
+      ok ? '报告已批准' : '报告需修订'),
+    React.createElement('span', { className: 'iterate-verdict-detail' },
+      item(verdict.totalFindings, '项发现'),
+      item(verdict.totalRounds, '轮'),
+      item(verdict.checksRun, '项审查'),
+      ok
+        ? phrase('报告通过全部一致性检查')
+        : item(verdict.reportIssues, '处报告缺陷'),
+      phrase(verdict.converged ? '已收敛' : '未收敛'),
+    ),
+  )
+}
+
+/** Turn-tail chain entry: triage when findings exist, stats card otherwise. */
+function TurnTailEntry(props: SlotProps) {
+  const candidates: unknown[] = []
+  if (props && props.turn) candidates.push(props.turn)
+  if (props && props.matched) candidates.push(props.matched)
+  if (props && props.data) candidates.push(props.data)
+  candidates.push(props)
+
+  // Meta-review verdict (dry-run closing result), found before the report.
+  let verdict: { verdict?: string; totalFindings?: number; totalRounds?: number; checksRun?: number; reportIssues?: number; converged?: boolean } | null = null
+  for (const c of candidates) {
+    const run = scanSessionForRunSummary(c)
+    if (run) { verdict = extractVerdict(run); break }
+  }
+
+  let report: ReviewReport | null = null
+  for (const c of candidates) {
+    const raw = findReportInObject(c, undefined, 24) || scanSessionForReport(c)
+    if (raw) { report = normalizeReport(raw) as ReviewReport; break }
+  }
+
+  const blocks: React.ReactElement[] = []
+  if (verdict) blocks.push(React.createElement(VerdictBanner, { key: 'verdict', verdict }))
+  if (report) {
+    // Render through React.createElement so each panel is a real component with
+    // its own hook identity (calling them as functions would violate the Rules
+    // of Hooks and crash when the findings/empty branch flips between renders).
+    const panel = !report.findings || report.findings.length === 0
+      ? React.createElement(StatsCard, { report })
+      : React.createElement(TriagePanel, { report })
+    blocks.push(React.createElement('div', { key: 'report' }, panel))
+  }
+  if (blocks.length === 0) return null
+  return React.createElement('div', { 'data-iterate-root': '', className: 'iterate-turn-tail-root' }, ...blocks)
+}
+
+/** Progress capsule: briefly surfaces round-completion (incl. convergence). */
+function ProgressCapsule() {
+  const [info, setInfo] = React.useState<{ text: string; ok: boolean } | null>(null)
+  React.useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const listener = (payload: { round: number; converged: boolean }) => {
+      const converged = payload && payload.converged === true
+      const round = payload && typeof payload.round === 'number' ? payload.round : '?'
+      setInfo({ text: converged ? `Round ${round} 完成 · 已收敛` : `Round ${round} 完成`, ok: converged })
+      if (timer) clearTimeout(timer)
+      // Converged notifications stay a bit longer.
+      timer = setTimeout(() => setInfo(null), converged ? 3600 : 2400)
+    }
+    roundPulseListeners.push(listener)
+    return () => {
+      const i = roundPulseListeners.indexOf(listener)
+      if (i >= 0) roundPulseListeners.splice(i, 1)
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
+  if (!info) return null
+  return React.createElement('div', { 'data-iterate-root': '', className: 'iterate-capsule', 'data-ok': info.ok ? '' : undefined }, info.text)
+}
+
+/** Settings page section (root scope; reads localStorage + latest known data). */
+function SettingsPanel() {
+  const [enabled, setEnabled] = React.useState(themeEnabled)
+  const [copied, setCopied] = React.useState(false)
+  const [showGuide, setShowGuide] = React.useState(false)
+  const [clearedCount, setClearedCount] = React.useState<number | null>(null)
+  const [showStatus, setShowStatus] = React.useState(false)
+  const guide = buildConfigEditGuide()
+  const statusGuide = buildRuntimeStatusGuide()
+
+  const toggleTheme = () => {
+    const next = !enabled
+    setEnabled(next)
+    setThemeEnabled(next)
+  }
+
+  const doCopyGuide = () => {
+    copyText(guide)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1600)
+  }
+
+  const doClearTriage = () => {
+    const count = removeStorageByPrefix(TRIAGE_STORAGE_PREFIX)
+    setClearedCount(count)
+    setTimeout(() => setClearedCount(null), 3000)
+  }
+
+  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'settings', className: 'iterate-settings' },
+    React.createElement('div', { className: 'iterate-settings-title' }, 'iterate 设置'),
+    React.createElement('div', { className: 'iterate-settings-row' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, 'iterate 主题'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '启用暖琥珀配色的 iterate 专属皮肤（覆盖 dsh 默认主题令牌）。'),
+      ),
+      React.createElement('button', {
+        className: 'iterate-btn',
+        'data-primary': enabled ? '' : undefined,
+        onClick: toggleTheme,
+      }, enabled ? '已启用' : '已关闭'),
+    ),
+    React.createElement('div', { className: 'iterate-settings-row' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, '分诊持久化'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '分诊面板的 y/n/a 判定保存在本地浏览器（localStorage），刷新会话后仍保留。'),
+      ),
+      React.createElement('span', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+        React.createElement('span', { className: 'iterate-chip' }, '本地保存'),
+        React.createElement('button', {
+          className: 'iterate-btn',
+          onClick: doClearTriage,
+          title: '清除所有分诊判定记录',
+          'data-primary': clearedCount !== null ? '' : undefined,
+          'data-copied': clearedCount !== null ? '' : undefined,
+        }, clearedCount !== null ? `已清除 ${clearedCount} 条` : '清除分诊'),
+      ),
+    ),
+    React.createElement('div', { className: 'iterate-settings-row' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, '配置管理'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '目标 / 维度 / 最大轮数写在项目的 iterate.config.yaml。复制指引让模型为你调整，或展开查看可编辑字段。'),
+      ),
+      React.createElement('span', { style: { display: 'flex', gap: 6 } },
+        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': copied ? '' : undefined, onClick: doCopyGuide }, copied ? '已复制' : '复制指引'),
+        React.createElement('button', { className: 'iterate-btn', onClick: () => setShowGuide((v) => !v) }, showGuide ? '收起' : '查看'),
+      ),
+    ),
+    showGuide
+      ? React.createElement('div', { className: 'iterate-settings-guide' }, guide)
+      : null,
+    React.createElement('div', { className: 'iterate-settings-row' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, '状态概览'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '运行时产物布局与清理指引。iterate_status / iterate_history / iterate_prune 工具用于查看和管理。'),
+      ),
+      React.createElement('button', { className: 'iterate-btn', onClick: () => setShowStatus((v) => !v) }, showStatus ? '收起' : '查看'),
+    ),
+    showStatus
+      ? React.createElement('div', { className: 'iterate-settings-guide' }, statusGuide)
+      : null,
+  )
+}
+
+// ─── Registration ────────────────────────────────────────────────────────────
+
+/**
+ * Chain selector for conversation.chat.turnTail.
+ * Returns a marker when the turn contains an iterate review report, null otherwise.
+ */
+function selectTurnTail(owner: SlotProps): { matched: boolean } | null {
+  if (!owner) return null
+  if (findReportInObject(owner.turn, undefined, 24) || scanSessionForReport(owner.turn)) return { matched: true }
+  if (scanSessionForRunSummary(owner.turn)) return { matched: true }
+  return null
+}
+
+/**
+ * Plugin client entry. Called by the dsh client runtime with its context.
+ */
+export function apply(ctx: ClientContext): void {
+  // 1. Resolve optional services (degrade, never throw).
+  slotsSvc = readSlots(ctx)
+  themeSvc = readTheme(ctx)
+  storage = createStorage()
+
+  // 2. Theme preference bootstrap.
+  const savedTheme = storage.get(THEME_STORAGE_KEY)
+  themeEnabled = savedTheme === null ? true : savedTheme === '1'
+  if (themeEnabled) applyThemeSkin()
+
+  // 3. Inject styles (independent of slots / React availability).
+  if (typeof document !== 'undefined' && document.createElement && document.head) {
+    const style = document.createElement('style')
+    style.dataset.plugin = PLUGIN_TAG
+    style.dataset.pluginCss = 'iterate-main'
+    style.textContent = ITERATE_CSS
+    document.head.appendChild(style)
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => { try { style.remove() } catch { /* noop */ } })
+    }
+  }
+
+  // 4. Slot UI requires the slots service.
+  if (slotsSvc === undefined) {
+    log('slots service unavailable — slot UI disabled')
+    return
+  }
+
+  // 5. Register the six-part UI.
+  if (typeof slotsSvc.inject === 'function') {
+    // 1 + 5: convergence dashboard + round pulse (session scope).
+    slotsSvc.inject('conversation.input.dock', () =>
+      slotsSvc?.register(
+        { name: 'conversation.input.dock', id: 'iterate-dashboard', order: 90 },
+        (props) => React.createElement(ConvergenceDashboard, props),
+      ),
+    )
+
+    // 2 + 3: triage panel / stats card (turn-tail chain, session scope).
+    slotsSvc.inject('conversation.chat.turnTail', () =>
+      slotsSvc?.register(
+        { name: 'conversation.chat.turnTail', id: 'iterate-turn-tail', select: selectTurnTail },
+        (props) => React.createElement(TurnTailEntry, props),
+      ),
+    )
+
+    // 5: progress capsule (frame overlay, root scope).
+    slotsSvc.inject('shell.overlay', () =>
+      slotsSvc?.register(
+        { name: 'shell.overlay', id: 'iterate-progress', order: 0 },
+        (props) => React.createElement(ProgressCapsule, props),
+      ),
+    )
+
+    // 6: settings page section (root scope).
+    slotsSvc.inject('settings.section', () =>
+      slotsSvc?.register(
+        { name: 'settings.section', id: 'iterate-settings', order: 30, label: () => 'iterate' },
+        (props) => React.createElement(SettingsPanel, props),
+      ),
+    )
+  }
+
+  // 6: keep theme toggle state consistent across theme/change events.
+  if (typeof ctx.on === 'function') {
+    ctx.on('theme/change', () => {
+      if (themeEnabled) applyThemeSkin()
+    })
+  }
+}
