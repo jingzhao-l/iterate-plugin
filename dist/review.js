@@ -273,6 +273,154 @@ export function findingsSchema() {
         required: ['findings'],
     };
 }
+// ─── Output schema validation ──────────────────────────────────────────────
+//
+// `config.reviewer.output_schema_validation` (default true) turns on a
+// deterministic schema gate at the `aggregate` boundary: reviewer subagent
+// outputs are parsed as JSON by the orchestrator, but models sometimes return
+// malformed findings (missing fields, wrong types, out-of-range severity).
+// Before any finding reaches the deterministic core (dedupe/sort/report) —
+// which would crash on e.g. a missing `summary` — we validate every entry
+// against the same shape `findingsSchema()` describes and surface the issues
+// so the workflow can retry that round (≤2 times) with a strict-JSON nudge.
+// Schema-invalid findings are dropped from the report; the workflow never
+// forwards them into fixes.
+/** Fields every finding object MUST carry (mirrors findingsSchema().required). */
+export const REQUIRED_FINDING_FIELDS = [
+    'dimension',
+    'file',
+    'severity',
+    'summary',
+    'failure_scenario',
+    'suggested_fix',
+    'is_atomic',
+];
+/** Allowed severity values (mirrors the schema enum). */
+export const SEVERITY_VALUES = ['critical', 'high', 'medium', 'low'];
+/** String-typed finding fields (type check only, presence handled by REQUIRED). */
+const STRING_FINDING_FIELDS = [
+    'dimension',
+    'file',
+    'summary',
+    'failure_scenario',
+    'suggested_fix',
+];
+/**
+ * Validate an arbitrary parsed value against the findings schema shape.
+ * Accepts the `{findings: [...]}` wrapper OR a bare findings array, so callers
+ * can validate either the raw reviewer output object or a round's findings.
+ * Pure and deterministic — never touches the filesystem.
+ */
+export function validateFindingsSchema(input) {
+    const raw = input?.findings ?? input;
+    if (!Array.isArray(raw)) {
+        return [
+            {
+                index: -1,
+                field: 'findings',
+                message: 'expected a JSON array of finding objects',
+            },
+        ];
+    }
+    const issues = [];
+    for (let i = 0; i < raw.length; i++) {
+        const item = raw[i];
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            issues.push({
+                index: i,
+                field: `findings[${i}]`,
+                message: 'expected a finding object',
+            });
+            continue;
+        }
+        const f = item;
+        for (const key of REQUIRED_FINDING_FIELDS) {
+            if (f[key] === undefined || f[key] === null) {
+                issues.push({
+                    index: i,
+                    field: `findings[${i}].${key}`,
+                    message: `required field "${key}" is missing`,
+                });
+            }
+        }
+        for (const key of STRING_FINDING_FIELDS) {
+            if (f[key] !== undefined && f[key] !== null && typeof f[key] !== 'string') {
+                issues.push({
+                    index: i,
+                    field: `findings[${i}].${key}`,
+                    message: `"${key}" must be a string`,
+                });
+            }
+        }
+        if (f.severity !== undefined &&
+            f.severity !== null &&
+            !SEVERITY_VALUES.includes(f.severity)) {
+            issues.push({
+                index: i,
+                field: `findings[${i}].severity`,
+                message: `severity must be one of: ${SEVERITY_VALUES.join(', ')}`,
+            });
+        }
+        if (f.is_atomic !== undefined &&
+            f.is_atomic !== null &&
+            typeof f.is_atomic !== 'boolean') {
+            issues.push({
+                index: i,
+                field: `findings[${i}].is_atomic`,
+                message: 'is_atomic must be a boolean',
+            });
+        }
+        if (f.line !== undefined &&
+            f.line !== null &&
+            (typeof f.line !== 'number' || !Number.isInteger(f.line) || f.line < 0)) {
+            issues.push({
+                index: i,
+                field: `findings[${i}].line`,
+                message: 'line must be a non-negative integer (0 = whole-file)',
+            });
+        }
+    }
+    return issues;
+}
+/**
+ * Validate every round's findings against the findings schema.
+ * Round order matches the input `rounds` array.
+ */
+export function validateRoundsSchema(rounds) {
+    return rounds.map((r) => {
+        const issues = validateFindingsSchema(r.findings);
+        return { round: r.round, valid: issues.length === 0, issues };
+    });
+}
+/**
+ * Drop schema-invalid findings before they reach the deterministic core.
+ *
+ * - With a non-null `schemaValidation` (validation enabled): drop every finding
+ *   flagged by a schema issue; a round-level issue (index -1) empties the round.
+ * - With `schemaValidation === null` (validation disabled): still drop entries
+ *   that are not plain objects, which would crash `findingKey`/dedupe.
+ *
+ * Round order and round numbers are preserved so downstream convergence math
+ * keeps working on the sanitized stream.
+ */
+export function sanitizeRounds(rounds, schemaValidation) {
+    return rounds.map((r, i) => {
+        if (schemaValidation) {
+            const issues = schemaValidation[i]?.issues ?? [];
+            if (issues.some((iss) => iss.index === -1))
+                return { round: r.round, findings: [] };
+            const bad = new Set(issues.map((iss) => iss.index));
+            return {
+                round: r.round,
+                findings: r.findings.filter((_, fi) => !bad.has(fi)),
+            };
+        }
+        return {
+            round: r.round,
+            findings: r.findings.filter((f) => Boolean(f) && typeof f === 'object' && !Array.isArray(f)),
+        };
+    });
+}
 /**
  * Build the task prompt for one dimension's reviewer subagent.
  * In dry-run mode, pass `alreadyKnown` (the findings from earlier rounds) so the
@@ -281,6 +429,10 @@ export function findingsSchema() {
 export function reviewerTaskPrompt(input) {
     const parts = [];
     parts.push(`You are the "${input.dimension}" reviewer for the iterate review.`, `Goal: ${input.goal}`, `Scope: ${input.scope === 'full' ? 'entire codebase' : 'changed files only'}.`);
+    if (input.scope === 'changed-only' && input.changedFiles && input.changedFiles.length > 0) {
+        parts.push('Changed files to review (review ONLY these files; they are the diff against ' +
+            'the target branch):', input.changedFiles.join('\n'));
+    }
     if (input.mode === 'dry-run') {
         parts.push('MODE: dry-run / pure review. You MUST NOT modify, create, or delete ANY file. Read-only analysis only.');
     }
@@ -290,9 +442,17 @@ export function reviewerTaskPrompt(input) {
     else {
         parts.push('This is round 1 — report every issue you find in this dimension.');
     }
+    parts.push('EVIDENCE RULE (mandatory): read every file you report on with the ' +
+        'read_file tool BEFORE judging it. NEVER report a location you did not ' +
+        'actually read — speculation about code you never inspected is a ' +
+        'disqualifying failure, and fabricated line numbers are treated as ' +
+        'poisoned evidence. Anchor every finding to real code.');
     parts.push(`Return a JSON object: {"findings": [...]}.`, `Each finding: dimension (must be "${input.dimension}"), file (relative path), ` +
-        'line (optional integer), severity (critical/high/medium/low), summary (one line), ' +
-        'failure_scenario (how/when it fails, specific evidence), suggested_fix (the concrete fix), ' +
+        'line (REQUIRED positive integer — the exact line you READ for an ' +
+        'anchored, line-targeted issue; use 0 for whole-file/module-level ' +
+        'issues), severity (critical/high/medium/low), summary (one line), ' +
+        'failure_scenario (how/when it fails, backed by the code you actually ' +
+        'read), suggested_fix (the concrete fix), ' +
         `is_atomic (true if the fix is <= ${input.maxLines} lines within a SINGLE file/function, else false).`, `Write summaries and details in ${input.outputLanguage}.`);
     return parts.join('\n');
 }
@@ -307,9 +467,14 @@ export function buildReviewPlan(input) {
     // throwing an uncaught TypeError inside the tool's `execute`.
     const language = input.config.language === 'zh' ? 'Chinese (中文)' : 'English';
     const goal = input.config.goal ?? '';
-    const scope = input.config.review?.scope ?? 'full';
+    const configuredScope = input.config.review?.scope ?? 'full';
     const dimensions = Array.isArray(input.config.dimensions) ? input.config.dimensions : [];
     const maxLines = input.config.atomic?.max_lines ?? 20;
+    const changedFiles = Array.isArray(input.changedFiles) ? input.changedFiles : [];
+    // changed-only with zero detected changes → auto-fallback to full scope.
+    const effectiveChangedOnly = configuredScope === 'changed-only' && changedFiles.length > 0;
+    const scope = effectiveChangedOnly ? 'changed-only' : 'full';
+    const fallbackToFull = configuredScope === 'changed-only' && changedFiles.length === 0;
     return {
         mode: input.mode,
         goal,
@@ -324,10 +489,13 @@ export function buildReviewPlan(input) {
                 alreadyKnown: [],
                 outputLanguage: language,
                 maxLines,
+                changedFiles: effectiveChangedOnly ? changedFiles : undefined,
             }),
             findingsSchema: findingsSchema(),
         })),
         maxReviewRounds: input.maxReviewRounds,
         knownIntentional: input.knownIntentional ?? [],
+        changedFiles: effectiveChangedOnly ? changedFiles : [],
+        fallbackToFull,
     };
 }

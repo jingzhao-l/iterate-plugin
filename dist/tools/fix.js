@@ -20,6 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { loadEffectiveConfig, resolveProjectRoot } from "../config-loader.js";
+import { countTouchedMethods } from "../method-scope.js";
 import { fixBackupPath, fixRegistryPath, fixesDir } from "../paths.js";
 import { appendDecisionEntry } from "./decision-log.js";
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -218,7 +219,7 @@ export function registerFixTool(ctx) {
         name: 'iterate_fix',
         description: 'Apply ONE atomic fix to a file. Pass the target relative `file`, the finding that motivated ' +
             'the fix, the NEW full `content` of that file (after your edit), and the current `round`. ' +
-            'The tool backs up the original, enforces the atomic `max_lines` threshold (unless `force`), ' +
+            'The tool backs up the original, enforces the atomic `max_lines` and `max_adjacent_methods` thresholds (unless `force`), ' +
             'writes the new content, and records the fix for later diff/rollback. ' +
             'This is the ONLY sanctioned way to apply fixes in normal mode.',
         parameters: {
@@ -278,6 +279,7 @@ export function registerFixTool(ctx) {
             const projectRoot = resolved.root;
             const { config } = loadEffectiveConfig(projectRoot);
             const maxLines = config.atomic?.max_lines ?? 20;
+            const maxAdjacentMethods = config.atomic?.max_adjacent_methods ?? 3;
             const file = typeof args.file === 'string' ? args.file : '';
             if (!file)
                 return { ok: false, error: 'file is required' };
@@ -305,12 +307,21 @@ export function registerFixTool(ctx) {
             const current = readProjectFile(projectRoot, file);
             if (!current.ok)
                 return { ok: false, error: current.reason };
+            const hunks = diffLines(current.content, args.content);
             const { added, removed } = countChangedLines(current.content, args.content);
             if (!args.force && (added > maxLines || removed > maxLines)) {
                 return {
                     ok: false,
                     error: `Change to ${file} exceeds the atomic threshold (max_lines=${maxLines}, change is +${added}/-${removed}). ` +
                         'Either split it into smaller atomic fixes or pass force:true if this is a deliberate architectural change.',
+                };
+            }
+            const touchedMethods = countTouchedMethods(current.content, args.content, hunks);
+            if (!args.force && touchedMethods > maxAdjacentMethods) {
+                return {
+                    ok: false,
+                    error: `Change to ${file} touches ${touchedMethods} adjacent method(s), exceeds atomic.max_adjacent_methods (${maxAdjacentMethods}). ` +
+                        'Split it into smaller atomic fixes or pass force:true if this is a deliberate multi-method change.',
                 };
             }
             const id = fixId(finding);
@@ -336,7 +347,6 @@ export function registerFixTool(ctx) {
             catch (err) {
                 return { ok: false, error: `failed to write file: ${String(err)}` };
             }
-            const hunks = diffLines(current.content, args.content);
             const record = {
                 id,
                 timestamp,

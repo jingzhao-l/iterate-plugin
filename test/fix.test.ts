@@ -297,6 +297,59 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
     }
   })
 
+  it('enforces the atomic max_adjacent_methods threshold unless force is set', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const twoMethod = 'function first() {\n  return 1\n}\nfunction second() {\n  return 2\n}\n'
+    const fixedBoth = 'function first() {\n  return 10\n}\nfunction second() {\n  return 20\n}\n'
+    const { dir, cleanup } = tempProject({
+      'iterate.config.yaml': 'goal: test\natomic:\n  max_lines: 20\n  max_adjacent_methods: 1\n',
+      'src/two.ts': twoMethod,
+    })
+    try {
+      const res = (await fix({
+        file: 'src/two.ts',
+        content: fixedBoth,
+        finding: finding({ file: 'src/two.ts' }),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /exceeds atomic.max_adjacent_methods/)
+
+      // force bypasses the adjacent-methods threshold.
+      const forced = (await fix({
+        file: 'src/two.ts',
+        content: fixedBoth,
+        finding: finding({ file: 'src/two.ts' }),
+        round: 1,
+        force: true,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(forced.ok, true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('allows a multi-method fix that stays within the default threshold', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const twoMethod = 'function first() {\n  return 1\n}\nfunction second() {\n  return 2\n}\n'
+    const fixedBoth = 'function first() {\n  return 10\n}\nfunction second() {\n  return 20\n}\n'
+    const { dir, cleanup } = tempProject({ 'src/two.ts': twoMethod })
+    try {
+      const res = (await fix({
+        file: 'src/two.ts',
+        content: fixedBoth,
+        finding: finding({ file: 'src/two.ts' }),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('rejects a finding that was already fixed this run', async () => {
     const [fix] = captureTools([registerFixTool]) as [Tool]
     const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })

@@ -1,7 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { loadEffectiveConfig, resolveProjectRoot } from "../config-loader.js";
-import { buildReviewPlan, buildReviewReport } from "../review.js";
+import { buildReviewPlan, buildReviewReport, sanitizeRounds, validateRoundsSchema, } from "../review.js";
 import { buildFinalReviewReport, metaReviewReport } from "../meta-review.js";
+import { evidenceToPlain, verifyFindings } from "../evidence.js";
+import { resolveChangedFiles } from "../git-scope.js";
 /** Default round cap when neither the arg nor config provides one. */
 const DEFAULT_MAX_REVIEW_ROUNDS = 3;
 /**
@@ -82,6 +84,13 @@ export function registerReviewTool(ctx) {
                     found: { type: 'boolean' },
                     plan: { type: 'json' },
                     report: { type: 'json' },
+                    schemaValidation: {
+                        type: 'json',
+                        description: 'For `aggregate`: per-round schema validation results (round, valid, issues). ' +
+                            'Present only when reviewer.output_schema_validation is enabled; the workflow ' +
+                            'retries rounds with valid=false (≤2 times) before forwarding findings.',
+                    },
+                    evidence: { type: 'json' },
                     finalReport: { type: 'json' },
                     error: { type: 'string' },
                 },
@@ -104,7 +113,16 @@ export function registerReviewTool(ctx) {
                 const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS;
                 const knownIntentional = config.personalization
                     ?.known_intentional;
-                const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional });
+                // changed-only scope: resolve the changed-file set against
+                // git.target_branch before building the plan so reviewers get the
+                // concrete file list (and the plan auto-falls back to full when there
+                // are no changes). git failures degrade to a full-scope plan.
+                let changedFiles;
+                if (config.review?.scope === 'changed-only') {
+                    const gitScope = await resolveChangedFiles(projectRoot, config.git?.target_branch ?? 'main');
+                    changedFiles = gitScope.changedFiles;
+                }
+                const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles });
                 return { operation: 'plan', mode, found: true, plan: plan };
             }
             if (args.operation === 'aggregate') {
@@ -126,16 +144,32 @@ export function registerReviewTool(ctx) {
                 const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS;
                 const goal = args.goal ?? config.goal ?? '';
                 const dimensions = config.dimensions ?? [];
+                // Output schema validation gate (reviewer.output_schema_validation,
+                // default true): validate every round's findings against the findings
+                // schema, then drop schema-invalid entries before the deterministic
+                // core so malformed reviewer output can never crash dedupe/sort or
+                // leak into fixes. The `schemaValidation` array is surfaced so the
+                // workflow can retry failing rounds (≤2 times) with a strict-JSON
+                // nudge. When disabled, non-object entries are still dropped for
+                // crash-safety.
+                const schemaEnabled = config.reviewer?.output_schema_validation !== false;
+                const schemaValidation = schemaEnabled ? validateRoundsSchema(rounds) : null;
+                const cleanRounds = sanitizeRounds(rounds, schemaValidation);
                 const report = buildReviewReport({
                     mode,
                     goal,
                     dimensions,
                     maxReviewRounds,
-                    rounds,
+                    rounds: cleanRounds,
                     knownIntentional: args.knownIntentional,
                     fixedCount: typeof args.fixedCount === 'number' ? args.fixedCount : undefined,
                 });
-                return { operation: 'aggregate', mode, report: report };
+                return {
+                    operation: 'aggregate',
+                    mode,
+                    report: report,
+                    schemaValidation: schemaValidation,
+                };
             }
             if (args.operation === 'meta-review') {
                 const source = args.report;
@@ -147,12 +181,19 @@ export function registerReviewTool(ctx) {
                     };
                 }
                 const audit = metaReviewReport(source);
-                const finalReport = buildFinalReviewReport(source);
+                // Hard code-evidence gate (default on): every finding's file/line is
+                // validated against real files on disk before folding into the final
+                // verdict. Disable via config `reviewer.evidence_validation: false`.
+                const evidenceEnabled = config.reviewer?.evidence_validation !== false;
+                const findings = Array.isArray(source.findings) ? source.findings : [];
+                const evidence = evidenceEnabled ? verifyFindings(projectRoot, findings) : null;
+                const finalReport = buildFinalReviewReport(source, { evidence });
                 return {
                     operation: 'meta-review',
                     mode,
                     found: true,
                     report: audit,
+                    evidence: evidence ? evidenceToPlain(evidence) : null,
                     finalReport: finalReport,
                 };
             }

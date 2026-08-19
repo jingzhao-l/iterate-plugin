@@ -48,7 +48,7 @@ export function defaultConfig() {
             auto_merge: false,
         },
         validation: { command_whitelist: [], commands: {} },
-        reviewer: { output_schema_validation: true },
+        reviewer: { output_schema_validation: true, evidence_validation: true },
     };
 }
 /**

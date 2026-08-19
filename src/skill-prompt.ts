@@ -14,7 +14,7 @@ You have the iterate plugin installed, which registers these tools:
 - \`iterate_validate\` — run a whitelisted validation command
 - \`iterate_decision_log\` — append to the decision log, or read entries back for review
 - \`iterate_context\` — read SKILL.md / ITERATE.md project context
-- \`iterate_review\` — deterministic review engine: \`plan\` builds the review plan; \`aggregate\` dedupes/merges findings and computes convergence; \`meta-review\` audits a built report for internal consistency (counts, buckets, sorting, convergence math) and returns a final report with an \`approved\` / \`needs_revision\` verdict. Purely computational.
+- \`iterate_review\` — deterministic review engine: \`plan\` builds the review plan (for \`review.scope: changed-only\`, it resolves the git-diff file set against \`git.target_branch\` and auto-falls back to \`full\` when nothing changed); \`aggregate\` dedupes/merges findings, validates every finding against the findings schema when \`reviewer.output_schema_validation\` is on (dropping invalid entries and reporting them via \`schemaValidation\`), and computes convergence; \`meta-review\` audits a built report for internal consistency (counts, buckets, sorting, convergence math) and returns a final report with an \`approved\` / \`needs_revision\` verdict. Purely computational.
 - \`iterate_triage\` — manage "known_intentional" entries in the config (list / apply, with dedupe + backup + rollback)
 - \`iterate_fix\` — apply ONE atomic fix: backs up the file, enforces the atomic max_lines threshold, writes the new content, and records the fix (id + diff summary) in \`.iterate/fixes/registry.json\`
 - \`iterate_diff\` — show the accumulated diff for a fixed file (vs its original backup) or a per-file summary of all fixes
@@ -62,18 +62,36 @@ const rounds = []           // raw per-round findings
 phase('review')
 for (let r = 1; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — finding NEW issues only')
-  const raw = await parallel(dims.map(dim => () => agent(
-    'Review dimension "' + dim + '". Already-known findings (do NOT re-report): ' +
-    JSON.stringify(known) + '\\nReturn the findings JSON object.',
-    { label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }
-  )))
-  const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
-  rounds.push(thisRound)
-  // Deterministic aggregate: cross-round dedupe + known_intentional filter + severity sort.
-  const agg = await agent(
-    'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
-    { label: 'review:aggregate:r' + r }
-  )
+  let agg = null
+  let schemaInvalid = false
+  let retries = 0
+  do {
+    // Schema validation retry: on the 2nd+ pass, nudge reviewers toward strict JSON.
+    const nudge = retries > 0
+      ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
+      : ''
+    const raw = await parallel(dims.map(dim => () => agent(
+      'Review dimension "' + dim + '". Already-known findings (do NOT re-report): ' +
+      JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.',
+      { label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }
+    )))
+    const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
+    if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
+    // Deterministic aggregate: cross-round dedupe + known_intentional filter + severity sort.
+    agg = await agent(
+      'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
+      { label: 'review:aggregate:r' + r }
+    )
+    // reviewer.output_schema_validation (default on): aggregate returns per-round
+    // schemaValidation; retry the just-finished round (≤2 times) when invalid.
+    schemaInvalid = agg && agg.schemaValidation && agg.schemaValidation.length > 0
+      ? agg.schemaValidation[agg.schemaValidation.length - 1].valid === false
+      : false
+    if (schemaInvalid && retries < 2) {
+      retries += 1
+      log('retry ' + retries + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
+    }
+  } while (schemaInvalid && retries <= 2)
   // Feed the DEDUPED + already-filtered set back (not raw findings) so the known
   // list stays bounded and reviewers never see the same issue twice.
   if (agg && agg.report && Array.isArray(agg.report.findings)) known = agg.report.findings
@@ -124,6 +142,7 @@ Key rules for dry-run:
 - **NEVER call a fixer / never edit files / never create branches or worktree.** Reviewers read only.
 - **Every reviewer MUST actually read each file it reports on (read_file) BEFORE judging it, and anchor every finding to a real location. Fabricated file paths or invented line numbers are poisoned evidence and fail the run.** Subagents never report on code they didn't inspect.
 - Each round feeds the already-known findings to reviewers so they hunt NEW issues only → that is what drives convergence.
+- **Schema validation & retry**: when \`reviewer.output_schema_validation\` is on (default), \`aggregate\` validates every finding against the findings schema and returns \`schemaValidation\` (per-round {round, valid, issues}). If the just-finished round is invalid, retry its reviewers up to 2 times with the strict-JSON nudge (see the loop above), then re-aggregate. Schema-invalid findings are dropped by \`aggregate\` and must NEVER be fed back as known findings or reported as converged.
 - Stop when a round reports 0 new findings (converged) or maxReviewRounds is reached.
 - The report (with per-round convergence stats + suggested fix priorities) is the deliverable.
 - **Meta-review**: after building the report, audit it with \`iterate_review({operation:"meta-review"})\` for internal consistency (counts, severity buckets, dimension sums, sort order, convergence math). The meta-review ALSO runs the hard code-evidence gate (default on): every finding's file/line is validated against real files on disk, so any fabricated location surfaces as a critical \`EVIDENCE_VIOLATION\` and flips the verdict to \`needs_revision\`. The \`finalReport.verdict\` is \`approved\` only when the report passes every check AND every finding anchors to real, read code; otherwise \`needs_revision\`. Surface the final report and its verdict as the closing deliverable.
@@ -170,21 +189,39 @@ let failedCommands = []
 phase('loop')
 for (let r = startRound; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — review current state, fix atomics via iterate_fix, validate')
-  const raw = await parallel(dims.map(dim => () => agent(
-    'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed). ' +
-    'Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + '\\nReturn the findings JSON object.',
-    { label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }
-  )))
-  const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
-  rounds.push(thisRound)
+  let agg = null
+  let schemaInvalid = false
+  let retries = 0
+  do {
+    // Schema validation retry: on the 2nd+ pass, nudge reviewers toward strict JSON.
+    const nudge = retries > 0
+      ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
+      : ''
+    const raw = await parallel(dims.map(dim => () => agent(
+      'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed). ' +
+      'Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.',
+      { label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }
+    )))
+    const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
+    if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
 
-  // Deterministic dedupe / known_intentional filter / severity sort for this round.
-  // \`fixedCount\` is threaded into the report summary so the client dashboard can
-  // show a running "fixes applied" metric for normal mode.
-  const agg = await agent(
-    'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + ', fixedCount:' + fixedCount + '}) and return the report JSON.',
-    { label: 'review:aggregate:r' + r }
-  )
+    // Deterministic dedupe / known_intentional filter / severity sort for this round.
+    // \`fixedCount\` is threaded into the report summary so the client dashboard can
+    // show a running "fixes applied" metric for normal mode.
+    agg = await agent(
+      'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + ', fixedCount:' + fixedCount + '}) and return the report JSON.',
+      { label: 'review:aggregate:r' + r }
+    )
+    // reviewer.output_schema_validation (default on): aggregate returns per-round
+    // schemaValidation; retry the just-finished round (≤2 times) when invalid.
+    schemaInvalid = agg && agg.schemaValidation && agg.schemaValidation.length > 0
+      ? agg.schemaValidation[agg.schemaValidation.length - 1].valid === false
+      : false
+    if (schemaInvalid && retries < 2) {
+      retries += 1
+      log('retry ' + retries + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
+    }
+  } while (schemaInvalid && retries <= 2)
   const findings = (agg && agg.report && agg.report.findings) ? agg.report.findings : thisRound.findings
   const atomic = findings.filter(f => f.is_atomic === true)
   const remaining = findings.filter(f => f.is_atomic !== true)
@@ -321,6 +358,7 @@ return {
 Key rules for normal mode:
 - Fixers are the ONLY agents allowed to write files, and they must go through \`iterate_fix\` — never edit files directly. That is what gives every change a backup, a diff, and a rollback path. Reviewers read only. Architectural findings are reported, never auto-fixed.
 - Aggregate the current round deterministically (\`report.findings\`) before fixing, so fixes act on deduped/filtered/sorted findings.
+- **Schema validation & retry**: when \`reviewer.output_schema_validation\` is on (default), retry the round's reviewers up to 2 times when \`aggregate\` reports \`schemaValidation\` valid=false for it, then re-aggregate. Never forward schema-invalid findings into \`iterate_fix\`.
 - Apply atomic fixes **per file**: one fixer agent handles all findings for a given file serially (so the same file is never edited concurrently); different files are fixed in parallel.
 - **Resume**: load the checkpoint first; if a previous run left one, continue from \`checkpoint.round + 1\` (its \`fixedCount\` and deduped \`findings\` are carried forward).
 - **Validate after every round** of fixes; on ANY validation failure, roll back the round's fixes via \`iterate_rollback\` and stop (the checkpoint is left in place so the run can be resumed).

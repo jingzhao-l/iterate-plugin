@@ -1,9 +1,15 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadEffectiveConfig, resolveProjectRoot } from '../config-loader.ts'
-import { buildReviewPlan, buildReviewReport } from '../review.ts'
+import {
+  buildReviewPlan,
+  buildReviewReport,
+  sanitizeRounds,
+  validateRoundsSchema,
+} from '../review.ts'
 import { buildFinalReviewReport, metaReviewReport } from '../meta-review.ts'
 import { evidenceToPlain, verifyFindings } from '../evidence.ts'
+import { resolveChangedFiles } from '../git-scope.ts'
 import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
 
 /** Default round cap when neither the arg nor config provides one. */
@@ -95,6 +101,13 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             found: { type: 'boolean' },
             plan: { type: 'json' },
             report: { type: 'json' },
+            schemaValidation: {
+              type: 'json',
+              description:
+                'For `aggregate`: per-round schema validation results (round, valid, issues). ' +
+                'Present only when reviewer.output_schema_validation is enabled; the workflow ' +
+                'retries rounds with valid=false (≤2 times) before forwarding findings.',
+            },
             evidence: { type: 'json' },
             finalReport: { type: 'json' },
             error: { type: 'string' },
@@ -120,7 +133,16 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS
           const knownIntentional = (config.personalization as { known_intentional?: KnownIntentional[] } | undefined)
             ?.known_intentional
-          const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional })
+          // changed-only scope: resolve the changed-file set against
+          // git.target_branch before building the plan so reviewers get the
+          // concrete file list (and the plan auto-falls back to full when there
+          // are no changes). git failures degrade to a full-scope plan.
+          let changedFiles: string[] | undefined
+          if (config.review?.scope === 'changed-only') {
+            const gitScope = await resolveChangedFiles(projectRoot, config.git?.target_branch ?? 'main')
+            changedFiles = gitScope.changedFiles
+          }
+          const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles })
           return { operation: 'plan', mode, found: true, plan: plan as unknown as JsonValue }
         }
 
@@ -145,16 +167,34 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS
           const goal = args.goal ?? config.goal ?? ''
           const dimensions = config.dimensions ?? []
+
+          // Output schema validation gate (reviewer.output_schema_validation,
+          // default true): validate every round's findings against the findings
+          // schema, then drop schema-invalid entries before the deterministic
+          // core so malformed reviewer output can never crash dedupe/sort or
+          // leak into fixes. The `schemaValidation` array is surfaced so the
+          // workflow can retry failing rounds (≤2 times) with a strict-JSON
+          // nudge. When disabled, non-object entries are still dropped for
+          // crash-safety.
+          const schemaEnabled = config.reviewer?.output_schema_validation !== false
+          const schemaValidation = schemaEnabled ? validateRoundsSchema(rounds) : null
+          const cleanRounds = sanitizeRounds(rounds, schemaValidation)
+
           const report = buildReviewReport({
             mode,
             goal,
             dimensions,
             maxReviewRounds,
-            rounds,
+            rounds: cleanRounds,
             knownIntentional: args.knownIntentional as KnownIntentional[] | undefined,
             fixedCount: typeof args.fixedCount === 'number' ? args.fixedCount : undefined,
           })
-          return { operation: 'aggregate', mode, report: report as unknown as JsonValue }
+          return {
+            operation: 'aggregate',
+            mode,
+            report: report as unknown as JsonValue,
+            schemaValidation: schemaValidation as unknown as JsonValue | undefined,
+          }
         }
 
         if (args.operation === 'meta-review') {

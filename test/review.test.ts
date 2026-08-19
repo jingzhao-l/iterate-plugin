@@ -10,11 +10,16 @@ import {
   findingKey,
   findingsSchema,
   normalizeSummary,
+  REQUIRED_FINDING_FIELDS,
   reviewerTaskPrompt,
+  sanitizeRounds,
   SEVERITY_RANK,
+  SEVERITY_VALUES,
   sortFindings,
+  validateFindingsSchema,
+  validateRoundsSchema,
 } from '../src/review.ts'
-import type { IterateConfig, ReviewFinding } from '../src/types.ts'
+import type { IterateConfig, ReviewFinding, ReviewRound } from '../src/types.ts'
 
 const f = (partial: Partial<ReviewFinding>): ReviewFinding => ({
   dimension: 'correctness',
@@ -434,5 +439,177 @@ describe('buildReviewPlan', () => {
     const plan = buildReviewPlan({ config: bad, mode: 'dry-run', maxReviewRounds: 3 })
     assert.equal(plan.scope, 'full')
     assert.ok(Array.isArray(plan.dimensions))
+  })
+
+  it('builds a changed-only plan listing the changed files and falls back to full when none exist', () => {
+    const changed = { ...baseConfig, review: { scope: 'changed-only' as const } }
+    const withFiles = buildReviewPlan({
+      config: changed,
+      mode: 'dry-run',
+      maxReviewRounds: 3,
+      changedFiles: ['src/a.ts', 'src/b.ts'],
+    })
+    assert.equal(withFiles.scope, 'changed-only')
+    assert.deepEqual(withFiles.changedFiles, ['src/a.ts', 'src/b.ts'])
+    assert.equal(withFiles.fallbackToFull, false)
+    for (const d of withFiles.dimensions) {
+      assert.match(d.reviewerPrompt, /Changed files to review/)
+      assert.match(d.reviewerPrompt, /src\/a\.ts/)
+      assert.match(d.reviewerPrompt, /src\/b\.ts/)
+    }
+
+    // No changes → auto-fallback to full scope, no file list in prompts.
+    const noFiles = buildReviewPlan({
+      config: changed,
+      mode: 'dry-run',
+      maxReviewRounds: 3,
+      changedFiles: [],
+    })
+    assert.equal(noFiles.scope, 'full')
+    assert.equal(noFiles.fallbackToFull, true)
+    assert.deepEqual(noFiles.changedFiles, [])
+    for (const d of noFiles.dimensions) {
+      assert.doesNotMatch(d.reviewerPrompt, /Changed files to review/)
+    }
+  })
+
+  it('keeps full scope unchanged when changedFiles are supplied for a full-scope config', () => {
+    const plan = buildReviewPlan({
+      config: baseConfig, // scope: full
+      mode: 'dry-run',
+      maxReviewRounds: 3,
+      changedFiles: ['src/a.ts'],
+    })
+    assert.equal(plan.scope, 'full')
+    assert.deepEqual(plan.changedFiles, [])
+    assert.equal(plan.fallbackToFull, false)
+    assert.doesNotMatch(plan.dimensions[0]!.reviewerPrompt, /Changed files to review/)
+  })
+})
+
+// ─── Output schema validation ──────────────────────────────────────────────
+
+describe('validateFindingsSchema', () => {
+  it('accepts a valid findings list (and its {findings:[...]} wrapper)', () => {
+    const valid = [f({}), f({ line: 0, severity: 'critical' })]
+    assert.deepEqual(validateFindingsSchema(valid), [])
+    assert.deepEqual(validateFindingsSchema({ findings: valid }), [])
+  })
+
+  it('rejects a non-array input with a round-level issue', () => {
+    const issues = validateFindingsSchema({ not: 'findings' })
+    assert.equal(issues.length, 1)
+    assert.equal(issues[0]!.index, -1)
+    assert.equal(issues[0]!.field, 'findings')
+  })
+
+  it('flags every required field that is missing', () => {
+    const issues = validateFindingsSchema([{ dimension: 'correctness' }])
+    const missing = issues.filter((i) => i.message.includes('required field'))
+    assert.deepEqual(
+      missing.map((i) => i.field),
+      [
+        'findings[0].file',
+        'findings[0].severity',
+        'findings[0].summary',
+        'findings[0].failure_scenario',
+        'findings[0].suggested_fix',
+        'findings[0].is_atomic',
+      ],
+    )
+    assert.equal(REQUIRED_FINDING_FIELDS.length, 7)
+  })
+
+  it('flags wrong types: severity enum, is_atomic boolean, line integer, string fields', () => {
+    const issues = validateFindingsSchema([
+      f({ severity: 'bogus' as ReviewFinding['severity'] }),
+      f({ is_atomic: 'yes' as unknown as boolean }),
+      f({ line: -3 }),
+      f({ line: 1.5 }),
+      f({ summary: 42 as unknown as string }),
+    ])
+    const fields = issues.map((i) => i.field)
+    assert.ok(fields.includes('findings[0].severity'), 'severity enum violation')
+    assert.ok(fields.includes('findings[1].is_atomic'), 'is_atomic type violation')
+    assert.ok(fields.includes('findings[2].line'), 'negative line violation')
+    assert.ok(fields.includes('findings[3].line'), 'non-integer line violation')
+    assert.ok(fields.includes('findings[4].summary'), 'string field type violation')
+  })
+
+  it('accepts line 0 and absent line (whole-file findings)', () => {
+    assert.deepEqual(validateFindingsSchema([f({ line: 0 })]), [])
+    const withoutLine = { ...f({}), line: undefined }
+    delete (withoutLine as Record<string, unknown>).line
+    assert.deepEqual(validateFindingsSchema([withoutLine]), [])
+  })
+
+  it('flags a non-object entry in the findings array', () => {
+    const issues = validateFindingsSchema([f({}), 'not-an-object', null])
+    assert.ok(issues.some((i) => i.message.includes('expected a finding object')))
+  })
+})
+
+describe('validateRoundsSchema / sanitizeRounds', () => {
+  it('reports per-round validity and drops schema-invalid findings when enabled', () => {
+    const rounds: ReviewRound[] = [
+      { round: 1, findings: [f({ summary: 'ok' }), f({ summary: 42 as unknown as string }) as ReviewFinding] },
+    ]
+    const validation = validateRoundsSchema(rounds)
+    assert.equal(validation.length, 1)
+    assert.equal(validation[0]!.valid, false)
+    assert.equal(validation[0]!.issues.length, 1)
+
+    const clean = sanitizeRounds(rounds, validation)
+    assert.equal(clean[0]!.findings.length, 1)
+    assert.equal(clean[0]!.findings[0]!.summary, 'ok')
+  })
+
+  it('keeps a fully valid round untouched', () => {
+    const rounds: ReviewRound[] = [{ round: 1, findings: [f({})] }]
+    const validation = validateRoundsSchema(rounds)
+    assert.equal(validation[0]!.valid, true)
+    assert.equal(sanitizeRounds(rounds, validation)[0]!.findings.length, 1)
+  })
+
+  it('empties a round whose whole findings value is malformed', () => {
+    const rounds: ReviewRound[] = [{ round: 1, findings: [{ nope: true } as unknown as ReviewFinding] }]
+    const validation = validateRoundsSchema(rounds)
+    assert.equal(validation[0]!.valid, false)
+    assert.deepEqual(sanitizeRounds(rounds, validation)[0]!.findings, [])
+  })
+
+  it('still drops non-object entries when validation is disabled (crash-safety)', () => {
+    const rounds: ReviewRound[] = [
+      { round: 1, findings: [f({}), 'junk' as unknown as ReviewFinding, null as unknown as ReviewFinding] },
+    ]
+    const clean = sanitizeRounds(rounds, null)
+    assert.equal(clean[0]!.findings.length, 1)
+  })
+
+  it('preserves round numbers and order through sanitization', () => {
+    const rounds: ReviewRound[] = [
+      { round: 1, findings: [f({ summary: 'a' })] },
+      { round: 3, findings: [f({ summary: 1 as unknown as string }) as ReviewFinding] },
+    ]
+    const validation = validateRoundsSchema(rounds)
+    const clean = sanitizeRounds(rounds, validation)
+    assert.deepEqual(clean.map((r) => r.round), [1, 3])
+    assert.equal(clean[1]!.findings.length, 0)
+  })
+})
+
+describe('schema constants mirror findingsSchema', () => {
+  it('REQUIRED_FINDING_FIELDS and SEVERITY_VALUES align with the JSON schema', () => {
+    const schema = findingsSchema() as {
+      properties: {
+        findings: { items: { required: string[]; properties: Record<string, { enum?: string[] }> } }
+      }
+    }
+    const item = schema.properties.findings.items
+    for (const key of REQUIRED_FINDING_FIELDS) {
+      assert.ok(item.required.includes(key), `schema requires ${key}`)
+    }
+    assert.deepEqual(SEVERITY_VALUES, ['critical', 'high', 'medium', 'low'])
+    assert.deepEqual(item.properties.severity?.enum, [...SEVERITY_VALUES])
   })
 })

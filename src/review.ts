@@ -317,6 +317,192 @@ export function findingsSchema(): Record<string, unknown> {
   }
 }
 
+// ─── Output schema validation ──────────────────────────────────────────────
+//
+// `config.reviewer.output_schema_validation` (default true) turns on a
+// deterministic schema gate at the `aggregate` boundary: reviewer subagent
+// outputs are parsed as JSON by the orchestrator, but models sometimes return
+// malformed findings (missing fields, wrong types, out-of-range severity).
+// Before any finding reaches the deterministic core (dedupe/sort/report) —
+// which would crash on e.g. a missing `summary` — we validate every entry
+// against the same shape `findingsSchema()` describes and surface the issues
+// so the workflow can retry that round (≤2 times) with a strict-JSON nudge.
+// Schema-invalid findings are dropped from the report; the workflow never
+// forwards them into fixes.
+
+/** Fields every finding object MUST carry (mirrors findingsSchema().required). */
+export const REQUIRED_FINDING_FIELDS = [
+  'dimension',
+  'file',
+  'severity',
+  'summary',
+  'failure_scenario',
+  'suggested_fix',
+  'is_atomic',
+] as const
+
+/** Allowed severity values (mirrors the schema enum). */
+export const SEVERITY_VALUES = ['critical', 'high', 'medium', 'low'] as const
+
+/** String-typed finding fields (type check only, presence handled by REQUIRED). */
+const STRING_FINDING_FIELDS = [
+  'dimension',
+  'file',
+  'summary',
+  'failure_scenario',
+  'suggested_fix',
+] as const
+
+/** One schema violation for a single finding entry. */
+export interface FindingSchemaIssue {
+  /** Index into the findings array; -1 when the whole `findings` is malformed. */
+  index: number
+  /** Field path, e.g. "findings[2].severity". */
+  field: string
+  /** Human-readable reason. */
+  message: string
+}
+
+/**
+ * Validate an arbitrary parsed value against the findings schema shape.
+ * Accepts the `{findings: [...]}` wrapper OR a bare findings array, so callers
+ * can validate either the raw reviewer output object or a round's findings.
+ * Pure and deterministic — never touches the filesystem.
+ */
+export function validateFindingsSchema(input: unknown): FindingSchemaIssue[] {
+  const raw = (input as { findings?: unknown } | null)?.findings ?? input
+  if (!Array.isArray(raw)) {
+    return [
+      {
+        index: -1,
+        field: 'findings',
+        message: 'expected a JSON array of finding objects',
+      },
+    ]
+  }
+
+  const issues: FindingSchemaIssue[] = []
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      issues.push({
+        index: i,
+        field: `findings[${i}]`,
+        message: 'expected a finding object',
+      })
+      continue
+    }
+    const f = item as Record<string, unknown>
+
+    for (const key of REQUIRED_FINDING_FIELDS) {
+      if (f[key] === undefined || f[key] === null) {
+        issues.push({
+          index: i,
+          field: `findings[${i}].${key}`,
+          message: `required field "${key}" is missing`,
+        })
+      }
+    }
+    for (const key of STRING_FINDING_FIELDS) {
+      if (f[key] !== undefined && f[key] !== null && typeof f[key] !== 'string') {
+        issues.push({
+          index: i,
+          field: `findings[${i}].${key}`,
+          message: `"${key}" must be a string`,
+        })
+      }
+    }
+    if (
+      f.severity !== undefined &&
+      f.severity !== null &&
+      !SEVERITY_VALUES.includes(f.severity as (typeof SEVERITY_VALUES)[number])
+    ) {
+      issues.push({
+        index: i,
+        field: `findings[${i}].severity`,
+        message: `severity must be one of: ${SEVERITY_VALUES.join(', ')}`,
+      })
+    }
+    if (
+      f.is_atomic !== undefined &&
+      f.is_atomic !== null &&
+      typeof f.is_atomic !== 'boolean'
+    ) {
+      issues.push({
+        index: i,
+        field: `findings[${i}].is_atomic`,
+        message: 'is_atomic must be a boolean',
+      })
+    }
+    if (
+      f.line !== undefined &&
+      f.line !== null &&
+      (typeof f.line !== 'number' || !Number.isInteger(f.line) || f.line < 0)
+    ) {
+      issues.push({
+        index: i,
+        field: `findings[${i}].line`,
+        message: 'line must be a non-negative integer (0 = whole-file)',
+      })
+    }
+  }
+  return issues
+}
+
+/** Per-round schema validation outcome. */
+export interface RoundSchemaValidation {
+  round: number
+  /** True when every finding in the round conforms to the schema. */
+  valid: boolean
+  issues: FindingSchemaIssue[]
+}
+
+/**
+ * Validate every round's findings against the findings schema.
+ * Round order matches the input `rounds` array.
+ */
+export function validateRoundsSchema(rounds: ReviewRound[]): RoundSchemaValidation[] {
+  return rounds.map((r) => {
+    const issues = validateFindingsSchema(r.findings)
+    return { round: r.round, valid: issues.length === 0, issues }
+  })
+}
+
+/**
+ * Drop schema-invalid findings before they reach the deterministic core.
+ *
+ * - With a non-null `schemaValidation` (validation enabled): drop every finding
+ *   flagged by a schema issue; a round-level issue (index -1) empties the round.
+ * - With `schemaValidation === null` (validation disabled): still drop entries
+ *   that are not plain objects, which would crash `findingKey`/dedupe.
+ *
+ * Round order and round numbers are preserved so downstream convergence math
+ * keeps working on the sanitized stream.
+ */
+export function sanitizeRounds(
+  rounds: ReviewRound[],
+  schemaValidation: RoundSchemaValidation[] | null,
+): ReviewRound[] {
+  return rounds.map((r, i) => {
+    if (schemaValidation) {
+      const issues = schemaValidation[i]?.issues ?? []
+      if (issues.some((iss) => iss.index === -1)) return { round: r.round, findings: [] }
+      const bad = new Set(issues.map((iss) => iss.index))
+      return {
+        round: r.round,
+        findings: r.findings.filter((_, fi) => !bad.has(fi)),
+      }
+    }
+    return {
+      round: r.round,
+      findings: r.findings.filter(
+        (f): f is ReviewFinding =>
+          Boolean(f) && typeof f === 'object' && !Array.isArray(f),
+      ),
+    }
+  })
+}
+
 /**
  * Build the task prompt for one dimension's reviewer subagent.
  * In dry-run mode, pass `alreadyKnown` (the findings from earlier rounds) so the
@@ -331,6 +517,12 @@ export function reviewerTaskPrompt(input: {
   outputLanguage: string
   /** Atomic fix threshold from config.atomic. */
   maxLines: number
+  /**
+   * Files to review under `changed-only` scope (relative paths, resolved via
+   * git diff against `git.target_branch`). Omitted/empty for `full` scope or
+   * when no changes were detected (auto-fallback to full).
+   */
+  changedFiles?: string[]
 }): string {
   const parts: string[] = []
   parts.push(
@@ -338,6 +530,13 @@ export function reviewerTaskPrompt(input: {
     `Goal: ${input.goal}`,
     `Scope: ${input.scope === 'full' ? 'entire codebase' : 'changed files only'}.`,
   )
+  if (input.scope === 'changed-only' && input.changedFiles && input.changedFiles.length > 0) {
+    parts.push(
+      'Changed files to review (review ONLY these files; they are the diff against ' +
+        'the target branch):',
+      input.changedFiles.join('\n'),
+    )
+  }
   if (input.mode === 'dry-run') {
     parts.push(
       'MODE: dry-run / pure review. You MUST NOT modify, create, or delete ANY file. Read-only analysis only.',
@@ -382,6 +581,13 @@ export function buildReviewPlan(input: {
   mode: 'normal' | 'dry-run'
   maxReviewRounds: number
   knownIntentional?: KnownIntentional[]
+  /**
+   * Files changed against `git.target_branch` (relative paths), resolved by the
+   * tool when `review.scope` is `changed-only`. When the configured scope is
+   * `changed-only` but no changes are detected, the plan auto-falls back to
+   * `full` (mirrors SKILL.md: "无改动文件时自动 fallback 为 full").
+   */
+  changedFiles?: string[]
 }): {
   mode: 'normal' | 'dry-run'
   goal: string
@@ -389,15 +595,24 @@ export function buildReviewPlan(input: {
   dimensions: { id: string; reviewerPrompt: string; findingsSchema: Record<string, unknown> }[]
   maxReviewRounds: number
   knownIntentional: KnownIntentional[]
+  /** Files reviewed under `changed-only` scope (empty for `full` / fallback). */
+  changedFiles: string[]
+  /** True when scope was `changed-only` but no changes were found. */
+  fallbackToFull: boolean
 } {
   // Defensive reads: a malformed config (e.g. `dimensions` as a non-array, or
   // `review`/`atomic` missing) must degrade to sane defaults instead of
   // throwing an uncaught TypeError inside the tool's `execute`.
   const language = input.config.language === 'zh' ? 'Chinese (中文)' : 'English'
   const goal = input.config.goal ?? ''
-  const scope = input.config.review?.scope ?? 'full'
+  const configuredScope = input.config.review?.scope ?? 'full'
   const dimensions = Array.isArray(input.config.dimensions) ? input.config.dimensions : []
   const maxLines = input.config.atomic?.max_lines ?? 20
+  const changedFiles = Array.isArray(input.changedFiles) ? input.changedFiles : []
+  // changed-only with zero detected changes → auto-fallback to full scope.
+  const effectiveChangedOnly = configuredScope === 'changed-only' && changedFiles.length > 0
+  const scope: 'full' | 'changed-only' = effectiveChangedOnly ? 'changed-only' : 'full'
+  const fallbackToFull = configuredScope === 'changed-only' && changedFiles.length === 0
   return {
     mode: input.mode,
     goal,
@@ -412,10 +627,13 @@ export function buildReviewPlan(input: {
         alreadyKnown: [],
         outputLanguage: language,
         maxLines,
+        changedFiles: effectiveChangedOnly ? changedFiles : undefined,
       }),
       findingsSchema: findingsSchema(),
     })),
     maxReviewRounds: input.maxReviewRounds,
     knownIntentional: input.knownIntentional ?? [],
+    changedFiles: effectiveChangedOnly ? changedFiles : [],
+    fallbackToFull,
   }
 }
