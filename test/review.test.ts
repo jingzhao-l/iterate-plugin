@@ -41,7 +41,7 @@ const baseConfig: IterateConfig = {
     auto_merge: false,
   },
   validation: { command_whitelist: ['pytest'], commands: { test: ['pytest tests/ -x -q'] } },
-  reviewer: { output_schema_validation: true },
+  reviewer: { output_schema_validation: true, evidence_validation: true },
 }
 
 describe('severity / sorting', () => {
@@ -344,6 +344,23 @@ describe('reviewer tasks & schema', () => {
     assert.match(prompt, /MUST NOT modify/)
     assert.match(prompt, /round 1/)
     assert.match(prompt, /"security"/)
+  })
+
+  it('reviewerTaskPrompt mandates reading files before judging (EVIDENCE RULE)', () => {
+    const prompt = reviewerTaskPrompt({
+      dimension: 'security',
+      goal: 'g',
+      scope: 'full',
+      mode: 'dry-run',
+      outputLanguage: 'English',
+      maxLines: 20,
+    })
+    assert.match(prompt, /EVIDENCE RULE \(mandatory\)/)
+    assert.match(prompt, /read_file tool BEFORE judging/)
+    assert.match(prompt, /NEVER report a location you did not actually read/)
+    assert.match(prompt, /fabricated line numbers are treated as poisoned evidence/)
+    // line is REQUIRED for anchored, line-targeted issues.
+    assert.match(prompt, /line \(REQUIRED positive integer/)
   })
 
   it('reviewerTaskPrompt in later rounds lists already-known findings', () => {

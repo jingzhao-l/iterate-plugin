@@ -16,7 +16,7 @@ export interface IterateConfig {
     command_whitelist: string[]
     commands: Record<string, string[]>
   }
-  reviewer: { output_schema_validation: boolean }
+  reviewer: { output_schema_validation: boolean; evidence_validation: boolean }
   onboarding?: Record<string, unknown>
   personalization?: Record<string, unknown>
 }

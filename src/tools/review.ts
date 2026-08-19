@@ -3,6 +3,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadEffectiveConfig, resolveProjectRoot } from '../config-loader.ts'
 import { buildReviewPlan, buildReviewReport } from '../review.ts'
 import { buildFinalReviewReport, metaReviewReport } from '../meta-review.ts'
+import { evidenceToPlain, verifyFindings } from '../evidence.ts'
 import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
 
 /** Default round cap when neither the arg nor config provides one. */
@@ -94,6 +95,7 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             found: { type: 'boolean' },
             plan: { type: 'json' },
             report: { type: 'json' },
+            evidence: { type: 'json' },
             finalReport: { type: 'json' },
             error: { type: 'string' },
           },
@@ -165,12 +167,19 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             }
           }
           const audit = metaReviewReport(source)
-          const finalReport = buildFinalReviewReport(source)
+          // Hard code-evidence gate (default on): every finding's file/line is
+          // validated against real files on disk before folding into the final
+          // verdict. Disable via config `reviewer.evidence_validation: false`.
+          const evidenceEnabled = config.reviewer?.evidence_validation !== false
+          const findings: ReviewFinding[] = Array.isArray(source.findings) ? source.findings : []
+          const evidence = evidenceEnabled ? verifyFindings(projectRoot, findings) : null
+          const finalReport = buildFinalReviewReport(source, { evidence })
           return {
             operation: 'meta-review',
             mode,
             found: true,
             report: audit as unknown as JsonValue,
+            evidence: evidence ? (evidenceToPlain(evidence) as unknown as JsonValue) : null,
             finalReport: finalReport as unknown as JsonValue,
           }
         }

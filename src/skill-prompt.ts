@@ -122,10 +122,11 @@ return {
 
 Key rules for dry-run:
 - **NEVER call a fixer / never edit files / never create branches or worktree.** Reviewers read only.
+- **Every reviewer MUST actually read each file it reports on (read_file) BEFORE judging it, and anchor every finding to a real location. Fabricated file paths or invented line numbers are poisoned evidence and fail the run.** Subagents never report on code they didn't inspect.
 - Each round feeds the already-known findings to reviewers so they hunt NEW issues only → that is what drives convergence.
 - Stop when a round reports 0 new findings (converged) or maxReviewRounds is reached.
 - The report (with per-round convergence stats + suggested fix priorities) is the deliverable.
-- **Meta-review**: after building the report, audit it with \`iterate_review({operation:"meta-review"})\` for internal consistency (counts, severity buckets, dimension sums, sort order, convergence math). The \`finalReport.verdict\` is \`approved\` only when the report passes every check; otherwise \`needs_revision\`. Surface the final report and its verdict as the closing deliverable.
+- **Meta-review**: after building the report, audit it with \`iterate_review({operation:"meta-review"})\` for internal consistency (counts, severity buckets, dimension sums, sort order, convergence math). The meta-review ALSO runs the hard code-evidence gate (default on): every finding's file/line is validated against real files on disk, so any fabricated location surfaces as a critical \`EVIDENCE_VIOLATION\` and flips the verdict to \`needs_revision\`. The \`finalReport.verdict\` is \`approved\` only when the report passes every check AND every finding anchors to real, read code; otherwise \`needs_revision\`. Surface the final report and its verdict as the closing deliverable.
 - Only a single \`report\` entry may be appended to the decision log; nothing else is written.
 
 ### Normal-mode workflow (autonomous closed loop)
@@ -329,11 +330,12 @@ Key rules for normal mode:
 - Close with \`iterate_status\` metrics and surface the convergence indicators (fixed count, remaining architectural count, abort reason) in the final summary.
 
 ### Finding schema (for reviewer agents)
-{ "dimension": string, "file": string (relative path), "line": number (optional),
+{ "dimension": string, "file": string (relative path), "line": number (REQUIRED for line-targeted issues — the exact line you READ; use 0 for whole-file/module-level issues),
   "severity": "critical" | "high" | "medium" | "low", "summary": string (one line),
   "failure_scenario": string (how/when it fails), "suggested_fix": string (the concrete fix),
   "is_atomic": boolean (true if fix ≤ max_lines within a single file/function) }
 Atomic = is_atomic true (single file, single function, ≤ config.atomic.max_lines lines change). Architectural = everything else.
+Every finding MUST reference a file the reviewer actually read (read_file) and a real location — never speculate about code that was never inspected. Fabricated paths/lines are poisoned evidence and fail the meta-review evidence gate.
 
 ### Workflow meta
 Always pass \`meta: { name: "iterate", description: "Autonomous iterate loop" }\`.

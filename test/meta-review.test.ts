@@ -6,6 +6,7 @@ import {
   META_REVIEW_CHECKS,
 } from '../src/meta-review.ts'
 import { buildReviewReport } from '../src/review.ts'
+import type { EvidenceAudit } from '../src/evidence.ts'
 import type { ReviewFinding, ReviewReport } from '../src/types.ts'
 
 const f = (partial: Partial<ReviewFinding>): ReviewFinding => ({
@@ -187,5 +188,77 @@ describe('buildFinalReviewReport', () => {
     assert.equal(final.summary.reportIssues, final.metaReview.issues.length)
     // The source report itself is preserved unchanged.
     assert.equal(final.source, report)
+  })
+
+  it('flips to needs_revision on evidence violation (hard gate, default on)', () => {
+    const report = goodReport()
+    const evidence: EvidenceAudit = {
+      checked: 1,
+      results: [
+        {
+          file: 'src/nope.ts',
+          line: 12,
+          lineTotal: null,
+          resolvedPath: '/root/src/nope.ts',
+          verified: false,
+          error: 'file_not_found',
+        },
+      ],
+    }
+    const final = buildFinalReviewReport(report, { evidence })
+    assert.equal(final.verdict, 'needs_revision')
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue, 'expected an EVIDENCE_VIOLATION issue')
+    assert.equal(issue!.severity, 'critical')
+    assert.match(issue!.detail, /does not exist at all/)
+  })
+
+  it('flags line_out_of_range evidence as a critical violation', () => {
+    const report = goodReport()
+    const evidence: EvidenceAudit = {
+      checked: 1,
+      results: [
+        {
+          file: 'src/a.ts',
+          line: 9999,
+          lineTotal: 10,
+          resolvedPath: '/root/src/a.ts',
+          verified: false,
+          error: 'line_out_of_range',
+        },
+      ],
+    }
+    const final = buildFinalReviewReport(report, { evidence })
+    assert.equal(final.verdict, 'needs_revision')
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
+    assert.match(issue!.detail, /9999 is beyond/)
+  })
+
+  it('counts the evidence check when it runs', () => {
+    const report = goodReport()
+    const clean: EvidenceAudit = {
+      checked: 1,
+      results: [
+        {
+          file: 'src/a.ts',
+          line: 10,
+          lineTotal: 100,
+          resolvedPath: '/root/src/a.ts',
+          verified: true,
+        },
+      ],
+    }
+    const before = buildFinalReviewReport(report).metaReview.checksRun
+    const after = buildFinalReviewReport(report, { evidence: clean })
+    assert.equal(after.metaReview.checksRun, before + 1)
+    assert.equal(after.verdict, 'approved')
+  })
+
+  it('skips the evidence gate when no evidence audit is supplied', () => {
+    const report = goodReport()
+    const final = buildFinalReviewReport(report, { evidence: null })
+    assert.equal(final.verdict, 'approved')
+    assert.ok(!final.metaReview.issues.some((i) => i.code === 'EVIDENCE_VIOLATION'))
   })
 })

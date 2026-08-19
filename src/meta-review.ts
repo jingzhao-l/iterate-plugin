@@ -15,6 +15,7 @@
  */
 
 import type { ReviewFinding, ReviewReport } from './types.ts'
+import type { EvidenceAudit } from './evidence.ts'
 import { sortFindings } from './review.ts'
 
 /** A single defect found while auditing a review report. */
@@ -278,9 +279,41 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
 /**
  * Build the final review report: pair the source report with its meta-review
  * verdict and a rolled-up summary. Pure and deterministic.
+ *
+ * `evidence` (an EvidenceAudit produced against the real repo) is the hard
+ * code-evidence gate: every finding whose file/line does not resolve to
+ * existing code is emitted as a critical EVIDENCE_VIOLATION and flips the
+ * verdict to `needs_revision`. The audit itself reads the filesystem; this
+ * function only folds the (pure, precomputed) result in.
  */
-export function buildFinalReviewReport(report: ReviewReport): FinalReviewReport {
+export function buildFinalReviewReport(
+  report: ReviewReport,
+  opts: { evidence?: EvidenceAudit | null } = {},
+): FinalReviewReport {
   const meta = metaReviewReport(report)
+  const evidence = opts.evidence ?? null
+  if (evidence !== null) {
+    meta.checksRun += 1
+    if (evidence.results.some((r) => r.error !== undefined)) {
+      for (const violation of evidence.results) {
+        if (violation.error === undefined) continue
+        const detail =
+          violation.error === 'line_out_of_range'
+            ? `${violation.line} is beyond this file's ${violation.lineTotal} lines`
+            : `${violation.file} does not exist at all (verifiable read required)`
+        meta.issues.push({
+          code: 'EVIDENCE_VIOLATION',
+          severity: 'critical',
+          summary:
+            `Finding references non-existent code: ${violation.file}` +
+            (violation.line ? `:${violation.line}` : ''),
+          detail: detail + '. Review results must anchor to real, read code.',
+        })
+      }
+      meta.passed = false
+      meta.verdict = 'revise'
+    }
+  }
   const summary = report?.summary ?? {}
   const verdict: FinalReviewVerdict = meta.passed ? 'approved' : 'needs_revision'
   return {
