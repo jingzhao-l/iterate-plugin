@@ -32,7 +32,12 @@
  *     missing slot/theme degrades gracefully instead of crashing the UI.
  */
 
-import * as React from 'react'
+// dsh's __ModuleLoader__ provides require() to access platform modules.
+// Using require() directly (not import) avoids esbuild's __toESM wrapper,
+// which copies React's properties into a new object and can break internal
+// bindings. Official dsh plugins (e.g. dsh-client-ui-goal) use the same pattern.
+declare function require(name: string): unknown
+const React = require('react') as typeof import('react')
 import {
   findReportInObject,
   scanSessionForReport,
@@ -515,17 +520,19 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
   return React.createElement('div', { className: 'iterate-trend', title: '各轮发现数量趋势' }, ...bars)
 }
 
-/** Dashboard: live convergence strip above the composer. */
+/** Dashboard: live convergence strip above the composer.
+ *
+ * The `conversation.input.dock` slot's owner share is `InputZone`, which
+ * provides `session` as a point-in-time ConversationSnapshot directly — no
+ * subscription needed. Per the slot contract: "Read only `session`/`input`
+ * off the owner share — both are point-in-time snapshots re-rendered for
+ * you, never subscribe."
+ */
 function ConvergenceDashboard(props: SlotProps) {
   const [pulseKey, setPulseKey] = React.useState(0)
-  // useSession is a SnapshotSelectorHook — it requires a selector fn (identity
-  // returns the whole snapshot). Call it unconditionally at the top level to
-  // satisfy the React hooks contract; the owner share (props.session) is the
-  // fallback when the hook is absent.
-  const useSession = props && typeof props.useSession === 'function'
-    ? props.useSession as (sel: (s: unknown) => unknown) => unknown
-    : null
-  const session = useSession ? useSession((s: unknown) => s) : (props && props.session ? props.session : null)
+  // The `conversation.input.dock` slot owner share (InputZone) provides
+  // `session` as a point-in-time snapshot — read it directly, never subscribe.
+  const session = props && props.session ? props.session : null
   const report = latestReport(session)
 
   React.useEffect(() => {
