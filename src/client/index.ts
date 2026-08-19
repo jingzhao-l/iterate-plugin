@@ -492,17 +492,6 @@ function setThemeEnabled(enabled: boolean): void {
 
 // ─── Components (React.createElement trees) ──────────────────────────────────
 
-/** Obtain a session snapshot defensively from the slot props. */
-function sessionSnapshot(props: SlotProps) {
-  let session: unknown = null
-  const useSession = props && typeof props.useSession === 'function' ? props.useSession as () => unknown : null
-  if (useSession) {
-    try { session = useSession() } catch (err) { log('useSession failed', err) }
-  }
-  if (!session && props && props.session) session = props.session
-  return session
-}
-
 /** Find the latest report inside a session snapshot (normalized). */
 function latestReport(session: unknown): ReviewReport | null {
   if (!session) return null
@@ -529,7 +518,15 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
 /** Dashboard: live convergence strip above the composer. */
 function ConvergenceDashboard(props: SlotProps) {
   const [pulseKey, setPulseKey] = React.useState(0)
-  const report = latestReport(sessionSnapshot(props))
+  // useSession is a SnapshotSelectorHook — it requires a selector fn (identity
+  // returns the whole snapshot). Call it unconditionally at the top level to
+  // satisfy the React hooks contract; the owner share (props.session) is the
+  // fallback when the hook is absent.
+  const useSession = props && typeof props.useSession === 'function'
+    ? props.useSession as (sel: (s: unknown) => unknown) => unknown
+    : null
+  const session = useSession ? useSession((s: unknown) => s) : (props && props.session ? props.session : null)
+  const report = latestReport(session)
 
   React.useEffect(() => {
     if (!report) return
