@@ -9,8 +9,14 @@ import {
 } from '../review.ts'
 import { buildFinalReviewReport, metaReviewReport } from '../meta-review.ts'
 import { evidenceToPlain, verifyFindings } from '../evidence.ts'
+import {
+  collectScopeFiles,
+  computeCoverage,
+  coverageToDict,
+} from '../review-scope.ts'
 import { resolveChangedFiles } from '../git-scope.ts'
 import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
+import type { CoverageResult } from '../review-scope.ts'
 
 /** Default round cap when neither the arg nor config provides one. */
 const DEFAULT_MAX_REVIEW_ROUNDS = 3
@@ -109,6 +115,13 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
                 'retries rounds with valid=false (≤2 times) before forwarding findings.',
             },
             evidence: { type: 'json' },
+            coverage: {
+              type: 'json',
+              description:
+                'For `meta-review`: prompt-informative scope coverage result ' +
+                '(assigned vs self-reported reads). Present only when ' +
+                'reviewer.coverage_validation is enabled and readFiles were supplied.',
+            },
             finalReport: { type: 'json' },
             error: { type: 'string' },
           },
@@ -142,7 +155,14 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             const gitScope = await resolveChangedFiles(projectRoot, config.git?.target_branch ?? 'main')
             changedFiles = gitScope.changedFiles
           }
-          const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles })
+          // Full-codebase review: pre-collect the source inventory so
+          // buildReviewPlan can batch it into per-chunk reviewer tasks
+          // (coverage enforcement).
+          let scopeFiles: string[] | undefined
+          if (config.review?.scope === 'full') {
+            scopeFiles = collectScopeFiles(projectRoot, { scope: 'full' })
+          }
+          const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles, scopeFiles })
           return { operation: 'plan', mode, found: true, plan: plan as unknown as JsonValue }
         }
 
@@ -213,13 +233,30 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           const evidenceEnabled = config.reviewer?.evidence_validation !== false
           const findings: ReviewFinding[] = Array.isArray(source.findings) ? source.findings : []
           const evidence = evidenceEnabled ? verifyFindings(projectRoot, findings) : null
-          const finalReport = buildFinalReviewReport(source, { evidence })
+          // Prompt-informative coverage: compare the reviewer's self-reported
+          // reads against the assigned scope inventory (never flips the
+          // verdict). Disable via config `reviewer.coverage_validation: false`.
+          const coverageEnabled = config.reviewer?.coverage_validation !== false
+          let coverage: CoverageResult | null = null
+          if (coverageEnabled) {
+            const assigned = collectScopeFiles(projectRoot, {
+              scope: config.review?.scope === 'changed-only' ? 'changed-only' : 'full',
+            })
+            const readFiles = Array.isArray((source as unknown as { readFiles?: unknown }).readFiles)
+              ? ((source as unknown as { readFiles?: unknown }).readFiles as string[])
+              : null
+            if (readFiles && readFiles.length > 0) {
+              coverage = computeCoverage(assigned, readFiles)
+            }
+          }
+          const finalReport = buildFinalReviewReport(source, { evidence, coverage })
           return {
             operation: 'meta-review',
             mode,
             found: true,
             report: audit as unknown as JsonValue,
             evidence: evidence ? (evidenceToPlain(evidence) as unknown as JsonValue) : null,
+            coverage: coverage ? (coverageToDict(coverage) as unknown as JsonValue) : null,
             finalReport: finalReport as unknown as JsonValue,
           }
         }

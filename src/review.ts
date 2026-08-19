@@ -24,6 +24,7 @@ import type {
   ReviewReport,
   ReviewRound,
 } from './types.ts'
+import { DEFAULT_SCOPE_CHUNK_SIZE, chunkFiles } from './review-scope.ts'
 
 /** Severity ordering: lower rank = more severe. */
 export const SEVERITY_RANK: Record<ReviewFinding['severity'], number> = {
@@ -312,8 +313,14 @@ export function findingsSchema(): Record<string, unknown> {
           ],
         },
       },
+      readFiles: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Every file you actually opened with read_file while reviewing your assigned scope. Used to audit coverage; files you never opened count as un-reviewed.',
+      },
     },
-    required: ['findings'],
+    required: ['findings', 'readFiles'],
   }
 }
 
@@ -523,6 +530,15 @@ export function reviewerTaskPrompt(input: {
    * when no changes were detected (auto-fallback to full).
    */
   changedFiles?: string[]
+  /**
+   * The exact file inventory this reviewer is RESPONSIBLE for. When provided,
+   * a mandatory COVERAGE RULE is injected: the reviewer must actually open
+   * every listed file with read_file and return a `readFiles` array of what it
+   * opened (the enforcement half of "每个子 agent 必须逐文件读取自己负责的审查
+   * 范围"). Used for the chunked full-scope case; takes precedence over
+   * `changedFiles`.
+   */
+  scopeFiles?: string[]
 }): string {
   const parts: string[] = []
   parts.push(
@@ -530,11 +546,27 @@ export function reviewerTaskPrompt(input: {
     `Goal: ${input.goal}`,
     `Scope: ${input.scope === 'full' ? 'entire codebase' : 'changed files only'}.`,
   )
-  if (input.scope === 'changed-only' && input.changedFiles && input.changedFiles.length > 0) {
+  if (input.scopeFiles && input.scopeFiles.length > 0) {
+    parts.push(
+      'COVERAGE RULE (mandatory): below is the exact file inventory you are ' +
+        'assigned to review. You MUST open EVERY file in this inventory with ' +
+        'the read_file tool before judging it — do not skip, skim-declare, or ' +
+        'assume any file without reading it. Files you did not actually open ' +
+        'are considered un-reviewed and will lower your coverage score. ' +
+        'Return a `readFiles` array listing every file you actually opened.',
+      'Assigned file inventory:',
+      input.scopeFiles.map((p) => `- ${p}`).join('\n'),
+    )
+  } else if (
+    input.scope === 'changed-only' &&
+    input.changedFiles &&
+    input.changedFiles.length > 0
+  ) {
     parts.push(
       'Changed files to review (review ONLY these files; they are the diff against ' +
-        'the target branch):',
-      input.changedFiles.join('\n'),
+        'the target branch). You MUST open EVERY listed file with read_file ' +
+        'before judging it — never skip or assume a file:',
+      input.changedFiles.map((p) => `- ${p}`).join('\n'),
     )
   }
   if (input.mode === 'dry-run') {
@@ -558,7 +590,7 @@ export function reviewerTaskPrompt(input: {
       'poisoned evidence. Anchor every finding to real code.',
   )
   parts.push(
-    `Return a JSON object: {"findings": [...]}.`,
+    `Return a JSON object: {"findings": [...], "readFiles": [...]}.`,
     `Each finding: dimension (must be "${input.dimension}"), file (relative path), ` +
       'line (REQUIRED positive integer — the exact line you READ for an ' +
       'anchored, line-targeted issue; use 0 for whole-file/module-level ' +
@@ -588,6 +620,13 @@ export function buildReviewPlan(input: {
    * `full` (mirrors SKILL.md: "无改动文件时自动 fallback 为 full").
    */
   changedFiles?: string[]
+  /**
+   * Pre-collected source inventory for a `full`-scope review. When provided,
+   * it is split into `config.reviewer.scope_chunk_size` batches and every
+   * (dimension × batch) pair gets its own reviewer task owning a bounded,
+   * complete inventory it must open file-by-file.
+   */
+  scopeFiles?: string[]
 }): {
   mode: 'normal' | 'dry-run'
   goal: string
@@ -613,24 +652,52 @@ export function buildReviewPlan(input: {
   const effectiveChangedOnly = configuredScope === 'changed-only' && changedFiles.length > 0
   const scope: 'full' | 'changed-only' = effectiveChangedOnly ? 'changed-only' : 'full'
   const fallbackToFull = configuredScope === 'changed-only' && changedFiles.length === 0
+
+  // Scope batching (coverage enforcement): changed-only is a single batch
+  // owning the full delta; full scope splits the collected inventory into
+  // per-chunk reviewer tasks when scopeFiles is supplied.
+  const chunkSize = Number(input.config.reviewer?.scope_chunk_size)
+  const perChunk = Number.isFinite(chunkSize) && chunkSize > 0 ? chunkSize : DEFAULT_SCOPE_CHUNK_SIZE
+  let batches: (string[] | undefined)[]
+  if (effectiveChangedOnly) {
+    batches = [undefined]
+  } else if (input.scopeFiles && input.scopeFiles.length > 0) {
+    batches = chunkFiles(input.scopeFiles, perChunk).filter((b) => b.length > 0)
+  } else {
+    batches = [undefined]
+  }
+
+  const dimensionTasks: {
+    id: string
+    reviewerPrompt: string
+    findingsSchema: Record<string, unknown>
+  }[] = []
+  for (const d of dimensions) {
+    batches.forEach((batch, index) => {
+      const dimensionId = batches.length === 1 ? d : `${d}#${index + 1}`
+      dimensionTasks.push({
+        id: dimensionId,
+        reviewerPrompt: reviewerTaskPrompt({
+          dimension: d,
+          goal,
+          scope,
+          mode: input.mode,
+          alreadyKnown: [],
+          outputLanguage: language,
+          maxLines,
+          changedFiles: effectiveChangedOnly ? changedFiles : undefined,
+          scopeFiles: batch,
+        }),
+        findingsSchema: findingsSchema(),
+      })
+    })
+  }
+
   return {
     mode: input.mode,
     goal,
     scope,
-    dimensions: dimensions.map((d) => ({
-      id: d,
-      reviewerPrompt: reviewerTaskPrompt({
-        dimension: d,
-        goal,
-        scope,
-        mode: input.mode,
-        alreadyKnown: [],
-        outputLanguage: language,
-        maxLines,
-        changedFiles: effectiveChangedOnly ? changedFiles : undefined,
-      }),
-      findingsSchema: findingsSchema(),
-    })),
+    dimensions: dimensionTasks,
     maxReviewRounds: input.maxReviewRounds,
     knownIntentional: input.knownIntentional ?? [],
     changedFiles: effectiveChangedOnly ? changedFiles : [],

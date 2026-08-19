@@ -46,7 +46,12 @@ const baseConfig: IterateConfig = {
     auto_merge: false,
   },
   validation: { command_whitelist: ['pytest'], commands: { test: ['pytest tests/ -x -q'] } },
-  reviewer: { output_schema_validation: true, evidence_validation: true },
+  reviewer: {
+    output_schema_validation: true,
+    evidence_validation: true,
+    coverage_validation: true,
+    scope_chunk_size: 25,
+  },
 }
 
 describe('severity / sorting', () => {
@@ -330,7 +335,7 @@ describe('reviewer tasks & schema', () => {
       properties: { findings: { type: string; items: { required: string[] } } }
     }
     assert.equal(schema.type, 'object')
-    assert.deepEqual(schema.required, ['findings'])
+    assert.deepEqual(schema.required, ['findings', 'readFiles'])
     const item = schema.properties.findings.items
     for (const k of ['dimension', 'file', 'severity', 'summary', 'failure_scenario', 'suggested_fix', 'is_atomic']) {
       assert.ok(item.required.includes(k), `missing required ${k}`)
@@ -366,6 +371,23 @@ describe('reviewer tasks & schema', () => {
     assert.match(prompt, /fabricated line numbers are treated as poisoned evidence/)
     // line is REQUIRED for anchored, line-targeted issues.
     assert.match(prompt, /line \(REQUIRED positive integer/)
+  })
+
+  it('reviewerTaskPrompt injects a COVERAGE RULE with the assigned inventory', () => {
+    const prompt = reviewerTaskPrompt({
+      dimension: 'security',
+      goal: 'g',
+      scope: 'full',
+      mode: 'dry-run',
+      outputLanguage: 'English',
+      maxLines: 20,
+      scopeFiles: ['src/a.ts', 'src/b.ts'],
+    })
+    assert.match(prompt, /COVERAGE RULE \(mandatory\)/)
+    assert.match(prompt, /open EVERY file in this inventory/)
+    assert.match(prompt, /readFiles/)
+    assert.match(prompt, /Assigned file inventory:\n- src\/a\.ts\n- src\/b\.ts/)
+    // The changed-only branch is a separate concern; changing to changed-only with no scopeFiles keeps its wording.
   })
 
   it('reviewerTaskPrompt in later rounds lists already-known findings', () => {
@@ -484,6 +506,47 @@ describe('buildReviewPlan', () => {
     assert.deepEqual(plan.changedFiles, [])
     assert.equal(plan.fallbackToFull, false)
     assert.doesNotMatch(plan.dimensions[0]!.reviewerPrompt, /Changed files to review/)
+  })
+
+  it('splits a full scope into per-chunk reviewer tasks when scopeFiles are supplied', () => {
+    const small = {
+      ...baseConfig,
+      dimensions: [
+        'correctness',
+        'security',
+        'performance',
+        'architecture',
+        'style-tests',
+        'tech-debt',
+        'spec-compliance',
+        'frontend-backend',
+        'ui-ux',
+      ],
+      review: { scope: 'full' as const },
+      reviewer: {
+        output_schema_validation: true,
+        evidence_validation: true,
+        coverage_validation: true,
+        scope_chunk_size: 2,
+      },
+    }
+    const plan = buildReviewPlan({
+      config: small,
+      mode: 'dry-run',
+      maxReviewRounds: 3,
+      scopeFiles: ['src/a.ts', 'src/b.ts', 'tests/c.ts', 'tests/d.ts', 'e.ts'],
+    })
+    assert.equal(plan.scope, 'full')
+    // 5 files / chunk of 2 → 3 batches × 9 dimensions = 27 tasks.
+    assert.equal(plan.dimensions.length, 27)
+    const prompts = plan.dimensions.map((d) => d.reviewerPrompt)
+    assert.ok(prompts.some((p) => p.includes('COVERAGE RULE (mandatory)')))
+    // Each chunk keeps its directory run and is injected into some prompt.
+    assert.ok(prompts.some((p) => /Assigned file inventory:\n- src\/a\.ts\n- src\/b\.ts/.test(p)))
+    assert.ok(prompts.some((p) => /Assigned file inventory:\n- tests\/c\.ts\n- tests\/d\.ts/.test(p)))
+    // Batch ids are suffixed with the chunk index.
+    const ids = new Set(plan.dimensions.map((d) => d.id))
+    assert.ok([...ids].some((id) => id.includes('#1') || id.includes('#2')))
   })
 })
 

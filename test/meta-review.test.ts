@@ -261,4 +261,78 @@ describe('buildFinalReviewReport', () => {
     assert.equal(final.verdict, 'approved')
     assert.ok(!final.metaReview.issues.some((i) => i.code === 'EVIDENCE_VIOLATION'))
   })
+
+  it('emits COVERAGE_GAP (medium hint) but keeps the verdict when files are uncovered', () => {
+    const report = goodReport()
+    const coverage = {
+      assigned: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+      read: ['src/a.ts'],
+      covered: ['src/a.ts'],
+      uncovered: ['src/b.ts', 'src/c.ts'],
+      ratio: 1 / 3,
+    }
+    const final = buildFinalReviewReport(report, { coverage })
+    // Coverage is prompt-informative: it NEVER flips an otherwise-clean verdict.
+    assert.equal(final.verdict, 'approved')
+    const issue = final.metaReview.issues.find((i) => i.code === 'COVERAGE_GAP')
+    assert.ok(issue, 'expected a COVERAGE_GAP issue')
+    assert.equal(issue!.severity, 'medium')
+    assert.match(issue!.summary, /2 of 3 scope files/)
+    assert.match(issue!.detail, /Uncovered: src\/b\.ts, src\/c\.ts/)
+  })
+
+  it('counts the coverage check when it runs', () => {
+    const report = goodReport()
+    const before = buildFinalReviewReport(report).metaReview.checksRun
+    const withCoverage = buildFinalReviewReport(report, { coverage: {
+      assigned: ['src/a.ts'],
+      read: ['src/a.ts'],
+      covered: ['src/a.ts'],
+      uncovered: [],
+      ratio: 1,
+    } })
+    assert.equal(withCoverage.metaReview.checksRun, before + 1)
+    assert.ok(!withCoverage.metaReview.issues.some((i) => i.code === 'COVERAGE_GAP'))
+  })
+
+  it('skips the coverage check when no coverage is supplied', () => {
+    const report = goodReport()
+    const final = buildFinalReviewReport(report, { coverage: null })
+    assert.equal(final.verdict, 'approved')
+    assert.ok(!final.metaReview.issues.some((i) => i.code === 'COVERAGE_GAP'))
+  })
+
+  it('attributes an EVIDENCE_VIOLATION to the round that first surfaced it', () => {
+    const report = goodReport()
+    const evidence: EvidenceAudit = {
+      checked: 1,
+      results: [
+        {
+          file: 'src/a.ts',
+          line: 10,
+          lineTotal: null,
+          resolvedPath: '/root/src/a.ts',
+          verified: false,
+          error: 'line_out_of_range',
+        },
+      ],
+    }
+    const final = buildFinalReviewReport(report, { evidence })
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
+    assert.match(issue!.summary, /\(round 1\)/)
+  })
+
+  it('surfaces the coverage result on the final report', () => {
+    const report = goodReport()
+    const coverage = {
+      assigned: ['src/a.ts'],
+      read: [],
+      covered: [],
+      uncovered: ['src/a.ts'],
+      ratio: 0,
+    }
+    const final = buildFinalReviewReport(report, { coverage })
+    assert.deepEqual(final.coverage, coverage)
+  })
 })

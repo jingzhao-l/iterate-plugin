@@ -31,6 +31,13 @@ describe('countLines', () => {
     assert.equal(countLines('a\nb\n'), 2)
     assert.equal(countLines('a\r\nb'), 2)
   })
+
+  it('splits on every str.splitlines() separator for harness parity', () => {
+    // Python splitlines() splits on \v \f \u2028 \x85 etc. in addition to \n/\r.
+    // 4 separators (\u2028 \u2029 \v \f) → 5 physical lines.
+    assert.equal(countLines('a\u2028b\u2029c\vd\fb'), 5)
+    assert.equal(countLines('a\x0cb\x0bb'), 3) // \f \v as single-byte separators
+  })
 })
 
 describe('resolveWithin', () => {
@@ -94,6 +101,15 @@ describe('verifyFinding', () => {
     assert.equal(res.verified, false)
     assert.equal(res.error, 'line_out_of_range')
     assert.equal(res.lineTotal, 3)
+  })
+
+  it('treats a binary (NUL-containing) file as not line-addressable', () => {
+    const root = mkdtempSync(join(tmpdir(), 'evidence-bin-'))
+    writeFileSync(join(root, 'blob.bin'), Buffer.from([0x00, 0x01, 0x02, 0x0a]))
+    const res = verifyFinding(root, { file: 'blob.bin', line: 1 })
+    assert.equal(res.verified, false)
+    assert.equal(res.error, 'line_out_of_range')
+    assert.equal(res.lineTotal, null) // binary → no addressable line count
   })
 
   it('fills readVerified only when a read set is provided', () => {

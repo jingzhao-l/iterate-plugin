@@ -49,7 +49,12 @@ export function defaultConfig(): IterateConfig {
       auto_merge: false,
     },
     validation: { command_whitelist: [], commands: {} },
-    reviewer: { output_schema_validation: true, evidence_validation: true },
+    reviewer: {
+      output_schema_validation: true,
+      evidence_validation: true,
+      coverage_validation: true,
+      scope_chunk_size: 25,
+    },
   }
 }
 

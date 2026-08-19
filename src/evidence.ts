@@ -59,7 +59,10 @@ interface Locatable {
 /** Number of physical lines in `text`. A trailing newline does not add a line. */
 export function countLines(text: string): number {
   if (text === '') return 0
-  const parts = text.split(/\r\n|\r|\n/)
+  // Mirrors Python `str.splitlines()`: split on every line separator, not just
+  // \r\n|\r|\n — otherwise line counts diverge from the harness on files
+  // containing \v \f \x1c-\x1e \x85 \u2028 \u2029.
+  const parts = text.split(/\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/)
   // A trailing newline leaves an empty final element that is NOT a line
   // (mirrors Python `str.splitlines()` used by the harness).
   if (parts[parts.length - 1] === '') return parts.length - 1
@@ -113,9 +116,9 @@ export function verifyFinding(
     }
   }
 
-  let text: string
+  let raw: Buffer
   try {
-    text = readFileSync(resolved, 'utf-8')
+    raw = readFileSync(resolved)
   } catch {
     return {
       file: relFile,
@@ -127,6 +130,22 @@ export function verifyFinding(
     }
   }
 
+  // A file is not line-addressable if it contains a NUL byte (binary payload).
+  // Anchored line numbers on a binary file cannot be trusted, so treat them the
+  // same as an out-of-range line rather than credulously accepting them
+  // (mirrors the harness `evidence.py` NUL check).
+  if (raw.includes(0)) {
+    return {
+      file: relFile,
+      line,
+      lineTotal: null,
+      resolvedPath: resolved,
+      verified: false,
+      error: 'line_out_of_range',
+    }
+  }
+
+  const text = raw.toString('utf-8')
   const { inBounds, lineTotal } = verifyLineBounds(line, text)
   if (!inBounds) {
     return {
