@@ -7,6 +7,8 @@ import { resolveProjectRoot } from "../config-loader.js";
 const MAX_SKILL_DIR_LOOKUP_DEPTH = 12;
 /** Maximum number of image attachments relayed into the context in one call. */
 const MAX_ATTACHMENTS = 8;
+/** Maximum intrinsic width/height (px) accepted for an attached image. */
+const MAX_ATTACHMENT_DIMENSION = 16384;
 /**
  * Validate and normalize one raw image-attachment entry passed by the
  * orchestrator. The top-level model observes user-attached images in its own
@@ -33,8 +35,8 @@ export function normalizeAttachment(raw) {
     }
     for (const dim of ['width', 'height']) {
         if (entry[dim] !== undefined) {
-            if (typeof entry[dim] !== 'number' || !Number.isInteger(entry[dim]) || entry[dim] < 0 || entry[dim] > 16384) {
-                return { ok: false, error: `attachment.${dim} must be an integer in [0, 16384]` };
+            if (typeof entry[dim] !== 'number' || !Number.isInteger(entry[dim]) || entry[dim] < 0 || entry[dim] > MAX_ATTACHMENT_DIMENSION) {
+                return { ok: false, error: `attachment.${dim} must be an integer in [0, ${MAX_ATTACHMENT_DIMENSION}]` };
             }
             out[dim] = entry[dim];
         }

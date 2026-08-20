@@ -41,6 +41,8 @@ import {
   allVerdictKeys,
   RUNTIME_ARTIFACTS,
   buildRuntimeStatusGuide,
+  scanSessionForResume,
+  countSessionImages,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -628,5 +630,93 @@ describe('normalizeReport preserves normal-mode fixedCount', () => {
     const norm = normalizeReport(makeReport())
     const sum = norm.summary as { fixedCount?: number }
     assert.equal(sum.fixedCount, undefined)
+  })
+})
+
+// ─── scanSessionForResume ────────────────────────────────────────────────────
+
+describe('scanSessionForResume', () => {
+  it('returns 0 for non-object / empty input', () => {
+    assert.equal(scanSessionForResume(null), 0)
+    assert.equal(scanSessionForResume(undefined), 0)
+    assert.equal(scanSessionForResume('x'), 0)
+    assert.equal(scanSessionForResume({}), 0)
+  })
+
+  it('finds a direct resume marker with its resumeCount', () => {
+    const session = { type: 'resume', data: { resumedFromRound: 2, resumeCount: 3 } }
+    assert.equal(scanSessionForResume(session), 3)
+  })
+
+  it('finds a nested decision-log resume entry', () => {
+    const session = {
+      entries: [
+        { type: 'review_result', round: 2 },
+        { entry: { type: 'resume', data: { resumedFromRound: 1, resumeCount: 2 } } },
+      ],
+    }
+    assert.equal(scanSessionForResume(session), 2)
+  })
+
+  it('returns the highest resumeCount observed across the tree', () => {
+    const session = {
+      a: { entry: { type: 'resume', data: { resumeCount: 1 } } },
+      b: [{ type: 'resume', data: { resumeCount: 4 } }, { type: 'resume', data: { resumeCount: 2 } }],
+    }
+    assert.equal(scanSessionForResume(session), 4)
+  })
+
+  it('treats non-numeric resumeCount as 0', () => {
+    assert.equal(scanSessionForResume({ type: 'resume', data: { resumeCount: 'x' } }), 0)
+  })
+})
+
+// ─── countSessionImages ──────────────────────────────────────────────────────
+
+describe('countSessionImages', () => {
+  it('returns 0 for non-object / empty input', () => {
+    assert.equal(countSessionImages(null), 0)
+    assert.equal(countSessionImages('x'), 0)
+    assert.equal(countSessionImages({}), 0)
+  })
+
+  it('counts dsh image blocks with an attachment ref', () => {
+    const session = {
+      messages: [
+        { role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'img-1', mediaType: 'image/png' } }] },
+      ],
+    }
+    assert.equal(countSessionImages(session), 1)
+  })
+
+  it('counts raw attachment references by mediaType', () => {
+    const session = { attachments: [{ mediaType: 'image/png', width: 800, height: 600 }] }
+    assert.equal(countSessionImages(session), 1)
+  })
+
+  it('dedupes the same attachmentId across multiple blocks', () => {
+    const session = {
+      messages: [
+        { content: [{ type: 'image', attachment: { attachmentId: 'img-1' } }] },
+        { content: [{ type: 'image', attachment: { attachmentId: 'img-1' } }] },
+      ],
+    }
+    assert.equal(countSessionImages(session), 1)
+  })
+
+  it('counts distinct attachmentIds separately', () => {
+    const session = {
+      content: [
+        { type: 'image', attachment: { attachmentId: 'a' } },
+        { type: 'image', attachment: { attachmentId: 'b' } },
+        { type: 'image', attachment: { attachmentId: 'a' } },
+      ],
+    }
+    assert.equal(countSessionImages(session), 2)
+  })
+
+  it('ignores non-image media types', () => {
+    const session = { attachments: [{ mediaType: 'application/pdf' }] }
+    assert.equal(countSessionImages(session), 0)
   })
 })

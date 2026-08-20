@@ -10,6 +10,9 @@ const MAX_SKILL_DIR_LOOKUP_DEPTH = 12
 /** Maximum number of image attachments relayed into the context in one call. */
 const MAX_ATTACHMENTS = 8
 
+/** Maximum intrinsic width/height (px) accepted for an attached image. */
+const MAX_ATTACHMENT_DIMENSION = 16384
+
 /** A validated, normalized image-attachment entry carried into review context. */
 export interface NormalizedAttachment {
   name?: string
@@ -50,8 +53,8 @@ export function normalizeAttachment(raw: unknown): AttachmentValidationResult {
   }
   for (const dim of ['width', 'height'] as const) {
     if (entry[dim] !== undefined) {
-      if (typeof entry[dim] !== 'number' || !Number.isInteger(entry[dim]) || entry[dim] < 0 || entry[dim] > 16384) {
-        return { ok: false, error: `attachment.${dim} must be an integer in [0, 16384]` }
+      if (typeof entry[dim] !== 'number' || !Number.isInteger(entry[dim]) || entry[dim] < 0 || entry[dim] > MAX_ATTACHMENT_DIMENSION) {
+        return { ok: false, error: `attachment.${dim} must be an integer in [0, ${MAX_ATTACHMENT_DIMENSION}]` }
       }
       out[dim] = entry[dim]
     }

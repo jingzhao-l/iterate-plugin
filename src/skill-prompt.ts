@@ -91,7 +91,7 @@ for (let r = 1; r <= maxRounds; r++) {
       : ''
     const raw = await parallel(dims.map(dim => () => agent(
       'Review dimension "' + dim + '".' +
-      (attachments.length > 0 ? ' User-attached images are part of the evidence (reproduce/verify against them): ' + JSON.stringify(attachments) + '.' : '') +
+      (attachments.length > 0 ? ' User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
       ' Already-known findings (do NOT re-report): ' +
       JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.',
       Object.assign({ label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }, backend)
@@ -191,11 +191,13 @@ const checkpoint = (ckRes && ckRes.checkpoint) ? ckRes.checkpoint : null
 const startRound = (checkpoint && typeof checkpoint.round === 'number') ? checkpoint.round + 1 : 1
 // Track how many times this checkpoint has already been resumed (interruption recovery).
 const resumeCount = (checkpoint && typeof checkpoint.resumeCount === 'number') ? checkpoint.resumeCount : 0
+// The effective count AFTER this recovery: this run counts as one more resume.
+const effectiveResumeCount = checkpoint ? resumeCount + 1 : 0
 if (checkpoint) {
   // A previous run left a checkpoint — record the recovery so the decision log
   // shows the resume, then continue where it left off.
   await agent(
-    'Call iterate_decision_log({operation:"append", type:"resume", round:' + startRound + ', data:{resumedFromRound:' + checkpoint.round + ', resumeCount:' + (resumeCount + 1) + '}})',
+    'Call iterate_decision_log({operation:"append", type:"resume", round:' + startRound + ', data:{resumedFromRound:' + checkpoint.round + ', resumeCount:' + effectiveResumeCount + '}})',
     Object.assign({ label: 'log:resume' }, backend)
   )
 }
@@ -217,7 +219,8 @@ const knownIntentional = (plan.knownIntentional || [])   // config personalizati
 const dims = plan.dimensions.map(d => d.id)
 const maxRounds = plan.maxReviewRounds
 const rounds = []          // findings per review round (each on the then-current code state)
-const architectural = []   // findings deliberately left unfixed (reported at the end)
+// Restore previously-unfixed architectural findings when resuming an interrupted run.
+const architectural = (checkpoint && Array.isArray(checkpoint.findings)) ? checkpoint.findings : []   // findings deliberately left unfixed (reported at the end)
 let fixedCount = (checkpoint && typeof checkpoint.fixedCount === 'number') ? checkpoint.fixedCount : 0
 let converged = false
 let abortedByValidation = false
@@ -236,7 +239,7 @@ for (let r = startRound; r <= maxRounds; r++) {
       : ''
     const raw = await parallel(dims.map(dim => () => agent(
       'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed). ' +
-      (attachments.length > 0 ? ' User-attached images are part of the evidence (reproduce/verify against them): ' + JSON.stringify(attachments) + '.' : '') +
+      (attachments.length > 0 ? ' User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
       'Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.',
       Object.assign({ label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }, backend)
     )))
@@ -342,7 +345,7 @@ for (let r = startRound; r <= maxRounds; r++) {
 
   // Persist progress so an interrupted run can resume from the next round.
   await agent(
-    'Call iterate_checkpoint({ operation: "save", mode: "normal", round:' + r + ', maxRounds:' + maxRounds + ', fixedCount:' + fixedCount + ', architecturalCount:' + architectural.length + ', resumeCount:' + resumeCount + ', findings:' + JSON.stringify(architectural) + ' }) and return the checkpoint JSON.',
+    'Call iterate_checkpoint({ operation: "save", mode: "normal", round:' + r + ', maxRounds:' + maxRounds + ', fixedCount:' + fixedCount + ', architecturalCount:' + architectural.length + ', resumeCount:' + effectiveResumeCount + ', findings:' + JSON.stringify(architectural) + ' }) and return the checkpoint JSON.',
     Object.assign({ label: 'checkpoint:save:r' + r }, backend)
   )
 

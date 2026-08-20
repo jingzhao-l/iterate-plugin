@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { findSkillMd, findSkillRoot } from '../src/tools/context.ts'
+import { findSkillMd, findSkillRoot, normalizeAttachment, normalizeAttachments } from '../src/tools/context.ts'
 
 /** Create a temp tree and return its root plus a cleanup fn. */
 function tempTree(): { root: string; cleanup: () => void } {
@@ -102,5 +102,81 @@ describe('findSkillMd', () => {
     } finally {
       cleanup()
     }
+  })
+})
+
+describe('normalizeAttachment', () => {
+  it('accepts a full valid entry and normalizes fields', () => {
+    const res = normalizeAttachment({
+      name: 'screenshot.png',
+      mediaType: 'image/png',
+      width: 1280,
+      height: 720,
+      note: 'broken layout',
+    })
+    assert.ok(res.ok)
+    assert.deepEqual(res.value, {
+      name: 'screenshot.png',
+      mediaType: 'image/png',
+      width: 1280,
+      height: 720,
+      note: 'broken layout',
+    })
+  })
+
+  it('accepts a minimal entry with no optional fields', () => {
+    const res = normalizeAttachment({})
+    assert.ok(res.ok)
+    assert.deepEqual(res.value, {})
+  })
+
+  it('rejects non-objects and arrays', () => {
+    assert.equal(normalizeAttachment(null).ok, false)
+    assert.equal(normalizeAttachment('x').ok, false)
+    assert.equal(normalizeAttachment([1]).ok, false)
+  })
+
+  it('rejects invalid name (non-string or too long)', () => {
+    assert.equal(normalizeAttachment({ name: 42 }).ok, false)
+    assert.equal(normalizeAttachment({ name: 'x'.repeat(257) }).ok, false)
+  })
+
+  it('rejects unsupported mediaType', () => {
+    assert.equal(normalizeAttachment({ mediaType: 'image/bmp' }).ok, false)
+    assert.equal(normalizeAttachment({ mediaType: 'text/plain' }).ok, false)
+  })
+
+  it('rejects non-integer, negative, or oversized dimensions', () => {
+    assert.equal(normalizeAttachment({ width: 1.5 }).ok, false)
+    assert.equal(normalizeAttachment({ height: -1 }).ok, false)
+    assert.equal(normalizeAttachment({ width: 16385 }).ok, false)
+    assert.equal(normalizeAttachment({ width: 0, height: 100 }).ok, true)
+  })
+
+  it('rejects an over-long note', () => {
+    assert.equal(normalizeAttachment({ note: 'x'.repeat(1001) }).ok, false)
+  })
+})
+
+describe('normalizeAttachments', () => {
+  it('returns empty results for undefined / null / non-array input', () => {
+    assert.deepEqual(normalizeAttachments(undefined), { attachments: [], errors: [] })
+    assert.deepEqual(normalizeAttachments(null), { attachments: [], errors: [] })
+    assert.equal(normalizeAttachments('nope').errors.length, 1)
+  })
+
+  it('drops invalid entries and reports reasons', () => {
+    const res = normalizeAttachments([{ mediaType: 'image/png' }, { mediaType: 'image/bmp' }, 7])
+    assert.equal(res.attachments.length, 1)
+    assert.equal(res.errors.length, 2)
+    assert.match(res.errors[0] as string, /attachment\.mediaType must be/)
+  })
+
+  it('caps the number of attachments at MAX_ATTACHMENTS (8)', () => {
+    const res = normalizeAttachments(Array.from({ length: 12 }, () => ({ mediaType: 'image/png' })))
+    assert.equal(res.attachments.length, 8)
+    // Once the cap is hit, the loop stops and reports a single drop notice.
+    assert.equal(res.errors.length, 1)
+    assert.match(res.errors[0] as string, /capped/)
   })
 })

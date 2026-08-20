@@ -108,6 +108,24 @@ describe('computeStatus', () => {
     assert.equal(status.architecturalCount, 2)
     assert.equal(status.findingsCount, 1)
     assert.equal(status.hasCheckpoint, true)
+    assert.equal(status.interrupted, true)
+    assert.equal(status.resumeCount, 0)
+  })
+
+  it('reports interrupted=false and resumeCount=0 when no checkpoint exists', () => {
+    const status = computeStatus({ checkpoint: null, decisionEntries: [], fixRegistry: { rounds: [] } })
+    assert.equal(status.interrupted, false)
+    assert.equal(status.resumeCount, 0)
+  })
+
+  it('carries the checkpoint resumeCount through to the status', () => {
+    const status = computeStatus({
+      checkpoint: checkpoint({ resumeCount: 2 }),
+      decisionEntries: [],
+      fixRegistry: { rounds: [] },
+    })
+    assert.equal(status.interrupted, true)
+    assert.equal(status.resumeCount, 2)
   })
 
   it('derives the round from decision entries when no checkpoint exists', () => {
