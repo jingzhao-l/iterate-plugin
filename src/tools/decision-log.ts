@@ -19,6 +19,7 @@ const VALID_ENTRY_TYPES = new Set<DecisionLogEntry['type']>([
   'validation',
   'decision',
   'report',
+  'resume',
 ])
 
 /**
@@ -111,7 +112,7 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
           type: 'string',
           description:
             'Entry type (required for append): round_start, review_result, atomic_fix, ' +
-            'architectural_fix, revert, round_failed, validation, decision, report.',
+            'architectural_fix, revert, round_failed, validation, decision, report, resume.',
           enum: [
             'round_start',
             'review_result',
@@ -122,6 +123,7 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
             'validation',
             'decision',
             'report',
+            'resume',
           ],
         },
         round: {

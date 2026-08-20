@@ -68,6 +68,8 @@ import {
   keyToVerdict,
   allVerdictKeys,
   buildRuntimeStatusGuide,
+  scanSessionForResume,
+  countSessionImages,
   SEVERITY_LABEL,
   SEVERITY_COLOR,
 } from '../../lib/parse.js'
@@ -320,6 +322,10 @@ const ITERATE_CSS = `
 .iterate-pill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
 .iterate-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
+/* Interruption / resume + attachment chips (dashboard) */
+.iterate-chip-resume { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent); }
+.iterate-chip-images { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent); }
+
 /* Accessibility-switch toggle */
 .iterate-switch { position: relative; width: 42px; height: 24px; border-radius: 999px; padding: 0; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); transition: background-color 160ms ease, border-color 160ms ease; }
 .iterate-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
@@ -552,6 +558,25 @@ function ConvergenceDashboard(props: SlotProps) {
   const dims = groupByDimension(report)
   const trend = computeTrendMetrics(report)
 
+  // Interruption / resume awareness: a decision-log `resume` entry in the
+  // session means this run continued from an interrupted checkpoint.
+  const resumeCount = scanSessionForResume(session)
+  const imageCount = countSessionImages(session)
+  const resumeChip = resumeCount > 0
+    ? React.createElement('span', {
+        className: 'iterate-chip-resume',
+        key: 'resume',
+        title: '本次迭代从上一次中断的断点继续执行',
+      }, `已中断恢复 ×${String(resumeCount)}`)
+    : null
+  const imageChip = imageCount > 0
+    ? React.createElement('span', {
+        className: 'iterate-chip-images',
+        key: 'images',
+        title: '会话中检测到用户附带的图片，评审将作为视觉证据参考',
+      }, `附件图片 ${String(imageCount)}`)
+    : null
+
   const dimBadges = Object.keys(dims).slice(0, 6).map((dim) =>
     React.createElement(
       'span',
@@ -598,6 +623,8 @@ function ConvergenceDashboard(props: SlotProps) {
       stats.medium,
     ),
     fixBadge,
+    resumeChip,
+    imageChip,
     React.createElement(TrendChart, { points: trend.points }),
     ...dimBadges,
   )

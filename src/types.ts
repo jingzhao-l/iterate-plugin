@@ -40,6 +40,7 @@ export interface DecisionLogEntry {
     | 'decision'
     | 'report'
     | 'round_failed'
+    | 'resume'
   data: Record<string, unknown>
 }
 
@@ -151,6 +152,8 @@ export interface IterationCheckpoint {
   maxRounds: number
   fixedCount: number
   architecturalCount: number
+  /** How many times this checkpoint has been resumed after an interruption/abort. */
+  resumeCount: number
   findings: ReviewFinding[]
   startedAt: string
   updatedAt: string
@@ -167,6 +170,10 @@ export interface IterationStatus {
   findingsCount: number
   totalDecisionLogEntries: number
   hasCheckpoint: boolean
+  /** True when a checkpoint is present — i.e. the previous run was interrupted before finishing. */
+  interrupted: boolean
+  /** How many times the current checkpoint has already been resumed. */
+  resumeCount: number
   checkpoint: IterationCheckpoint | null
   lastUpdated: string | null
 }

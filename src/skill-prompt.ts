@@ -13,14 +13,14 @@ You have the iterate plugin installed, which registers these tools:
 - \`iterate_config\` — read iterate.config.yaml (dimensions, validation commands, personalization) or write a validated partial update (operation:"write", with automatic backup + rollback)
 - \`iterate_validate\` — run a whitelisted validation command
 - \`iterate_decision_log\` — append to the decision log, or read entries back for review
-- \`iterate_context\` — read SKILL.md / ITERATE.md project context
+- \`iterate_context\` — read SKILL.md / ITERATE.md project context; also relays user-attached image metadata (e.g. UI screenshots, error dialogs) so reviewers can treat them as visual evidence
 - \`iterate_review\` — deterministic review engine: \`plan\` builds the review plan (for \`review.scope: changed-only\`, it resolves the git-diff file set against \`git.target_branch\` and auto-falls back to \`full\` when nothing changed); \`aggregate\` dedupes/merges findings, validates every finding against the findings schema when \`reviewer.output_schema_validation\` is on (dropping invalid entries and reporting them via \`schemaValidation\`), and computes convergence; \`meta-review\` audits a built report for internal consistency (counts, buckets, sorting, convergence math) and returns a final report with an \`approved\` / \`needs_revision\` verdict. Purely computational.
 - \`iterate_triage\` — manage "known_intentional" entries in the config (list / apply, with dedupe + backup + rollback)
 - \`iterate_fix\` — apply ONE atomic fix: backs up the file, enforces the atomic max_lines threshold, writes the new content, and records the fix (id + diff summary) in \`.iterate/fixes/registry.json\`
 - \`iterate_diff\` — show the accumulated diff for a fixed file (vs its original backup) or a per-file summary of all fixes
 - \`iterate_rollback\` — revert a fix by id: restore the file from its backup, remove the fix from the registry, log a \`revert\` entry. Use when a round's validation fails
 - \`iterate_checkpoint\` — save / load / clear an iteration checkpoint (\`.iterate/checkpoint.json\`) so a long run can resume where it left off
-- \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence
+- \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence, and whether the run was interrupted (a checkpoint left on disk means the previous run was interrupted and can be resumed)
 - \`iterate_history\` — inspect the runtime state in detail: decision-log entries and applied fixes (optionally scoped to a round or a fixed file)
 - \`iterate_prune\` — remove stale runtime artifacts (\`.iterate/\` entries). Defaults to a read-only dry-run that reports what WOULD be removed; pass \`dryRun:false\` to actually prune.
 
@@ -31,12 +31,25 @@ When the user asks to review or iterate on the project (e.g. "review this projec
 
 ### Workflow script contract
 Write a plain-JS script (top-level await, ends with \`return <json>\`). Available globals:
-- \`agent(prompt, opts?): Promise<value>\` — spawn a subagent. \`opts.schema\` gives structured output (object-rooted JSON Schema: type/properties/required/additionalProperties/items/enum/const/oneOf only). Resolves \`null\` on child failure. Other opts: \`label\`, \`phase\`.
+- \`agent(prompt, opts?): Promise<value>\` — spawn a subagent. \`opts.schema\` gives structured output (object-rooted JSON Schema: type/properties/required/additionalProperties/items/enum/const/oneOf only). Resolves \`null\` on child failure. Other opts: \`label\`, \`phase\`. Backend selection (optional): pass \`provider\` (e.g. \`"codex"\`, \`"claude"\`, \`"default"\`) to route the sub-agent to a specific provider backend, and/or \`model\` to pin a model id. When omitted, the sub-agent uses the same provider/model as the parent session.
 - \`parallel(thunks): Promise<value[]>\` — run zero-arg async functions concurrently, await all.
 - \`phase(title)\`, \`log(message)\` — progress narration.
 - \`args\` — the args object passed to the workflow tool.
 
 The script CANNOT call tools directly. Subagents are the ones who call tools.
+
+### Sub-agent backend selection
+Every \`agent()\` call may carry a backend hint via \`opts.provider\` / \`opts.model\`. Use it deliberately to balance cost, speed, and reliability:
+- **Reviewers** (many, run in parallel, read-only, benefit from strict JSON): prefer a fast/cheap model when one is configured; otherwise omit the hint and inherit the session backend.
+- **Fixers / aggregators** (few, must be reliable and follow tool results exactly): keep them on the parent's default backend unless a specific provider is known-good.
+- **Never invent a provider/model name.** Pass a hint ONLY when the deployment actually registers that adapter (see \`ih config\` / the configured provider list). When in doubt, omit \`provider\`/\`model\` entirely — the sub-agent then runs on the same backend as the parent session, which is always a safe default.
+- The optional \`args.subagentProvider\` / \`args.subagentModel\` allow the caller to override the whole run's sub-agent backend from the invocation; the canonical scripts below read them and spread the hint onto every spawned sub-agent (reviewers, fixers, validators, aggregators).
+
+### User-attached image evidence
+The user may attach images to the conversation (UI screenshots, error dialogs, design references, logs-as-pictures). When they do:
+- You see those images natively in the session. Capture their metadata and pass it into the workflow via \`args.attachments\` — an array of objects, each with optional \`name\`, \`mediaType\`, \`width\`, \`height\`, and a \`note\` describing what the image shows and why it matters for this review.
+- The canonical scripts below read \`args.attachments\` and relay them into every reviewer prompt so reviewers treat the attached visuals as evidence (e.g. "the screenshot in this message shows the broken layout the review should reproduce").
+- If a reviewer needs the images relayed explicitly, it can call \`iterate_context\` with \`attachments\` to get the normalized image descriptions in its context. Never fabricate an attachment — only relay images the user actually attached.
 
 ### Dry-run mode workflow (pure review — the ONLY mode that never touches files)
 This is iterate's read-only health-check: repeated review rounds until findings converge,
@@ -47,9 +60,15 @@ Canonical script — reproduce this structure exactly (adjust dims via the plan)
 
 \`\`\`js
 phase('plan')
+// Optional per-run backend override for sub-agents (omit to inherit the session backend).
+const subAgentProvider = (args && args.subagentProvider) || undefined
+const subAgentModel = (args && args.subagentModel) || undefined
+const backend = Object.assign({}, subAgentProvider ? { provider: subAgentProvider } : {}, subAgentModel ? { model: subAgentModel } : {})
+// User-attached image evidence relayed into reviewer prompts (metadata only).
+const attachments = (args && Array.isArray(args.attachments)) ? args.attachments : []
 const planRes = await agent(
   'Call iterate_review({operation:"plan", mode:"dry-run"}) and return the plan JSON.',
-  { label: 'review:plan' }
+  Object.assign({ label: 'review:plan' }, backend)
 )
 const plan = (planRes && planRes.plan) ? planRes.plan : null
 if (!plan || !Array.isArray(plan.dimensions)) throw new Error('plan failed: iterate_review did not return a valid plan')
@@ -71,16 +90,18 @@ for (let r = 1; r <= maxRounds; r++) {
       ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
       : ''
     const raw = await parallel(dims.map(dim => () => agent(
-      'Review dimension "' + dim + '". Already-known findings (do NOT re-report): ' +
+      'Review dimension "' + dim + '".' +
+      (attachments.length > 0 ? ' User-attached images are part of the evidence (reproduce/verify against them): ' + JSON.stringify(attachments) + '.' : '') +
+      ' Already-known findings (do NOT re-report): ' +
       JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.',
-      { label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }
+      Object.assign({ label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }, backend)
     )))
     const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
     if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
     // Deterministic aggregate: cross-round dedupe + known_intentional filter + severity sort.
     agg = await agent(
       'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
-      { label: 'review:aggregate:r' + r }
+      Object.assign({ label: 'review:aggregate:r' + r }, backend)
     )
     // reviewer.output_schema_validation (default on): aggregate returns per-round
     // schemaValidation; retry the just-finished round (≤2 times) when invalid.
@@ -104,20 +125,20 @@ for (let r = 1; r <= maxRounds; r++) {
 phase('report')
 const finalAgg = await agent(
   'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
-  { label: 'review:aggregate:final' }
+  Object.assign({ label: 'review:aggregate:final' }, backend)
 )
 const report = (finalAgg && finalAgg.report) ? finalAgg.report : null
 if (!report || !report.convergence) throw new Error('aggregate failed: no valid report was produced')
 await agent(
   'Call iterate_decision_log({operation:"append", type:"report", round:' + report.convergence.totalRounds + ', data:{mode:"dry-run", totalFindings:' + report.summary.totalFindings + '}})',
-  { label: 'review:log' }
+  Object.assign({ label: 'review:log' }, backend)
 )
 
 phase('meta-review')
 // Audit the report itself for internal consistency, then produce the final report.
 const metaRes = await agent(
   'Call iterate_review({operation:"meta-review", report:' + JSON.stringify(report) + '}) and return the finalReport JSON.',
-  { label: 'review:meta' }
+  Object.assign({ label: 'review:meta' }, backend)
 )
 const finalReport = metaRes && metaRes.finalReport ? metaRes.finalReport : null
 const metaAudit = finalReport && finalReport.metaReview ? finalReport.metaReview : null
@@ -153,26 +174,42 @@ Set \`args.mode = "normal"\`. Loop: resume → plan → parallel review ×N → 
 Canonical script — reproduce this structure exactly (adjust dims via the plan):
 
 \`\`\`js
-// args = { mode: "normal", maxRounds? }
+// args = { mode: "normal", maxRounds?, subagentProvider?, subagentModel?, attachments? }
+// Optional per-run backend override for sub-agents (omit to inherit the session backend).
+const subAgentProvider = (args && args.subagentProvider) || undefined
+const subAgentModel = (args && args.subagentModel) || undefined
+const backend = Object.assign({}, subAgentProvider ? { provider: subAgentProvider } : {}, subAgentModel ? { model: subAgentModel } : {})
+// User-attached image evidence relayed into reviewer prompts (metadata only).
+const attachments = (args && Array.isArray(args.attachments)) ? args.attachments : []
 phase('resume')
 // If a previous run was interrupted, resume from its checkpoint instead of restarting.
 const ckRes = await agent(
   'Call iterate_checkpoint({ operation: "load" }) and return the checkpoint JSON.',
-  { label: 'checkpoint:load' }
+  Object.assign({ label: 'checkpoint:load' }, backend)
 )
 const checkpoint = (ckRes && ckRes.checkpoint) ? ckRes.checkpoint : null
 const startRound = (checkpoint && typeof checkpoint.round === 'number') ? checkpoint.round + 1 : 1
+// Track how many times this checkpoint has already been resumed (interruption recovery).
+const resumeCount = (checkpoint && typeof checkpoint.resumeCount === 'number') ? checkpoint.resumeCount : 0
+if (checkpoint) {
+  // A previous run left a checkpoint — record the recovery so the decision log
+  // shows the resume, then continue where it left off.
+  await agent(
+    'Call iterate_decision_log({operation:"append", type:"resume", round:' + startRound + ', data:{resumedFromRound:' + checkpoint.round + ', resumeCount:' + (resumeCount + 1) + '}})',
+    Object.assign({ label: 'log:resume' }, backend)
+  )
+}
 
 phase('plan')
 const configRes = await agent(
   'Call iterate_config({ validate: true }) and return the config JSON.',
-  { label: 'config:read' }
+  Object.assign({ label: 'config:read' }, backend)
 )
 const cfg = (configRes && configRes.config) ? configRes.config : null
 const atomicMaxLines = (cfg && cfg.atomic && cfg.atomic.max_lines) ? cfg.atomic.max_lines : 20
 const planRes = await agent(
   'Call iterate_review({operation:"plan", mode:"normal", maxReviewRounds:' + (args.maxRounds || 3) + '}) and return the plan JSON.',
-  { label: 'review:plan' }
+  Object.assign({ label: 'review:plan' }, backend)
 )
 const plan = (planRes && planRes.plan) ? planRes.plan : null
 if (!plan || !Array.isArray(plan.dimensions)) throw new Error('plan failed: iterate_review did not return a valid plan')
@@ -199,8 +236,9 @@ for (let r = startRound; r <= maxRounds; r++) {
       : ''
     const raw = await parallel(dims.map(dim => () => agent(
       'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed). ' +
+      (attachments.length > 0 ? ' User-attached images are part of the evidence (reproduce/verify against them): ' + JSON.stringify(attachments) + '.' : '') +
       'Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.',
-      { label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }
+      Object.assign({ label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }, backend)
     )))
     const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
     if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
@@ -210,7 +248,7 @@ for (let r = startRound; r <= maxRounds; r++) {
     // show a running "fixes applied" metric for normal mode.
     agg = await agent(
       'Call iterate_review({operation:"aggregate", mode:"normal", rounds:' + JSON.stringify([thisRound]) + ', knownIntentional:' + JSON.stringify(knownIntentional) + ', fixedCount:' + fixedCount + '}) and return the report JSON.',
-      { label: 'review:aggregate:r' + r }
+      Object.assign({ label: 'review:aggregate:r' + r }, backend)
     )
     // reviewer.output_schema_validation (default on): aggregate returns per-round
     // schemaValidation; retry the just-finished round (≤2 times) when invalid.
@@ -240,12 +278,12 @@ for (let r = startRound; r <= maxRounds; r++) {
       'iterate_fix({ file: "' + file + '", content: <full new file content>, finding: <that finding>, round: ' + r + ' }). ' +
       'Apply the findings IN ORDER. After all fixes, call iterate_diff({ file: "' + file + '" }) to verify the accumulated diff. ' +
       'Findings: ' + JSON.stringify(byFile[file]) + '. Return the array of {id, ok, error} per iterate_fix call.',
-      { label: 'fix:' + file, phase: 'fix', schema: {
+      Object.assign({ label: 'fix:' + file, phase: 'fix', schema: {
         type: 'object', additionalProperties: false,
         properties: {
           fixes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' } }, required: ['id', 'ok'] } }
         },
-        required: ['fixes'] } }
+        required: ['fixes'] } }, backend)
     )))
     for (const res of fixRes) {
       if (res && Array.isArray(res.fixes)) {
@@ -267,12 +305,12 @@ for (let r = startRound; r <= maxRounds; r++) {
   const valRes = await agent(
     'Read iterate.config.yaml validation.commands, then call iterate_validate({ command: <cmd> }) for EACH configured command ' +
     '(one tool call per command). Return all results as {command, exitCode} entries.',
-    { label: 'validate:r' + r, phase: 'validate', schema: {
+    Object.assign({ label: 'validate:r' + r, phase: 'validate', schema: {
       type: 'object', additionalProperties: false,
       properties: {
         results: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { command: { type: 'string' }, exitCode: { type: 'integer' } }, required: ['command', 'exitCode'] } }
       },
-      required: ['results'] } }
+      required: ['results'] } }, backend)
   )
   failedCommands = (valRes && Array.isArray(valRes.results)) ? valRes.results.filter(v => v.exitCode !== 0).map(v => v.command) : []
   if (failedCommands.length > 0) {
@@ -281,17 +319,17 @@ for (let r = startRound; r <= maxRounds; r++) {
     if (roundFixIds.length > 0) {
       await agent(
         'Call iterate_rollback({ id: <id> }) for EACH of these fix ids (one call per id): ' + JSON.stringify(roundFixIds) + '. Return the array of {id, ok, error}.',
-        { label: 'rollback:r' + r, phase: 'rollback', schema: {
+        Object.assign({ label: 'rollback:r' + r, phase: 'rollback', schema: {
           type: 'object', additionalProperties: false,
           properties: {
             results: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' } }, required: ['id', 'ok'] } }
           },
-          required: ['results'] } }
+          required: ['results'] } }, backend)
       )
     }
     await agent(
       'Call iterate_decision_log({operation:"append", type:"round_failed", round:' + r + ', data:{failedCommands:' + JSON.stringify(failedCommands) + ', rolledBack:' + roundFixIds.length + '}})',
-      { label: 'log:failed:r' + r }
+      Object.assign({ label: 'log:failed:r' + r }, backend)
     )
     break
   }
@@ -299,13 +337,13 @@ for (let r = startRound; r <= maxRounds; r++) {
   await agent(
     'Call iterate_decision_log({operation:"append", type:"review_result", round:' + r +
     ', data:{atomic:' + atomic.length + ', architectural:' + remaining.length + ', fixedSoFar:' + fixedCount + '}})',
-    { label: 'log:r' + r }
+    Object.assign({ label: 'log:r' + r }, backend)
   )
 
   // Persist progress so an interrupted run can resume from the next round.
   await agent(
-    'Call iterate_checkpoint({ operation: "save", mode: "normal", round:' + r + ', maxRounds:' + maxRounds + ', fixedCount:' + fixedCount + ', architecturalCount:' + architectural.length + ', findings:' + JSON.stringify(architectural) + ' }) and return the checkpoint JSON.',
-    { label: 'checkpoint:save:r' + r }
+    'Call iterate_checkpoint({ operation: "save", mode: "normal", round:' + r + ', maxRounds:' + maxRounds + ', fixedCount:' + fixedCount + ', architecturalCount:' + architectural.length + ', resumeCount:' + resumeCount + ', findings:' + JSON.stringify(architectural) + ' }) and return the checkpoint JSON.',
+    Object.assign({ label: 'checkpoint:save:r' + r }, backend)
   )
 
   if (atomic.length === 0 && remaining.length === 0) {

@@ -15,6 +15,7 @@ const VALID_ENTRY_TYPES = new Set([
     'validation',
     'decision',
     'report',
+    'resume',
 ]);
 /**
  * Validate a candidate (type, round, data) triple for an append operation.
@@ -101,7 +102,7 @@ export function registerDecisionLogTool(ctx) {
             type: {
                 type: 'string',
                 description: 'Entry type (required for append): round_start, review_result, atomic_fix, ' +
-                    'architectural_fix, revert, round_failed, validation, decision, report.',
+                    'architectural_fix, revert, round_failed, validation, decision, report, resume.',
                 enum: [
                     'round_start',
                     'review_result',
@@ -112,6 +113,7 @@ export function registerDecisionLogTool(ctx) {
                     'validation',
                     'decision',
                     'report',
+                    'resume',
                 ],
             },
             round: {

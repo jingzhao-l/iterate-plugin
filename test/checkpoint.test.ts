@@ -41,6 +41,7 @@ const checkpoint = (over: Partial<IterationCheckpoint> = {}): IterationCheckpoin
   maxRounds: 5,
   fixedCount: 7,
   architecturalCount: 2,
+  resumeCount: 0,
   findings: [],
   startedAt: '2026-08-16T00:00:00.000Z',
   updatedAt: '2026-08-16T01:00:00.000Z',

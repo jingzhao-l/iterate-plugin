@@ -51,6 +51,10 @@ export function validateCheckpoint(input) {
     if (typeof input.architecturalCount !== 'number' || !Number.isInteger(input.architecturalCount) || input.architecturalCount < 0) {
         return 'architecturalCount must be a non-negative integer';
     }
+    if (input.resumeCount !== undefined &&
+        (typeof input.resumeCount !== 'number' || !Number.isInteger(input.resumeCount) || input.resumeCount < 0)) {
+        return 'resumeCount must be a non-negative integer';
+    }
     return null;
 }
 /**
@@ -88,6 +92,10 @@ export function computeStatus(input) {
         findingsCount: checkpoint?.findings.length ?? 0,
         totalDecisionLogEntries: entries.length,
         hasCheckpoint: checkpoint !== null,
+        // A checkpoint left on disk means the previous run was interrupted before
+        // it could clear it — this is the durable "interruption" signal.
+        interrupted: checkpoint !== null,
+        resumeCount: checkpoint?.resumeCount ?? 0,
         checkpoint,
         lastUpdated,
     };
@@ -114,6 +122,7 @@ export function registerCheckpointTool(ctx) {
             maxRounds: { type: 'integer', description: 'Required for save: total round cap.' },
             fixedCount: { type: 'integer', description: 'Required for save: number of fixes applied so far.' },
             architecturalCount: { type: 'integer', description: 'Required for save: architectural findings left unfixed.' },
+            resumeCount: { type: 'integer', description: 'Optional for save: how many times this checkpoint has already been resumed after an interruption (default 0).' },
             findings: { type: 'json', description: 'Optional for save: the current deduped findings to resume from.' },
             path: { type: 'string', description: 'Project root directory (default: current working directory).' },
         },
@@ -161,6 +170,7 @@ export function registerCheckpointTool(ctx) {
                     maxRounds: args.maxRounds,
                     fixedCount: args.fixedCount,
                     architecturalCount: args.architecturalCount,
+                    resumeCount: args.resumeCount,
                 });
                 if (invalid)
                     return { operation: 'save', ok: false, error: invalid };
@@ -170,6 +180,7 @@ export function registerCheckpointTool(ctx) {
                     maxRounds: args.maxRounds,
                     fixedCount: args.fixedCount,
                     architecturalCount: args.architecturalCount,
+                    resumeCount: (typeof args.resumeCount === 'number' ? args.resumeCount : 0),
                     findings: (Array.isArray(args.findings) ? args.findings : []),
                     startedAt: readCheckpoint(projectRoot)?.startedAt ?? new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
@@ -214,6 +225,8 @@ export function registerStatusTool(ctx) {
                     findingsCount: { type: 'integer' },
                     totalDecisionLogEntries: { type: 'integer' },
                     hasCheckpoint: { type: 'boolean' },
+                    interrupted: { type: 'boolean', description: 'True when a checkpoint exists, meaning the previous run was interrupted before finishing.' },
+                    resumeCount: { type: 'integer', description: 'How many times the current checkpoint has already been resumed.' },
                     lastUpdated: { type: 'string' },
                     error: { type: 'string' },
                 },
@@ -227,7 +240,7 @@ export function registerStatusTool(ctx) {
                     `Fixed: ${value.fixedCount} · Architectural remaining: ${value.architecturalCount}`,
                     `Findings in checkpoint: ${value.findingsCount}`,
                     `Decision-log entries: ${value.totalDecisionLogEntries}`,
-                    `Checkpoint: ${value.hasCheckpoint ? 'yes' : 'no'}`,
+                    `Checkpoint: ${value.hasCheckpoint ? 'yes' : 'no'}${value.interrupted ? ' (interrupted — resumable)' : ''}${value.resumeCount ? ` · resumed ${value.resumeCount}x` : ''}`,
                     value.lastUpdated ? `Last updated: ${value.lastUpdated}` : '',
                 ];
                 return [{ type: 'text', text: lines.filter(Boolean).join('\n') }];
@@ -253,6 +266,8 @@ export function registerStatusTool(ctx) {
                 findingsCount: status.findingsCount,
                 totalDecisionLogEntries: status.totalDecisionLogEntries,
                 hasCheckpoint: status.hasCheckpoint,
+                interrupted: status.interrupted,
+                resumeCount: status.resumeCount,
                 lastUpdated: status.lastUpdated ?? undefined,
             };
         },
