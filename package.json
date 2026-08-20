@@ -6,12 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jingzhao-l/iterate-skill.git",
-    "directory": "harness/iterate-plugin"
+    "url": "https://github.com/jingzhao-l/iterate-plugin.git"
   },
-  "homepage": "https://github.com/jingzhao-l/iterate-skill#readme",
+  "homepage": "https://github.com/jingzhao-l/iterate-plugin#readme",
   "bugs": {
-    "url": "https://github.com/jingzhao-l/iterate-skill/issues"
+    "url": "https://github.com/jingzhao-l/iterate-plugin/issues"
   },
   "keywords": [
     "dsh-plugin",
