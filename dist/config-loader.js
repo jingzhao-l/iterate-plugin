@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import yaml from 'js-yaml';
 /**
@@ -168,9 +169,46 @@ export function validateConfig(config) {
  */
 export function resolveProjectRoot(input) {
     const raw = (input ?? '').trim();
-    const root = raw ? resolve(raw) : resolve(process.cwd());
+    const root = raw ? resolve(raw) : resolve(effectiveCwd());
     if (!root || root === sep) {
         return { ok: false, reason: 'Refusing filesystem root as project root.' };
     }
     return { ok: true, root };
+}
+/**
+ * Resolve the default working directory for tools invoked without an explicit
+ * `path`. Prefers the process cwd, but a daemon-managed web server can start
+ * with cwd = `/` (e.g. launchd), which is not a usable project root. In that
+ * case fall back to the session workspace encoded in `DSH_SESSION_JSONL`
+ * (`…/sessions/<encoded-workspace>/<session-id>/session.jsonl.zstd`), where
+ * the workspace directory is `--`-wrapped with `/` → `-` and percent-encoded
+ * bytes spelled as `~<hex>` (e.g. `/Volumes/Eng-Dev/iterate-skill` →
+ * `--Volumes-Eng-Dev-iterate-skill--`).
+ */
+function effectiveCwd() {
+    let cwd = '';
+    try {
+        cwd = process.cwd();
+    }
+    catch {
+        // cwd may be unreadable (deleted dir) — fall through to session workspace
+    }
+    if (cwd && cwd !== sep && cwd !== homedir())
+        return cwd;
+    const session = process.env.DSH_SESSION_JSONL;
+    if (session) {
+        const m = session.match(/\/sessions\/([^/]+)\//);
+        const encoded = m ? m[1] : undefined;
+        if (encoded && encoded.startsWith('--') && encoded.endsWith('--')) {
+            try {
+                const decoded = decodeURIComponent(encoded.slice(2, -2).replace(/~/g, '%'));
+                if (decoded && decoded.startsWith(sep))
+                    return decoded;
+            }
+            catch {
+                // malformed encoding — fall through to cwd
+            }
+        }
+    }
+    return cwd || sep;
 }

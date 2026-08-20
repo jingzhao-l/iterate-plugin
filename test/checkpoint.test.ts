@@ -246,7 +246,7 @@ describe('iterate_checkpoint / iterate_status execute', () => {
     try {
       const res = (await checkpointTool({ operation: 'load', path: dir })) as Record<string, unknown>
       assert.equal(res.ok, true)
-      assert.equal(res.checkpoint, undefined)
+      assert.equal(res.checkpoint, null)
     } finally {
       cleanup()
     }

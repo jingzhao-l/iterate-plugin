@@ -60,14 +60,14 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
           properties: {
             found: { type: 'boolean', required: true },
             valid: { type: 'boolean' },
-            errors: { type: 'array', items: { type: 'string' } },
+            errors: { oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'null' }] },
             section: { type: 'string' },
             data: { type: 'json' },
             config: { type: 'json' },
             availableSections: { type: 'array', items: { type: 'string' } },
             operation: { type: 'string' },
             ok: { type: 'boolean' },
-            backupPath: { type: 'string' },
+            backupPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
             error: { type: 'string' },
           },
         },
@@ -113,7 +113,7 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
             operation: 'write',
             ok: true,
             found: true,
-            backupPath: result.backupPath ?? undefined,
+            backupPath: result.backupPath ?? null,
             config: config as unknown as JsonValue,
           }
         }
@@ -127,7 +127,7 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
           return {
             found: hasOverride,
             valid: errors.length === 0,
-            errors: errors.length > 0 ? errors : undefined,
+            errors: errors.length > 0 ? errors : null,
             section: 'validation_report',
           }
         }

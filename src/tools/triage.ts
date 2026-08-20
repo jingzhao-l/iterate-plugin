@@ -302,7 +302,7 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
             skipped: { type: 'integer' },
             count: { type: 'integer' },
             path: { type: 'string' },
-            backupPath: { type: 'string' },
+            backupPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
             entries: { type: 'json' },
             errors: { type: 'array', items: { type: 'string' } },
             error: { type: 'string' },
@@ -363,7 +363,7 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
             skipped: result.skipped,
             count: result.count,
             path: result.configPath,
-            backupPath: result.backupPath ?? undefined,
+            backupPath: result.backupPath ?? null,
           }
         }
 

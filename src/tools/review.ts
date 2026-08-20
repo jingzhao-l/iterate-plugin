@@ -213,7 +213,7 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             operation: 'aggregate',
             mode,
             report: report as unknown as JsonValue,
-            schemaValidation: schemaValidation as unknown as JsonValue | undefined,
+            schemaValidation: (schemaValidation ?? null) as unknown as JsonValue | null,
           }
         }
 
