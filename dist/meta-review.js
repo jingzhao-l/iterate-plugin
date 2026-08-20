@@ -17,6 +17,11 @@ import { sortFindings } from "./review.js";
 /** Number of distinct consistency checks performed by `metaReviewReport`. */
 export const META_REVIEW_CHECKS = 6;
 /**
+ * How many uncovered scope files are listed in a COVERAGE_GAP hint before the
+ * remainder is folded into a "+N more" suffix.
+ */
+export const COVERAGE_LIST_TRUNCATE = 10;
+/**
  * Audit a ReviewReport for internal consistency.
  *
  * Checks (all deterministic, no I/O):
@@ -163,9 +168,34 @@ export function metaReviewReport(report) {
  * existing code is emitted as a critical EVIDENCE_VIOLATION and flips the
  * verdict to `needs_revision`. The audit itself reads the filesystem; this
  * function only folds the (pure, precomputed) result in.
+ *
+ * `coverage` (a CoverageResult) is a *prompt-informative* check: a scope whose
+ * reviewer never reported reading a meaningful share of its assigned files
+ * surfaces a medium COVERAGE_GAP hint (it does NOT flip the verdict — the
+ * subagent's actual tool-call trace is not aggregated here, so coverage can
+ * only advise, never adjudicate).
  */
 export function buildFinalReviewReport(report, opts = {}) {
     const meta = metaReviewReport(report);
+    const coverage = opts.coverage ?? null;
+    if (coverage !== null) {
+        meta.checksRun += 1;
+        if (coverage.uncovered.length > 0) {
+            const listed = coverage.uncovered.slice(0, COVERAGE_LIST_TRUNCATE).join(', ');
+            const extra = coverage.uncovered.length - COVERAGE_LIST_TRUNCATE > 0
+                ? ` (+${coverage.uncovered.length - COVERAGE_LIST_TRUNCATE} more)`
+                : '';
+            meta.issues.push({
+                code: 'COVERAGE_GAP',
+                severity: 'medium',
+                summary: `${coverage.uncovered.length} of ${coverage.assigned.length} scope files ` +
+                    'were not (self-)reported as read',
+                detail: `The reviewer reported reading ${coverage.covered.length}/${coverage.assigned.length} ` +
+                    `assigned files. Uncovered: ${listed}${extra}. Best-effort coverage hint — ` +
+                    'verify these files were actually opened.',
+            });
+        }
+    }
     const evidence = opts.evidence ?? null;
     if (evidence !== null) {
         meta.checksRun += 1;
@@ -174,13 +204,29 @@ export function buildFinalReviewReport(report, opts = {}) {
                 if (violation.error === undefined)
                     continue;
                 const detail = violation.error === 'line_out_of_range'
-                    ? `${violation.line} is beyond this file's ${violation.lineTotal} lines`
+                    ? violation.lineTotal !== undefined && violation.lineTotal !== null
+                        ? `${violation.line} is beyond this file's ${violation.lineTotal} lines`
+                        : `${violation.file} is a binary/unreadable file not line-addressable`
                     : `${violation.file} does not exist at all (verifiable read required)`;
+                let roundHint = '';
+                if (report && violation.file) {
+                    // Try to attribute the poisoned finding to the round that first
+                    // surfaced it (best-effort; report rounds carry it).
+                    for (const r of report.rounds ?? []) {
+                        const matched = (r.findings ?? []).some((fnd) => fnd.file === violation.file && fnd.line === violation.line);
+                        if (matched) {
+                            roundHint = ` (round ${r.round})`;
+                            break;
+                        }
+                    }
+                }
+                const summary = `Finding references non-existent code: ${violation.file}` +
+                    (violation.line ? `:${violation.line}` : '') +
+                    roundHint;
                 meta.issues.push({
                     code: 'EVIDENCE_VIOLATION',
                     severity: 'critical',
-                    summary: `Finding references non-existent code: ${violation.file}` +
-                        (violation.line ? `:${violation.line}` : ''),
+                    summary,
                     detail: detail + '. Review results must anchor to real, read code.',
                 });
             }
@@ -194,6 +240,7 @@ export function buildFinalReviewReport(report, opts = {}) {
         verdict,
         source: report,
         metaReview: meta,
+        coverage: coverage, // preserve the coverage result (or null) on the final report
         summary: {
             totalFindings: Number(summary.totalFindings ?? 0),
             critical: Number(summary.critical ?? 0),

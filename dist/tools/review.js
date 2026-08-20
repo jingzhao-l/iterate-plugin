@@ -3,6 +3,7 @@ import { loadEffectiveConfig, resolveProjectRoot } from "../config-loader.js";
 import { buildReviewPlan, buildReviewReport, sanitizeRounds, validateRoundsSchema, } from "../review.js";
 import { buildFinalReviewReport, metaReviewReport } from "../meta-review.js";
 import { evidenceToPlain, verifyFindings } from "../evidence.js";
+import { collectScopeFiles, computeCoverage, coverageToDict, } from "../review-scope.js";
 import { resolveChangedFiles } from "../git-scope.js";
 /** Default round cap when neither the arg nor config provides one. */
 const DEFAULT_MAX_REVIEW_ROUNDS = 3;
@@ -91,6 +92,12 @@ export function registerReviewTool(ctx) {
                             'retries rounds with valid=false (≤2 times) before forwarding findings.',
                     },
                     evidence: { type: 'json' },
+                    coverage: {
+                        type: 'json',
+                        description: 'For `meta-review`: prompt-informative scope coverage result ' +
+                            '(assigned vs self-reported reads). Present only when ' +
+                            'reviewer.coverage_validation is enabled and readFiles were supplied.',
+                    },
                     finalReport: { type: 'json' },
                     error: { type: 'string' },
                 },
@@ -122,7 +129,14 @@ export function registerReviewTool(ctx) {
                     const gitScope = await resolveChangedFiles(projectRoot, config.git?.target_branch ?? 'main');
                     changedFiles = gitScope.changedFiles;
                 }
-                const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles });
+                // Full-codebase review: pre-collect the source inventory so
+                // buildReviewPlan can batch it into per-chunk reviewer tasks
+                // (coverage enforcement).
+                let scopeFiles;
+                if (config.review?.scope === 'full') {
+                    scopeFiles = collectScopeFiles(projectRoot, { scope: 'full' });
+                }
+                const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles, scopeFiles });
                 return { operation: 'plan', mode, found: true, plan: plan };
             }
             if (args.operation === 'aggregate') {
@@ -187,13 +201,30 @@ export function registerReviewTool(ctx) {
                 const evidenceEnabled = config.reviewer?.evidence_validation !== false;
                 const findings = Array.isArray(source.findings) ? source.findings : [];
                 const evidence = evidenceEnabled ? verifyFindings(projectRoot, findings) : null;
-                const finalReport = buildFinalReviewReport(source, { evidence });
+                // Prompt-informative coverage: compare the reviewer's self-reported
+                // reads against the assigned scope inventory (never flips the
+                // verdict). Disable via config `reviewer.coverage_validation: false`.
+                const coverageEnabled = config.reviewer?.coverage_validation !== false;
+                let coverage = null;
+                if (coverageEnabled) {
+                    const assigned = collectScopeFiles(projectRoot, {
+                        scope: config.review?.scope === 'changed-only' ? 'changed-only' : 'full',
+                    });
+                    const readFiles = Array.isArray(source.readFiles)
+                        ? source.readFiles
+                        : null;
+                    if (readFiles && readFiles.length > 0) {
+                        coverage = computeCoverage(assigned, readFiles);
+                    }
+                }
+                const finalReport = buildFinalReviewReport(source, { evidence, coverage });
                 return {
                     operation: 'meta-review',
                     mode,
                     found: true,
                     report: audit,
                     evidence: evidence ? evidenceToPlain(evidence) : null,
+                    coverage: coverage ? coverageToDict(coverage) : null,
                     finalReport: finalReport,
                 };
             }
