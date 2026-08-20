@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { resolveProjectRoot } from '../config-loader.ts'
+import { resolveProjectRootForExec } from '../config-loader.ts'
 import { checkpointPath, iterateDir } from '../paths.ts'
 import { readRegistry } from './fix.ts'
 import { readDecisionEntries } from './decision-log.ts'
@@ -166,8 +166,8 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { operation: args.operation, ok: false, error: resolved.reason }
         const projectRoot = resolved.root
 
@@ -274,8 +274,8 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
         },
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, error: resolved.reason }
         const projectRoot = resolved.root
         const status = computeStatus({

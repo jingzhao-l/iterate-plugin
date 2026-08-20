@@ -1,6 +1,6 @@
 import { exec } from 'node:child_process';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { loadEffectiveConfig, isCommandAllowed, flattenCommands, resolveProjectRoot, } from "../config-loader.js";
+import { loadEffectiveConfig, isCommandAllowed, flattenCommands, resolveProjectRootForExec, } from "../config-loader.js";
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Hard ceiling on a single validation command's runtime, so a model cannot
  *  pin the tool open indefinitely via an unbounded `timeout` argument. */
@@ -103,8 +103,8 @@ export function registerValidateTool(ctx) {
                 },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok) {
                 return {
                     allowed: false,

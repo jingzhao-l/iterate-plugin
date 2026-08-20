@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { resolveProjectRoot } from "../config-loader.js";
+import { resolveProjectRootForExec } from "../config-loader.js";
 import { checkpointPath, iterateDir } from "../paths.js";
 import { readRegistry } from "./fix.js";
 import { readDecisionEntries } from "./decision-log.js";
@@ -142,8 +142,8 @@ export function registerCheckpointTool(ctx) {
                 { type: 'text', text: JSON.stringify(value, null, 2) },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { operation: args.operation, ok: false, error: resolved.reason };
             const projectRoot = resolved.root;
@@ -246,8 +246,8 @@ export function registerStatusTool(ctx) {
                 return [{ type: 'text', text: lines.filter(Boolean).join('\n') }];
             },
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { ok: false, error: resolved.reason };
             const projectRoot = resolved.root;

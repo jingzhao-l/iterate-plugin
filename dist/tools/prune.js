@@ -20,7 +20,7 @@
 import { existsSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { resolveProjectRoot } from "../config-loader.js";
+import { resolveProjectRootForExec } from "../config-loader.js";
 import { readDecisionEntries, appendDecisionEntry } from "./decision-log.js";
 import { readRegistry, removeRecord, recomputeRoundCounts } from "./fix.js";
 import { iterateDir, fixesDir, checkpointPath, fixRegistryPath } from "../paths.js";
@@ -225,8 +225,8 @@ export function registerPruneTool(ctx) {
                 return [{ type: 'text', text: lines.join('\n') }];
             },
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { ok: false, dryRun: true, error: resolved.reason };
             const projectRoot = resolved.root;

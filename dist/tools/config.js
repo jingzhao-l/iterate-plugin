@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { loadEffectiveConfig, validateConfig, resolveProjectRoot } from "../config-loader.js";
+import { loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { applyConfigUpdates, readRawConfig, validateConfigUpdates, writeConfigFile, } from "../config-write.js";
 /**
  * Register the `iterate_config` tool.
@@ -62,8 +62,8 @@ export function registerConfigTool(ctx) {
                 { type: 'text', text: JSON.stringify(value, null, 2) },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok) {
                 return { found: false, error: resolved.reason };
             }

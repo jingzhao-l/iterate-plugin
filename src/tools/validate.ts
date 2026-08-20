@@ -4,7 +4,7 @@ import {
   loadEffectiveConfig,
   isCommandAllowed,
   flattenCommands,
-  resolveProjectRoot,
+  resolveProjectRootForExec,
 } from '../config-loader.ts'
 import type { ValidationResult } from '../types.ts'
 
@@ -126,8 +126,8 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) {
           return {
             allowed: false,

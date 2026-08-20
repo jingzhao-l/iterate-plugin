@@ -1,7 +1,7 @@
 import { appendFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { resolveProjectRoot } from "../config-loader.js";
+import { resolveProjectRootForExec } from "../config-loader.js";
 const LOG_DIR = '.iterate';
 const LOG_FILE = 'decision-log.jsonl';
 /** All valid DecisionLogEntry `type` values (must stay in sync with Types). */
@@ -147,8 +147,8 @@ export function registerDecisionLogTool(ctx) {
                 { type: 'text', text: JSON.stringify(value, null, 2) },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok) {
                 return { operation: args.operation, error: resolved.reason };
             }

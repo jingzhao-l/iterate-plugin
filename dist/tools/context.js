@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { resolveProjectRoot } from "../config-loader.js";
+import { resolveProjectRootForExec } from "../config-loader.js";
 /** How many ancestor directories we walk up looking for a SKILL.md. */
 const MAX_SKILL_DIR_LOOKUP_DEPTH = 12;
 /** Maximum number of image attachments relayed into the context in one call. */
@@ -235,8 +235,8 @@ export function registerContextTool(ctx) {
                 return [{ type: 'text', text: parts.join('\n\n') }];
             },
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok) {
                 return { found: false, error: resolved.reason, searched: [] };
             }

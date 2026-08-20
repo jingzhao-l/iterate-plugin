@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import yaml from 'js-yaml';
-import { resolveProjectRoot } from "../config-loader.js";
+import { resolveProjectRootForExec } from "../config-loader.js";
 const CONFIG_FILE = 'iterate.config.yaml';
 /** Personalization key that holds the known-intentional list. */
 const PERSONALIZATION_KEY = 'personalization';
@@ -272,8 +272,8 @@ export function registerTriageTool(ctx) {
                 { type: 'text', text: JSON.stringify(value, null, 2) },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok) {
                 return { operation: args.operation, error: resolved.reason };
             }

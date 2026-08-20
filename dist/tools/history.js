@@ -8,7 +8,7 @@
  * Complements `iterate_status` (compact summary) with the actual detail.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { resolveProjectRoot } from "../config-loader.js";
+import { resolveProjectRootForExec } from "../config-loader.js";
 import { readDecisionEntries } from "./decision-log.js";
 import { readRegistry } from "./fix.js";
 const DEFAULT_LIMIT = 50;
@@ -117,8 +117,8 @@ export function registerHistoryTool(ctx) {
                 return [{ type: 'text', text: lines.join('\n') }];
             },
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { ok: false, kind: 'history', error: resolved.reason };
             const projectRoot = resolved.root;
