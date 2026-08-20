@@ -220,7 +220,7 @@ describe('iterate_config write operation', () => {
         },
       })) as Record<string, unknown>
       assert.equal(res.ok, true)
-      assert.equal(res.backupPath, undefined)
+      assert.equal(res.backupPath, null)
       const parsed = yaml.load(readFileSync(join(dir, CONFIG_FILE), 'utf-8')) as Record<string, unknown>
       assert.equal(parsed.goal, 'g')
     } finally {

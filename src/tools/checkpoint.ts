@@ -173,7 +173,7 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
 
         if (args.operation === 'load') {
           const checkpoint = readCheckpoint(projectRoot)
-          return { operation: 'load', ok: true, checkpoint: (checkpoint as unknown as JsonValue | null) ?? undefined }
+          return { operation: 'load', ok: true, checkpoint: checkpoint as unknown as JsonValue | null }
         }
 
         if (args.operation === 'clear') {
@@ -245,7 +245,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
           additionalProperties: false,
           properties: {
             ok: { type: 'boolean', required: true },
-            mode: { type: 'string' },
+            mode: { oneOf: [{ type: 'string' }, { type: 'null' }] },
             currentRound: { type: 'integer' },
             totalRounds: { type: 'integer' },
             fixedCount: { type: 'integer' },
@@ -255,7 +255,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
             hasCheckpoint: { type: 'boolean' },
             interrupted: { type: 'boolean', description: 'True when a checkpoint exists, meaning the previous run was interrupted before finishing.' },
             resumeCount: { type: 'integer', description: 'How many times the current checkpoint has already been resumed.' },
-            lastUpdated: { type: 'string' },
+            lastUpdated: { oneOf: [{ type: 'string' }, { type: 'null' }] },
             error: { type: 'string' },
           },
         },
@@ -285,7 +285,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
         })
         return {
           ok: true,
-          mode: status.mode ?? undefined,
+          mode: status.mode ?? null,
           currentRound: status.currentRound,
           totalRounds: status.totalRounds,
           fixedCount: status.fixedCount,
@@ -295,7 +295,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
           hasCheckpoint: status.hasCheckpoint,
           interrupted: status.interrupted,
           resumeCount: status.resumeCount,
-          lastUpdated: status.lastUpdated ?? undefined,
+          lastUpdated: status.lastUpdated ?? null,
         }
       },
     }),

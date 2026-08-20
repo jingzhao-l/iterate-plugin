@@ -149,7 +149,7 @@ export function registerCheckpointTool(ctx) {
             const projectRoot = resolved.root;
             if (args.operation === 'load') {
                 const checkpoint = readCheckpoint(projectRoot);
-                return { operation: 'load', ok: true, checkpoint: checkpoint ?? undefined };
+                return { operation: 'load', ok: true, checkpoint: checkpoint };
             }
             if (args.operation === 'clear') {
                 const existed = existsSync(checkpointPath(projectRoot));
@@ -217,7 +217,7 @@ export function registerStatusTool(ctx) {
                 additionalProperties: false,
                 properties: {
                     ok: { type: 'boolean', required: true },
-                    mode: { type: 'string' },
+                    mode: { oneOf: [{ type: 'string' }, { type: 'null' }] },
                     currentRound: { type: 'integer' },
                     totalRounds: { type: 'integer' },
                     fixedCount: { type: 'integer' },
@@ -227,7 +227,7 @@ export function registerStatusTool(ctx) {
                     hasCheckpoint: { type: 'boolean' },
                     interrupted: { type: 'boolean', description: 'True when a checkpoint exists, meaning the previous run was interrupted before finishing.' },
                     resumeCount: { type: 'integer', description: 'How many times the current checkpoint has already been resumed.' },
-                    lastUpdated: { type: 'string' },
+                    lastUpdated: { oneOf: [{ type: 'string' }, { type: 'null' }] },
                     error: { type: 'string' },
                 },
             },
@@ -258,7 +258,7 @@ export function registerStatusTool(ctx) {
             });
             return {
                 ok: true,
-                mode: status.mode ?? undefined,
+                mode: status.mode ?? null,
                 currentRound: status.currentRound,
                 totalRounds: status.totalRounds,
                 fixedCount: status.fixedCount,
@@ -268,7 +268,7 @@ export function registerStatusTool(ctx) {
                 hasCheckpoint: status.hasCheckpoint,
                 interrupted: status.interrupted,
                 resumeCount: status.resumeCount,
-                lastUpdated: status.lastUpdated ?? undefined,
+                lastUpdated: status.lastUpdated ?? null,
             };
         },
     }));

@@ -182,7 +182,7 @@ export function registerReviewTool(ctx) {
                     operation: 'aggregate',
                     mode,
                     report: report,
-                    schemaValidation: schemaValidation,
+                    schemaValidation: (schemaValidation ?? null),
                 };
             }
             if (args.operation === 'meta-review') {

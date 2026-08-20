@@ -232,7 +232,7 @@ describe('iterate_triage execute', () => {
         entries: [entry()],
       })) as Record<string, unknown>
       assert.equal(result.added, 1)
-      assert.equal(result.backupPath, undefined)
+      assert.equal(result.backupPath, null)
       assert.equal(existsSync(join(dir, 'iterate.config.yaml')), true)
     } finally {
       cleanup()
