@@ -19,7 +19,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { loadEffectiveConfig, resolveProjectRoot } from "../config-loader.js";
+import { loadEffectiveConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { countTouchedMethods } from "../method-scope.js";
 import { fixBackupPath, fixRegistryPath, fixesDir } from "../paths.js";
 import { appendDecisionEntry } from "./decision-log.js";
@@ -272,8 +272,8 @@ export function registerFixTool(ctx) {
                 { type: 'text', text: value.ok ? `${value.diffSummary ?? 'fixed'} @ ${value.file} (id: ${value.id})` : `fix failed: ${value.error}` },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { ok: false, error: resolved.reason };
             const projectRoot = resolved.root;
@@ -433,8 +433,8 @@ export function registerDiffTool(ctx) {
                 return [{ type: 'text', text }];
             },
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { ok: false, error: resolved.reason };
             const projectRoot = resolved.root;
@@ -520,8 +520,8 @@ export function registerRollbackTool(ctx) {
                 { type: 'text', text: value.ok ? `reverted fix ${value.id} in ${value.file}` : `rollback failed: ${value.error}` },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok)
                 return { ok: false, error: resolved.reason };
             const projectRoot = resolved.root;

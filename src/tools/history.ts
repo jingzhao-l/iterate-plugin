@@ -10,7 +10,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { resolveProjectRoot } from '../config-loader.ts'
+import { resolveProjectRootForExec } from '../config-loader.ts'
 import { readDecisionEntries } from './decision-log.ts'
 import { readRegistry } from './fix.ts'
 import type { DecisionLogEntry, FixRegistry } from '../types.ts'
@@ -136,8 +136,8 @@ export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<t
         },
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, kind: 'history', error: resolved.reason }
         const projectRoot = resolved.root
 

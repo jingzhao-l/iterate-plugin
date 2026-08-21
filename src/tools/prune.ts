@@ -22,7 +22,7 @@ import { existsSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { resolveProjectRoot } from '../config-loader.ts'
+import { resolveProjectRootForExec } from '../config-loader.ts'
 import { readDecisionEntries, appendDecisionEntry } from './decision-log.ts'
 import { readRegistry, removeRecord, recomputeRoundCounts } from './fix.ts'
 import { iterateDir, fixesDir, checkpointPath, fixRegistryPath } from '../paths.ts'
@@ -265,8 +265,8 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
         },
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, dryRun: true, error: resolved.reason }
         const projectRoot = resolved.root
         const retainDays = clampRetainDays(args.retainDays as number | undefined)

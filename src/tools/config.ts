@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadEffectiveConfig, validateConfig, resolveProjectRoot } from '../config-loader.ts'
+import { loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from '../config-loader.ts'
 import {
   applyConfigUpdates,
   readRawConfig,
@@ -76,8 +76,8 @@ export function registerConfigTool(ctx: { tools: { register: (def: ReturnType<ty
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) {
           return { found: false, error: resolved.reason }
         }

@@ -184,9 +184,22 @@ export type ProjectRootResult = { ok: true; root: string } | { ok: false; reason
  * path is unsafe; callers must short-circuit on the failure and return a
  * structured error instead of proceeding.
  */
-export function resolveProjectRoot(input?: string): ProjectRootResult {
+/**
+ * Resolve a caller-supplied project root to a safe absolute path.
+ *
+ * Resolution order for the default (no explicit `path`) case:
+ *   1. `sessionCwd` — the absolute working directory the calling DSH session
+ *      was created in (`exec.agent.session.header.cwd`). This is the
+ *      authoritative workspace for the current conversation and is immune to
+ *      where the web-service process happened to start.
+ *   2. the process cwd, when it is a usable directory (not `/` or the home
+ *      dir — launchd/daemon-managed servers start with cwd=`/`);
+ *   3. the session workspace decoded from `DSH_SESSION_JSONL` (present when
+ *      the DSH runtime injects per-session env into tool sub-processes).
+ */
+export function resolveProjectRoot(input?: string, sessionCwd?: string): ProjectRootResult {
   const raw = (input ?? '').trim()
-  const root = raw ? resolve(raw) : resolve(effectiveCwd())
+  const root = raw ? resolve(raw) : resolve(effectiveCwd(sessionCwd))
   if (!root || root === sep) {
     return { ok: false, reason: 'Refusing filesystem root as project root.' }
   }
@@ -194,16 +207,27 @@ export function resolveProjectRoot(input?: string): ProjectRootResult {
 }
 
 /**
+ * Thin adapter for tool `execute(args, exec)` bodies: pull the session cwd
+ * from the DSH run context and hand it to {@link resolveProjectRoot}.
+ */
+export function resolveProjectRootForExec(
+  exec: { agent?: { session?: { header?: { cwd?: string } } } } | undefined,
+  input?: string,
+): ProjectRootResult {
+  return resolveProjectRoot(input, exec?.agent?.session?.header?.cwd)
+}
+
+/**
  * Resolve the default working directory for tools invoked without an explicit
- * `path`. Prefers the process cwd, but a daemon-managed web server can start
- * with cwd = `/` (e.g. launchd), which is not a usable project root. In that
- * case fall back to the session workspace encoded in `DSH_SESSION_JSONL`
+ * `path`. Prefers the caller-provided session cwd, then the process cwd, then
+ * the session workspace encoded in `DSH_SESSION_JSONL`
  * (`…/sessions/<encoded-workspace>/<session-id>/session.jsonl.zstd`), where
  * the workspace directory is `--`-wrapped with `/` → `-` and percent-encoded
  * bytes spelled as `~<hex>` (e.g. `/Volumes/Eng-Dev/iterate-skill` →
  * `--Volumes-Eng-Dev-iterate-skill--`).
  */
-function effectiveCwd(): string {
+function effectiveCwd(sessionCwd?: string): string {
+  if (sessionCwd && sessionCwd !== sep && sessionCwd !== homedir()) return sessionCwd
   let cwd = ''
   try {
     cwd = process.cwd()

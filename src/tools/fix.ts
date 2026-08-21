@@ -21,7 +21,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadEffectiveConfig, resolveProjectRoot } from '../config-loader.ts'
+import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
 import { countTouchedMethods } from '../method-scope.ts'
 import { fixBackupPath, fixRegistryPath, fixesDir } from '../paths.ts'
 import { appendDecisionEntry } from './decision-log.ts'
@@ -284,8 +284,8 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, error: resolved.reason }
         const projectRoot = resolved.root
         const { config } = loadEffectiveConfig(projectRoot)
@@ -454,8 +454,8 @@ export function registerDiffTool(ctx: { tools: { register: (def: ReturnType<type
         },
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, error: resolved.reason }
         const projectRoot = resolved.root
         const registry = readRegistry(projectRoot)
@@ -544,8 +544,8 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, error: resolved.reason }
         const projectRoot = resolved.root
         const id = typeof args.id === 'string' ? args.id : ''

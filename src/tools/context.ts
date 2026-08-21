@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { resolveProjectRoot } from '../config-loader.ts'
+import { resolveProjectRootForExec } from '../config-loader.ts'
 
 /** How many ancestor directories we walk up looking for a SKILL.md. */
 const MAX_SKILL_DIR_LOOKUP_DEPTH = 12
@@ -257,8 +257,8 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
         },
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) {
           return { found: false, error: resolved.reason, searched: [] }
         }

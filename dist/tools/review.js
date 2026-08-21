@@ -1,5 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { loadEffectiveConfig, resolveProjectRoot } from "../config-loader.js";
+import { loadEffectiveConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { buildReviewPlan, buildReviewReport, sanitizeRounds, validateRoundsSchema, } from "../review.js";
 import { buildFinalReviewReport, metaReviewReport } from "../meta-review.js";
 import { evidenceToPlain, verifyFindings } from "../evidence.js";
@@ -106,8 +106,8 @@ export function registerReviewTool(ctx) {
                 { type: 'text', text: JSON.stringify(value, null, 2) },
             ],
         },
-        async execute(args) {
-            const resolved = resolveProjectRoot(args.path);
+        async execute(args, exec) {
+            const resolved = resolveProjectRootForExec(exec, args.path);
             if (!resolved.ok) {
                 return { operation: args.operation, error: resolved.reason };
             }

@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import yaml from 'js-yaml'
-import { resolveProjectRoot } from '../config-loader.ts'
+import { resolveProjectRootForExec } from '../config-loader.ts'
 import type { KnownIntentional } from '../types.ts'
 
 const CONFIG_FILE = 'iterate.config.yaml'
@@ -313,8 +313,8 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) {
           return { operation: args.operation, error: resolved.reason }
         }

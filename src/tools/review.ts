@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { loadEffectiveConfig, resolveProjectRoot } from '../config-loader.ts'
+import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
 import {
   buildReviewPlan,
   buildReviewReport,
@@ -131,8 +131,8 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
         ],
       },
 
-      async execute(args) {
-        const resolved = resolveProjectRoot(args.path)
+      async execute(args, exec) {
+        const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) {
           return { operation: args.operation, error: resolved.reason }
         }
