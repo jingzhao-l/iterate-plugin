@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
@@ -231,16 +231,19 @@ function applyEntries(
   try {
     writeFileSync(configPath, yamlText, 'utf-8')
   } catch (err) {
-    // Rollback: restore the backup (or delete the file we just created).
+    // Rollback: restore the backup, or REMOVE the file we just created when
+    // there was no prior config — an empty file left behind would poison all
+    // future config reads (empty YAML is not a valid mapping).
+    let rollbackError = ''
     try {
       if (backupPath) copyFileSync(backupPath, configPath)
-      else if (existsSync(configPath)) writeFileSync(configPath, '', 'utf-8')
-    } catch {
-      // Rollback failure is reported, not swallowed silently.
+      else if (existsSync(configPath)) rmSync(configPath, { force: true })
+    } catch (rbErr) {
+      rollbackError = `; rollback also failed: ${String(rbErr)}`
     }
     return {
       ok: false,
-      error: `Failed to write config: ${String(err)}`,
+      error: `Failed to write config: ${String(err)}${rollbackError}`,
     }
   }
 

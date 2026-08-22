@@ -23,12 +23,20 @@
  * filesystem half (`verifyFinding`) to stay unit-testable without touching disk.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type { ReviewFinding } from './types.ts'
 
 /** Sentinel for whole-file findings (line 0 or omitted means the whole file). */
 export const WHOLE_FILE_LINE = 0
+
+/**
+ * Hard cap on a single evidence file read. `verifyFinding` only needs the
+ * line count + a NUL check; reading an unbounded file (or a device file
+ * reached through a symlink) is a memory/hang hazard, so anything larger is
+ * treated as not line-addressable.
+ */
+const MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
 
 export type EvidenceError = 'file_not_found' | 'line_out_of_range'
 
@@ -79,6 +87,22 @@ export function resolveWithin(root: string, rel: string): string | null {
   return resolved
 }
 
+/** True when `candidate` is `root` itself or lexically inside `root`. */
+function isWithin(root: string, candidate: string): boolean {
+  if (candidate === root) return true
+  const prefix = root.endsWith(sep) ? root : root + sep
+  return candidate.startsWith(prefix)
+}
+
+/** best-effort realpath; falls back to the lexical path on any failure. */
+function safeRealpath(p: string): string {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
 /**
  * Pure check that `line` (if anchored) exists in `text`.
  * Whole-file findings (undefined/0) are always bounds-valid.
@@ -113,6 +137,50 @@ export function verifyFinding(
       resolvedPath: resolved,
       verified: false,
       error: 'file_not_found',
+    }
+  }
+
+  // Symlink containment: resolveWithin is lexical only, but existsSync /
+  // readFileSync follow symlinks. Verify the REAL path stays inside the REAL
+  // project root so a finding path can never read (or line-count) a file
+  // outside the project via a symlinked directory or file.
+  const rootReal = safeRealpath(root)
+  const real = safeRealpath(resolved)
+  if (!isWithin(rootReal, real)) {
+    return {
+      file: relFile,
+      line,
+      lineTotal: null,
+      resolvedPath: resolved,
+      verified: false,
+      error: 'file_not_found',
+    }
+  }
+
+  // Regular-file + size guard: a directory, device file (/dev/zero), FIFO or
+  // multi-GB file is not a line-addressable text target. statSync follows
+  // symlinks, so a link to a device still lands here and is rejected.
+  let st
+  try {
+    st = statSync(resolved)
+  } catch {
+    return {
+      file: relFile,
+      line,
+      lineTotal: null,
+      resolvedPath: resolved,
+      verified: false,
+      error: 'file_not_found',
+    }
+  }
+  if (!st.isFile() || st.size > MAX_EVIDENCE_BYTES) {
+    return {
+      file: relFile,
+      line,
+      lineTotal: null,
+      resolvedPath: resolved,
+      verified: false,
+      error: 'line_out_of_range',
     }
   }
 

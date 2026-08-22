@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -241,7 +241,8 @@ export function registerContextTool(ctx) {
                 return { found: false, error: resolved.reason, searched: [] };
             }
             const projectRoot = resolved.root;
-            const requested = (args.files ?? '')
+            // Guard: `files` must be a comma-separated string (model-controlled).
+            const requested = (typeof args.files === 'string' ? args.files : '')
                 .split(',')
                 .map((s) => s.trim().toLowerCase())
                 .filter(Boolean);
@@ -262,8 +263,19 @@ export function registerContextTool(ctx) {
                 // are all supported.
                 const skillRoot = findSkillRoot(PLUGIN_SRC_DIR);
                 const candidates = [];
-                if (args.skillDir)
-                    candidates.push(args.skillDir);
+                // skillDir is a model-controlled path; only honor it when it is an
+                // existing directory (resolve it first) — otherwise fall through to
+                // the auto-detected root / project root.
+                if (typeof args.skillDir === 'string' && args.skillDir.trim()) {
+                    try {
+                        const dir = resolve(args.skillDir);
+                        if (existsSync(dir) && statSync(dir).isDirectory())
+                            candidates.push(dir);
+                    }
+                    catch {
+                        // unreadable/invalid skillDir — skip it
+                    }
+                }
                 if (skillRoot)
                     candidates.push(skillRoot);
                 candidates.push(projectRoot);

@@ -35,10 +35,12 @@ export function sortFindings(findings) {
         const bySeverity = rankA - rankB;
         if (bySeverity !== 0)
             return bySeverity;
-        const byFile = a.file.localeCompare(b.file);
+        // Defensive coercion: `file`/`line` can be wrong-typed when schema
+        // validation is disabled — String()/Number() keep the comparator total.
+        const byFile = String(a.file ?? '').localeCompare(String(b.file ?? ''));
         if (byFile !== 0)
             return byFile;
-        return (a.line ?? 0) - (b.line ?? 0);
+        return (Number(a.line) || 0) - (Number(b.line) || 0);
     });
 }
 /** Normalize a summary so near-identical duplicates collapse to one key. */
@@ -48,9 +50,15 @@ export function normalizeSummary(summary) {
         .toLowerCase()
         .replace(/[\s\n\t]+/g, ' ');
 }
-/** Dedupe key: same file + same dimension + similar summary. */
+/**
+ * Dedupe key: same file + same dimension + similar summary + explicit line.
+ * Including the line keeps two genuine issues with identical wording at
+ * different locations from collapsing into one (the line is omitted only when
+ * neither side anchors one, i.e. whole-file findings).
+ */
 export function findingKey(f) {
-    return `${f.file}|${f.dimension}|${normalizeSummary(f.summary)}`;
+    const line = typeof f.line === 'number' && f.line > 0 ? f.line : 0;
+    return `${f.file}|${f.dimension}|${line}|${normalizeSummary(f.summary)}`;
 }
 /**
  * Remove duplicate findings within a list.
@@ -109,14 +117,22 @@ export function aggregateRounds(rounds, maxReviewRounds) {
     const firstRoundByKey = new Map();
     const merged = [];
     // Guard: round numbers are expected to be positive integers. Skip malformed
-    // entries defensively rather than letting `firstRoundByKey` key on NaN/0.
+    // entries defensively rather than letting `firstRoundByKey` key on NaN/0 or
+    // crashing on null / non-array findings.
+    // Hard ceiling: round numbers are model-authored JSON; an absurd round (e.g.
+    // 1e9) would otherwise allocate an array of that size below (OOM). Round
+    // numbers above the configured cap are clamped to the cap.
     let maxRound = 0;
+    const roundCap = Math.max(1, maxReviewRounds);
     for (const round of rounds) {
+        if (!round || typeof round !== 'object')
+            continue;
         if (typeof round.round !== 'number' || !Number.isInteger(round.round) || round.round < 1)
             continue;
+        const findings = Array.isArray(round.findings) ? round.findings : [];
         if (round.round > maxRound)
             maxRound = round.round;
-        for (const f of round.findings) {
+        for (const f of findings) {
             const key = findingKey(f);
             if (seen.has(key))
                 continue;
@@ -125,8 +141,10 @@ export function aggregateRounds(rounds, maxReviewRounds) {
             merged.push(f);
         }
     }
+    // Clamp the allocation bound so a hostile round number cannot OOM the tool.
+    const effectiveMax = Math.min(maxRound, Math.max(1, roundCap * 2));
     const findingsByRound = [];
-    for (let r = 1; r <= maxRound; r++) {
+    for (let r = 1; r <= effectiveMax; r++) {
         let count = 0;
         for (const key of firstRoundByKey.keys()) {
             if (firstRoundByKey.get(key) === r)
@@ -143,11 +161,20 @@ export function computeConvergence(rounds, maxReviewRounds) {
     const { findingsByRound } = aggregateRounds(rounds, maxReviewRounds);
     const totalRounds = rounds.length;
     // `findingsByRound` is indexed by the actual round number (round r → index
-    // r-1), so convergence must read the LAST PRESENT round's count using its
-    // reported round number — not `totalRounds - 1`, which is only valid for
-    // contiguous 1..N round numbers.
-    const lastRound = totalRounds > 0 ? rounds[totalRounds - 1].round : 0;
-    const lastRoundCount = lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0;
+    // r-1), sized to the highest present round (clamped). Convergence must read
+    // the HIGHEST PRESENT round's count — not the last array element (rounds
+    // may arrive unsorted) and not `totalRounds - 1` (only valid for contiguous
+    // 1..N). The count index is bounded by the array length aggregateRounds
+    // actually allocated.
+    let lastRound = 0;
+    for (const round of rounds) {
+        if (!round || typeof round.round !== 'number' || !Number.isInteger(round.round) || round.round < 1)
+            continue;
+        if (round.round > lastRound)
+            lastRound = round.round;
+    }
+    const idx = Math.min(lastRound, findingsByRound.length) - 1;
+    const lastRoundCount = idx >= 0 ? (findingsByRound[idx] ?? 0) : 0;
     const converged = totalRounds > 0 && lastRoundCount === 0;
     return {
         totalRounds,
@@ -193,8 +220,9 @@ function summarize(findings) {
 export function buildReviewReport(input) {
     // 1. Filter known-intentional per round (before cross-round dedupe).
     const filteredRounds = input.rounds.map((r) => ({
-        round: r.round,
-        findings: filterKnownIntentional(r.findings, input.knownIntentional),
+        round: typeof r?.round === 'number' ? r.round : 0,
+        findings: filterKnownIntentional(Array.isArray(r?.findings) ? r.findings : [], input.knownIntentional),
+        readFiles: Array.isArray(r?.readFiles) ? r.readFiles : [],
     }));
     // 2. Cross-round dedupe + per-round "first seen" tracking.
     const { findings, findingsByRound } = aggregateRounds(filteredRounds, input.maxReviewRounds);
@@ -221,6 +249,9 @@ export function buildReviewReport(input) {
         maxReviewRounds: input.maxReviewRounds,
         rounds: filteredRounds,
         findings: sorted,
+        // Aggregate of every round's self-reported reads, so the meta-review
+        // coverage gate can compare against the assigned inventory.
+        readFiles: [].concat(...filteredRounds.map((r) => r.readFiles ?? [])),
         convergence: {
             totalRounds: filteredRounds.length,
             findingsByRound,
@@ -394,8 +425,8 @@ export function validateFindingsSchema(input) {
  */
 export function validateRoundsSchema(rounds) {
     return rounds.map((r) => {
-        const issues = validateFindingsSchema(r.findings);
-        return { round: r.round, valid: issues.length === 0, issues };
+        const issues = validateFindingsSchema(Array.isArray(r?.findings) ? r.findings : []);
+        return { round: typeof r?.round === 'number' ? r.round : 0, valid: issues.length === 0, issues };
     });
 }
 /**
@@ -411,19 +442,25 @@ export function validateRoundsSchema(rounds) {
  */
 export function sanitizeRounds(rounds, schemaValidation) {
     return rounds.map((r, i) => {
+        // Defensive: malformed rounds must never crash the deterministic core.
+        const findings = Array.isArray(r?.findings) ? r.findings : [];
+        const roundNo = typeof r?.round === 'number' ? r.round : 0;
+        const readFiles = Array.isArray(r?.readFiles) ? r.readFiles : [];
         if (schemaValidation) {
             const issues = schemaValidation[i]?.issues ?? [];
             if (issues.some((iss) => iss.index === -1))
-                return { round: r.round, findings: [] };
+                return { round: roundNo, findings: [], readFiles };
             const bad = new Set(issues.map((iss) => iss.index));
             return {
-                round: r.round,
-                findings: r.findings.filter((_, fi) => !bad.has(fi)),
+                round: roundNo,
+                findings: findings.filter((_, fi) => !bad.has(fi)),
+                readFiles,
             };
         }
         return {
-            round: r.round,
-            findings: r.findings.filter((f) => Boolean(f) && typeof f === 'object' && !Array.isArray(f)),
+            round: roundNo,
+            findings: findings.filter((f) => Boolean(f) && typeof f === 'object' && !Array.isArray(f)),
+            readFiles,
         };
     });
 }
@@ -435,6 +472,9 @@ export function sanitizeRounds(rounds, schemaValidation) {
 export function reviewerTaskPrompt(input) {
     const parts = [];
     parts.push(`You are the "${input.dimension}" reviewer for the iterate review.`, `Goal: ${input.goal}`, `Scope: ${input.scope === 'full' ? 'entire codebase' : 'changed files only'}.`);
+    if (input.focus) {
+        parts.push(`FOCUS: ${input.focus}`);
+    }
     if (input.scopeFiles && input.scopeFiles.length > 0) {
         parts.push('COVERAGE RULE (mandatory): below is the exact file inventory you are ' +
             'assigned to review. You MUST open EVERY file in this inventory with ' +
@@ -465,9 +505,9 @@ export function reviewerTaskPrompt(input) {
         'disqualifying failure, and fabricated line numbers are treated as ' +
         'poisoned evidence. Anchor every finding to real code.');
     parts.push(`Return a JSON object: {"findings": [...], "readFiles": [...]}.`, `Each finding: dimension (must be "${input.dimension}"), file (relative path), ` +
-        'line (REQUIRED positive integer — the exact line you READ for an ' +
-        'anchored, line-targeted issue; use 0 for whole-file/module-level ' +
-        'issues), severity (critical/high/medium/low), summary (one line), ' +
+        'line (optional; the exact line you READ for a line-targeted issue; ' +
+        '0 or omitted for whole-file/module-level issues), ' +
+        'severity (critical/high/medium/low), summary (one line), ' +
         'failure_scenario (how/when it fails, backed by the code you actually ' +
         'read), suggested_fix (the concrete fix), ' +
         `is_atomic (true if the fix is <= ${input.maxLines} lines within a SINGLE file/function, else false).`, `Write summaries and details in ${input.outputLanguage}.`);
@@ -508,6 +548,17 @@ export function buildReviewPlan(input) {
         batches = [undefined];
     }
     const dimensionTasks = [];
+    // personalization.dimension_focus: [{dimension, focus}] — appended to the
+    // matching dimension's reviewer prompt.
+    const focusMap = new Map();
+    const pf = input.config.personalization;
+    if (pf && Array.isArray(pf.dimension_focus)) {
+        for (const entry of pf.dimension_focus) {
+            if (entry && typeof entry.dimension === 'string' && typeof entry.focus === 'string' && entry.focus) {
+                focusMap.set(entry.dimension, entry.focus);
+            }
+        }
+    }
     for (const d of dimensions) {
         batches.forEach((batch, index) => {
             const dimensionId = batches.length === 1 ? d : `${d}#${index + 1}`;
@@ -523,6 +574,7 @@ export function buildReviewPlan(input) {
                     maxLines,
                     changedFiles: effectiveChangedOnly ? changedFiles : undefined,
                     scopeFiles: batch,
+                    focus: focusMap.get(d),
                 }),
                 findingsSchema: findingsSchema(),
             });

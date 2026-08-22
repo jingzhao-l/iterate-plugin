@@ -170,9 +170,12 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           const rawRounds = Array.isArray(args.rounds) ? args.rounds : []
           const rounds: ReviewRound[] = rawRounds
             .map((r) => {
-              const rr = r as { round?: number; findings?: unknown }
+              const rr = r as { round?: number; findings?: unknown; readFiles?: unknown }
               const findings = Array.isArray(rr?.findings) ? (rr.findings as ReviewFinding[]) : []
-              return { round: typeof rr?.round === 'number' ? rr.round : 0, findings }
+              const readFiles = Array.isArray(rr?.readFiles)
+                ? (rr.readFiles as unknown[]).filter((f): f is string => typeof f === 'string')
+                : []
+              return { round: typeof rr?.round === 'number' ? rr.round : 0, findings, readFiles }
             })
             .filter((r: ReviewRound) => r.round > 0)
 

@@ -10,7 +10,7 @@
  * config, always back up before writing, roll back on failure.
  */
 
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
 
@@ -169,12 +169,14 @@ export function writeConfigFile(
   try {
     writeFileSync(configPath, yaml.dump(config, { noRefs: true }), 'utf-8')
   } catch (err) {
+    let rollbackError = ''
     try {
       if (backupPath) copyFileSync(backupPath, configPath)
-    } catch {
-      // Rollback failure is reported, never swallowed silently.
+      else if (existsSync(configPath)) rmSync(configPath, { force: true })
+    } catch (rbErr) {
+      rollbackError = `; rollback also failed: ${String(rbErr)}`
     }
-    return { ok: false, error: `failed to write config: ${String(err)}` }
+    return { ok: false, error: `failed to write config: ${String(err)}${rollbackError}` }
   }
 
   return { ok: true, backupPath }

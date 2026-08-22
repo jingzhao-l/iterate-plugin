@@ -18,7 +18,7 @@
  *   - Each deletion is logged to the decision log (when not dry-run).
  */
 
-import { existsSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
@@ -134,17 +134,17 @@ export function executePrune(
     errors: [] as string[],
   }
 
-  // 1. Rewrite the decision log, keeping only recent entries.
+  // 1. Rewrite the decision log, keeping only recent entries. Atomic
+  // (temp + rename) so a crash mid-write can never truncate the log.
   try {
     const entries = readDecisionEntries(projectRoot)
     const kept = entries.filter((e) => e.timestamp >= cutoff)
     result.deletedLogEntries = entries.length - kept.length
     if (result.deletedLogEntries > 0) {
-      writeFileSync(
-        join(iterateDir(projectRoot), 'decision-log.jsonl'),
-        kept.map((e) => JSON.stringify(e)).join('\n') + '\n',
-        'utf-8',
-      )
+      const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl')
+      const tmpPath = `${logPath}.tmp-${Date.now()}`
+      writeFileSync(tmpPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf-8')
+      renameSync(tmpPath, logPath)
     }
   } catch (err) {
     result.errors.push(`failed to rewrite decision log: ${String(err)}`)
@@ -175,10 +175,13 @@ export function executePrune(
   if (report.emptyRounds.length > 0) {
     try {
       let registry = readRegistry(projectRoot)
-      for (const round of report.emptyRounds) {
-        for (const rec of [...registry.rounds.find((r) => r.round === round)?.records ?? []]) {
-          registry = removeRecord(registry, rec.id)
-        }
+      const emptyRoundNos = new Set(report.emptyRounds)
+      // Drop whole empty rounds (records.length === 0) instead of only
+      // removing their records — an empty round has no records to remove, so
+      // the old loop was a no-op that still reported trimmedEmptyRounds.
+      registry = {
+        ...registry,
+        rounds: registry.rounds.filter((r) => !emptyRoundNos.has(r.round) || (r.records?.length ?? 0) > 0),
       }
       registry = recomputeRoundCounts(registry)
       writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(registry, null, 2), 'utf-8')

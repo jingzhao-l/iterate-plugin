@@ -720,3 +720,37 @@ describe('countSessionImages', () => {
     assert.equal(countSessionImages(session), 0)
   })
 })
+
+describe('hashReport (content digest)', () => {
+  const base = {
+    mode: 'dry-run',
+    findings: [
+      { dimension: 'correctness', file: 'a.ts', line: 1, summary: 'missing null check' },
+      { dimension: 'security', file: 'b.ts', line: 0, summary: 'unpinned dep' },
+    ],
+  }
+  it('is stable for identical reports', () => {
+    const h1 = hashReport(JSON.parse(JSON.stringify(base)))
+    const h2 = hashReport(JSON.parse(JSON.stringify(base)))
+    assert.equal(h1, h2)
+  })
+  it('differs when a finding summary changes', () => {
+    const other = JSON.parse(JSON.stringify(base))
+    other.findings[0].summary = 'missing bounds check'
+    assert.notEqual(hashReport(base), hashReport(other))
+  })
+  it('differs when only the first-20-chars collide (old weak signature)', () => {
+    const a = JSON.parse(JSON.stringify(base))
+    const b = JSON.parse(JSON.stringify(base))
+    a.findings[0].summary = 'missing null check at line X'
+    b.findings[0].summary = 'missing null check at line Y'
+    // old key used mode+count+first 20 chars — these two collide under the old scheme
+    assert.equal(String(a.findings[0].summary).slice(0, 20), String(b.findings[0].summary).slice(0, 20))
+    assert.notEqual(hashReport(a), hashReport(b))
+  })
+  it('differs when a finding line changes', () => {
+    const other = JSON.parse(JSON.stringify(base))
+    other.findings[0].line = 2
+    assert.notEqual(hashReport(base), hashReport(other))
+  })
+})

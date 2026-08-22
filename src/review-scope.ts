@@ -114,20 +114,23 @@ function collectChanged(changedFiles: string[]): string[] {
 }
 
 function collectFull(root: string): string[] {
-  // Deterministic recursive walk built on Node's fs; a code reviewer never
-  // anchors findings to lock files, images, or vendored builds.
+  // Deterministic iterative walk (explicit stack — unbounded recursion could
+  // overflow on pathologically deep trees); a code reviewer never anchors
+  // findings to lock files, images, or vendored builds.
   const out: string[] = []
-  const walk = (dir: string): void => {
+  const stack: string[] = [root]
+  while (stack.length > 0) {
+    const dir = stack.pop()!
     let entries: import('node:fs').Dirent[]
     try {
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
-      return
+      continue
     }
     for (const entry of entries) {
       const abs = join(dir, entry.name)
       if (entry.isDirectory()) {
-        if (!isIgnoredDir(entry.name)) walk(abs)
+        if (!isIgnoredDir(entry.name)) stack.push(abs)
         continue
       }
       if (!entry.isFile()) continue
@@ -136,13 +139,14 @@ function collectFull(root: string): string[] {
       out.push(rel.split(SEP).join(SEP))
     }
   }
-  walk(root)
   return out.sort()
 }
 
 /** Split `files` into stable batches, keeping directory runs together. */
 export function chunkFiles(files: string[], perChunk?: number): string[][] {
-  const size = perChunk === undefined || perChunk < 1 ? DEFAULT_SCOPE_CHUNK_SIZE : perChunk
+  // Number.isFinite: NaN fails `perChunk < 1` and would yield one unbounded
+  // chunk (current.length >= NaN is never true).
+  const size = Number.isFinite(perChunk) && (perChunk as number) >= 1 ? (perChunk as number) : DEFAULT_SCOPE_CHUNK_SIZE
   const ordered = [...files].sort()
   const chunks: string[][] = []
   let current: string[] = []

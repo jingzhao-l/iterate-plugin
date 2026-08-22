@@ -46,10 +46,13 @@ async function runCommand(
       },
       (error, stdout, stderr) => {
         const durationMs = Math.round(performance.now() - start)
-        // error.code is the exit code when the command ran; error.killed means timeout
+        // error.code is the exit code when the command ran; when the binary
+        // cannot be spawned Node sets error.code to a STRING ('ENOENT' etc).
+        // Coerce to a number so the integer output schema is never violated.
+        const exitCode = typeof error?.code === 'number' ? error.code : (error ? 1 : 0)
         resolve({
           command,
-          exitCode: error?.code ?? (error ? 1 : 0),
+          exitCode,
           stdout: stdout ?? '',
           stderr: stderr ?? '',
           timedOut: error?.killed === true,

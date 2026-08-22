@@ -70,8 +70,13 @@ export interface FinalReviewReport {
   }
 }
 
-/** Number of distinct consistency checks performed by `metaReviewReport`. */
-export const META_REVIEW_CHECKS = 6
+/**
+ * Number of distinct consistency checks performed by `metaReviewReport`.
+ * The check set is: COUNT_MATCH, SEVERITY_SUM, DIMENSION_SUM, DIMENSION_UNKNOWN,
+ * SORT_ORDER, CONVERGENCE_SUM, CONVERGENCE_FLAG, ROUND_NUMBER, ROUND_EMPTY,
+ * ROUND_GAP.
+ */
+export const META_REVIEW_CHECKS = 10
 
 /**
  * How many uncovered scope files are listed in a COVERAGE_GAP hint before the
@@ -266,14 +271,23 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
       )
     }
   }
-  for (let i = 1; i <= rounds.length; i++) {
-    if (!seenRounds.has(i)) {
-      add(
-        'ROUND_GAP',
-        'medium',
-        `Round ${i} is missing from the round sequence`,
-        `rounds present: ${[...seenRounds].sort((a, b) => a - b).join(', ') || 'none'}.`,
-      )
+  // ROUND_GAP: only flag gaps WITHIN the range of actually-present round
+  // numbers. Non-contiguous starts (e.g. a resumed run beginning at round 5)
+  // and arbitrary round numbering are supported by the aggregate engine, so
+  // missing 1..N prefixes are NOT defects. Checks min..max of present rounds.
+  const present = [...seenRounds].sort((a, b) => a - b)
+  if (present.length > 0) {
+    const min = present[0]!
+    const max = present[present.length - 1]!
+    for (let i = min; i <= max; i++) {
+      if (!seenRounds.has(i)) {
+        add(
+          'ROUND_GAP',
+          'medium',
+          `Round ${i} is missing from the round sequence`,
+          `rounds present: ${present.join(', ')}.`,
+        )
+      }
     }
   }
 

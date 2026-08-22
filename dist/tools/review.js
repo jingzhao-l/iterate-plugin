@@ -145,7 +145,10 @@ export function registerReviewTool(ctx) {
                     .map((r) => {
                     const rr = r;
                     const findings = Array.isArray(rr?.findings) ? rr.findings : [];
-                    return { round: typeof rr?.round === 'number' ? rr.round : 0, findings };
+                    const readFiles = Array.isArray(rr?.readFiles)
+                        ? rr.readFiles.filter((f) => typeof f === 'string')
+                        : [];
+                    return { round: typeof rr?.round === 'number' ? rr.round : 0, findings, readFiles };
                 })
                     .filter((r) => r.round > 0);
                 if (rounds.length === 0) {

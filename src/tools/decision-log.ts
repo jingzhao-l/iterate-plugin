@@ -52,12 +52,19 @@ function logPath(projectRoot: string): string {
 
 /**
  * Append one entry to the decision log (JSONL format).
- * Returns the entry count after appending.
+ * Returns the entry count after appending. Never throws — a disk failure is
+ * surfaced through `error` so callers (fix/prune) can report the audit-trail
+ * miss without failing the mutation they already performed.
  */
-export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry): { count: number; path: string } {
-  const filePath = logPath(projectRoot)
-  const line = JSON.stringify(entry) + '\n'
-  appendFileSync(filePath, line, 'utf-8')
+export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry): { count: number; path: string; error?: string } {
+  let filePath: string
+  try {
+    filePath = logPath(projectRoot)
+    const line = JSON.stringify(entry) + '\n'
+    appendFileSync(filePath, line, 'utf-8')
+  } catch (err) {
+    return { count: -1, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` }
+  }
   // Count entries
   let count = 0
   try {
@@ -71,19 +78,29 @@ export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry
 
 /**
  * Read all entries from the decision log.
+ * A single corrupt line (partial write, hand-edit) is SKIPPED, not fatal —
+ * one bad line must never empty the whole history for every reader.
  */
 export function readDecisionEntries(projectRoot: string): DecisionLogEntry[] {
   const filePath = join(projectRoot, LOG_DIR, LOG_FILE)
   if (!existsSync(filePath)) return []
+  let content: string
   try {
-    const content = readFileSync(filePath, 'utf-8')
-    return content
-      .split('\n')
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as DecisionLogEntry)
+    content = readFileSync(filePath, 'utf-8')
   } catch {
     return []
   }
+  const out: DecisionLogEntry[] = []
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    try {
+      out.push(JSON.parse(trimmed) as DecisionLogEntry)
+    } catch {
+      // skip the corrupt line, keep the rest
+    }
+  }
+  return out
 }
 
 /**

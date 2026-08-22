@@ -45,12 +45,20 @@ function logPath(projectRoot) {
 }
 /**
  * Append one entry to the decision log (JSONL format).
- * Returns the entry count after appending.
+ * Returns the entry count after appending. Never throws — a disk failure is
+ * surfaced through `error` so callers (fix/prune) can report the audit-trail
+ * miss without failing the mutation they already performed.
  */
 export function appendDecisionEntry(projectRoot, entry) {
-    const filePath = logPath(projectRoot);
-    const line = JSON.stringify(entry) + '\n';
-    appendFileSync(filePath, line, 'utf-8');
+    let filePath;
+    try {
+        filePath = logPath(projectRoot);
+        const line = JSON.stringify(entry) + '\n';
+        appendFileSync(filePath, line, 'utf-8');
+    }
+    catch (err) {
+        return { count: -1, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` };
+    }
     // Count entries
     let count = 0;
     try {
@@ -64,21 +72,33 @@ export function appendDecisionEntry(projectRoot, entry) {
 }
 /**
  * Read all entries from the decision log.
+ * A single corrupt line (partial write, hand-edit) is SKIPPED, not fatal —
+ * one bad line must never empty the whole history for every reader.
  */
 export function readDecisionEntries(projectRoot) {
     const filePath = join(projectRoot, LOG_DIR, LOG_FILE);
     if (!existsSync(filePath))
         return [];
+    let content;
     try {
-        const content = readFileSync(filePath, 'utf-8');
-        return content
-            .split('\n')
-            .filter((l) => l.trim().length > 0)
-            .map((l) => JSON.parse(l));
+        content = readFileSync(filePath, 'utf-8');
     }
     catch {
         return [];
     }
+    const out = [];
+    for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0)
+            continue;
+        try {
+            out.push(JSON.parse(trimmed));
+        }
+        catch {
+            // skip the corrupt line, keep the rest
+        }
+    }
+    return out;
 }
 /**
  * Register the `iterate_decision_log` tool.
