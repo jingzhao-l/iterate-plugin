@@ -60,7 +60,6 @@ import {
   batchSetVerdict,
   setAllVerdicts,
   buildRoundHistory,
-  buildFindingTrend,
   computeTrendMetrics,
   trendMax,
   buildCompletionSummary,
@@ -166,6 +165,9 @@ const TRIAGE_STORAGE_PREFIX = 'iterate.triage.'
 
 /** localStorage key for the theme skin toggle. */
 const THEME_STORAGE_KEY = 'iterate.theme.enabled'
+
+/** localStorage key for the dashboard empty-state dismissal. */
+const DASH_EMPTY_DISMISS_KEY = 'iterate.dash.empty.dismissed'
 
 /** Theme override source name (matches the doc §16.1). */
 const THEME_SOURCE = 'iterate'
@@ -325,6 +327,13 @@ const ITERATE_CSS = `
 /* Interruption / resume + attachment chips (dashboard) */
 .iterate-chip-resume { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent); }
 .iterate-chip-images { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent); }
+
+
+/* Dashboard empty state (no report in this session yet) */
+.iterate-dash-empty { justify-content: space-between; color: var(--dsw-alias-label-secondary); }
+.iterate-dash-empty-text { color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.iterate-dash-empty-dismiss { padding: 2px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+.iterate-dash-empty-dismiss:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 
 /* Accessibility-switch toggle */
 .iterate-switch { position: relative; width: 42px; height: 24px; border-radius: 999px; padding: 0; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); transition: background-color 160ms ease, border-color 160ms ease; }
@@ -534,6 +543,29 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
  * off the owner share — both are point-in-time snapshots re-rendered for
  * you, never subscribe."
  */
+/**
+ * Helpful no-report placeholder for the input dock (dismissible, persisted).
+ * Fills the vacuous/empty state: without it the dock renders blank and the
+ * user has no affordance for how to start an iterate run.
+ */
+function EmptyDashboardState() {
+  const [dismissed, setDismissed] = React.useState(() => {
+    try { return storage ? storage.get(DASH_EMPTY_DISMISS_KEY) === '1' : false } catch { return false }
+  })
+  if (dismissed) return null
+  const dismiss = (): void => {
+    try { if (storage) storage.set(DASH_EMPTY_DISMISS_KEY, '1') } catch { /* noop */ }
+    setDismissed(true)
+  }
+  return React.createElement(
+    'div',
+    { 'data-iterate-root': '', 'data-iterate': 'dashboard-empty', className: 'iterate-dashboard iterate-dash-empty' },
+    React.createElement('span', { className: 'iterate-dash-empty-text' },
+      'iterate：发送「review / 反复审查」请求即可开始自动审查'),
+    React.createElement('button', { className: 'iterate-dash-empty-dismiss', title: '不再显示', onClick: dismiss }, '隐藏'),
+  )
+}
+
 function ConvergenceDashboard(props: SlotProps) {
   const [pulseKey, setPulseKey] = React.useState(0)
   // The `conversation.input.dock` slot owner share (InputZone) provides
@@ -549,7 +581,11 @@ function ConvergenceDashboard(props: SlotProps) {
     setPulseKey((k) => k + 1)
   }, [report && hashReport(report) + ':' + getCurrentRound(report)])
 
-  if (!report) return null
+  if (!report) {
+    // No report in this session yet: show a subtle, dismissible hint instead
+    // of a blank dock, so discoverability of "how to start" is not zero.
+    return React.createElement(EmptyDashboardState, {})
+  }
 
   const round = getCurrentRound(report)
   const total = getTotalRounds(report)
