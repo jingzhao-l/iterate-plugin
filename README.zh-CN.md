@@ -1,5 +1,8 @@
 # iterate-plugin for DeepSeek Harness (dsh)
 
+> dsh 桌面端的 iterate 收敛面板、UI 分诊与审查闭环插件。把 iterate 生态的同一套 review/fix loop 直接搬进 dsh 界面。
+> The iterate ecosystem's convergence dashboard, triage UI, and review/fix loop, natively embedded inside the DeepSeek Harness (dsh) desktop client.
+
 <p align="center">
   <a href="README.md"><strong>English</strong></a> ·
   <a href="README.zh-CN.md"><strong>简体中文</strong></a>
@@ -11,9 +14,44 @@
   <a href="https://github.com/jingzhao-l/iterate-plugin"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-plugin?style=social&label=Star" alt="Stars"></a>
   <a href="https://github.com/jingzhao-l/iterate-skill"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-skill?style=social&label=主仓库%20Star" alt="主仓库 Stars"></a>
   <a href="https://www.npmjs.com/package/iterate-plugin"><img src="https://img.shields.io/npm/dt/iterate-plugin?label=Downloads&logo=npm&logoColor=white" alt="npm downloads"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="License"></a>
+  <a href="https://github.com/jingzhao-l/iterate-plugin/releases"><img src="https://img.shields.io/github/v/release/jingzhao-l/iterate-plugin" alt="GitHub release"></a>
 </p>
 
-> ⭐ 如果这个插件对你的 dsh 工作流有帮助，欢迎为主仓库点亮 Star，这是对开源维护最大的支持！
+> ⭐ 如果这个插件对你的 dsh 工作流有帮助，欢迎为主仓库点亮 Star，这是对开源维护最大的支持！你的 Star 能让 iterate 被更多开发者看见。
+
+---
+
+## iterate 生态一览 / The iterate Ecosystem
+
+**iterate 不是一个独立的工具，而是一套附着在现有 AI 助手之上的技能生态。** 它不会替换你的 IDE 或 AI 工具，而是在你已有的工作流里，叠加一层"严格的代码收尾与把关"。整个生态由**三个可互换组件构成，共用同一套 `iterate.config.yaml` 与同一套 9 维度审查体系**：
+
+| 组件 | 形态与位置 | 面向场景 |
+|---|---|---|
+| **[Core Skill + CLI / 核心技能与命令行](https://github.com/jingzhao-l/iterate-skill)** | 可移植 AI 技能 `/iterate` + `iterate` CLI（源码：iterate-skill 主仓库根目录） | 在 Trae / Claude Code / Cursor / Copilot / Codex 等 25+ 助手中以对话方式进行多轮迭代 |
+| **[iterate-harness / 无头引擎](https://github.com/jingzhao-l/iterate-harness)** | 独立无头引擎，命令 `ih`（npm: `iterate-harness`） | 在终端 / CI / Git 钩子里**脱离对话式助手**，运行同一套闭环 |
+| **iterate-plugin / dsh 桌面插件（本仓库）** | dsh 桌面客户端插件（npm: `iterate-plugin`） | 把 harness 运行时**直接接入 dsh 界面**：收敛看板、分诊面板、轮次进度，均以原生 dsh 控件形式展示 |
+
+三者关系：**Core Skill** 是最通用的跨助手审查/修复引擎（"大脑"）；**iterate-harness** 是同一引擎封装为无头 CLI + WebUI，适合跑在无需交互的场景；**iterate-plugin**（本仓库）把 harness 运行时进一步封装为 dsh 插件，直接在 dsh 桌面客户端内渲染分诊 UI 与收敛看板。配置（`iterate.config.yaml`）与 9 维度审查体系**三者完全一致**——理解其一，即可举一反三。
+
+生态其余组件的快速安装/入口：
+
+```bash
+# Core Skill + CLI（一键安装到 25+ AI 编程助手）
+npx iterate-skill-installer
+
+# iterate-harness：无头引擎（npm 包装器，最简）
+npm install -g iterate-harness
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/iterate-harness/main/scripts/install.sh | bash
+ih iterate init && ih iterate review
+
+# iterate-plugin：dsh 桌面插件（本仓库，安装命令在下文「安装」一节重复列出）
+dsh plugin --profile web add iterate-plugin
+```
+
+> 本文档从下一节开始聚焦 **iterate-plugin（本仓库）**。核心技能文档见 [iterate-skill 主仓库](https://github.com/jingzhao-l/iterate-skill)，无头引擎文档见 [iterate-harness 独立仓库](https://github.com/jingzhao-l/iterate-harness)。
+
+---
 
 ## 这是什么 / About This Plugin
 

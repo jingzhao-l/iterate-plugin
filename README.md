@@ -1,5 +1,8 @@
 # iterate-plugin for DeepSeek Harness (dsh)
 
+> dsh 桌面端的 iterate 收敛面板、UI 分诊与审查闭环插件。把 iterate 生态的同一套 review/fix loop 直接搬进 dsh 界面。
+> The iterate ecosystem's convergence dashboard, triage UI, and review/fix loop, natively embedded inside the DeepSeek Harness (dsh) desktop client.
+
 <p align="center">
   <a href="README.md"><strong>English</strong></a> ·
   <a href="README.zh-CN.md"><strong>简体中文</strong></a>
@@ -11,9 +14,44 @@
   <a href="https://github.com/jingzhao-l/iterate-plugin"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-plugin?style=social&label=Star" alt="Stars"></a>
   <a href="https://github.com/jingzhao-l/iterate-skill"><img src="https://img.shields.io/github/stars/jingzhao-l/iterate-skill?style=social&label=Main%20Repo%20Star" alt="Main Repo Stars"></a>
   <a href="https://www.npmjs.com/package/iterate-plugin"><img src="https://img.shields.io/npm/dt/iterate-plugin?label=Downloads&logo=npm&logoColor=white" alt="npm downloads"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow" alt="License"></a>
+  <a href="https://github.com/jingzhao-l/iterate-plugin/releases"><img src="https://img.shields.io/github/v/release/jingzhao-l/iterate-plugin" alt="GitHub release"></a>
 </p>
 
-> ⭐ If this helps your dsh workflow, give the main repo a star — it means a lot!
+> ⭐ If this helps your dsh workflow, give the main repo a star — it means a lot to open-source maintenance!
+
+---
+
+## The iterate Ecosystem / iterate 生态一览
+
+**iterate** is not one single binary — it is a **skill ecosystem** that layers a strict multi-round code gate on top of your existing AI assistants, IDEs, and scripts. It never replaces your tools; it adds an audit-and-close-the-loop layer on them. The whole ecosystem ships as **three interchangeable components sharing one `iterate.config.yaml` + one review-dimension system**:
+
+| Component | Form & Source | Target Scenario |
+|---|---|---|
+| **[Core Skill + CLI](https://github.com/jingzhao-l/iterate-skill)** | Portable AI skill `/iterate` + `iterate` CLI (source: iterate-skill monorepo root) | Conversation-driven multi-round iteration inside Trae / Claude Code / Cursor / Copilot / Codex and 25+ other assistants |
+| **[iterate-harness](https://github.com/jingzhao-l/iterate-harness)** | Standalone headless engine, command `ih` (npm: `iterate-harness`) | Run the EXACT same loop in terminal / CI / git hooks, without any conversational assistant required |
+| **iterate-plugin (this repo)** | dsh desktop-client plugin (npm: `iterate-plugin`) | Plug the harness runtime **into the dsh UI**: convergence dashboard, triage panel, round progress — all surfaced as native dsh widgets |
+
+How they fit together: **Core Skill** is the canonical, assistant-agnostic review/fix engine (the "brains"). **iterate-harness** is the same engine wrapped as a headless CLI + WebUI for unattended runs. **iterate-plugin** (this repository) wraps that harness runtime as a dsh plugin, rendering the triage UI and convergence dashboard directly inside the dsh desktop client. Configuration (`iterate.config.yaml`) and the 9-dimension review system are **identical across all three** — learn one, use them all.
+
+Quick install / entry points for the rest of the ecosystem:
+
+```bash
+# Core Skill + CLI (install into 25+ AI assistants)
+npx iterate-skill-installer
+
+# iterate-harness: headless engine (npm wrapper, simplest)
+npm install -g iterate-harness
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/iterate-harness/main/scripts/install.sh | bash
+ih iterate init && ih iterate review
+
+# iterate-plugin: dsh desktop plugin (this repo — commands repeated under Installation below)
+dsh plugin --profile web add iterate-plugin
+```
+
+> This document focuses on **iterate-plugin (this repo)**. For Core Skill docs see the [iterate-skill monorepo](https://github.com/jingzhao-l/iterate-skill); for headless engine docs see [iterate-harness](https://github.com/jingzhao-l/iterate-harness).
+
+---
 
 ## About This Plugin
 
