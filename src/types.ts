@@ -22,6 +22,22 @@ export interface IterateConfig {
     coverage_validation: boolean
     scope_chunk_size: number
   }
+  /**
+   * Runtime observatory: live review-transcript capture and the destructive
+   * tool approval gate. Absent → defaults (capture on, approval per `policy`).
+   */
+  observatory?: {
+    /** Persist a review transcript to `.iterate/transcript.json` for the client observatory. */
+    capture?: boolean
+    /**
+     * Approval policy for destructive iterate tools (iterate_fix /
+     * iterate_rollback / iterate_prune with dryRun:false).
+     * - 'ask': prompt the human through the dsh approval service before running.
+     * - 'deny': refuse the call outright (fail-closed).
+     * - 'allow': always run (debug/trusted). Default 'ask'.
+     */
+    approval?: 'ask' | 'deny' | 'allow'
+  }
   onboarding?: Record<string, unknown>
   personalization?: Record<string, unknown>
 }
@@ -188,4 +204,105 @@ export interface IterationStatus {
   resumeCount: number
   checkpoint: IterationCheckpoint | null
   lastUpdated: string | null
+}
+
+/** ─── Runtime observatory (transcript) ───────────────────────────────────── */
+
+/** Keyboard-control-free direction to steer the running workflow's next round. */
+export interface TranscriptNudge {
+  /** ISO timestamp the nudge was written. */
+  timestamp: string
+  /** Free-form steering text injected at the front of the next round's prompt. */
+  text: string
+}
+
+/** One finding rendered for the observatory (location + evidence kept for jump/triage). */
+export interface TranscriptFinding {
+  dimension: string
+  file: string
+  line?: number
+  severity: 'critical' | 'high' | 'medium' | 'low'
+  summary: string
+  failure_scenario?: string
+  suggested_fix?: string
+  is_atomic?: boolean
+  /** True when this finding was already marked known_intentional (filtered from active work). */
+  acknowledged?: boolean
+}
+
+/** One reviewer sub-agent's visible stream within a round. */
+export interface TranscriptThread {
+  /** Target dimension the reviewer was asked to review. */
+  dimension: string
+  /** 1-based attempt within the round (schema-validation retries bump this). */
+  attempt: number
+  /** Natural-language narration the reviewer produced (F1 message stream). */
+  messages: string[]
+  /** Files the reviewer opened with read_file (F1 "what it read"). */
+  readFiles: string[]
+  /** Findings the reviewer produced in this thread. */
+  findings: TranscriptFinding[]
+}
+
+/** A review round grouping its reviewer threads. */
+export interface TranscriptRound {
+  round: number
+  threads: TranscriptThread[]
+}
+
+/** A recorded atomic fix shown in the observatory (F4). */
+export interface TranscriptFix {
+  id: string
+  timestamp: string
+  round: number
+  file: string
+  summary: string
+  linesAdded: number
+  linesRemoved: number
+  success: boolean
+}
+
+/** A single decision-log entry in the timeline (F7). */
+export interface TranscriptEntry {
+  timestamp: string
+  round: number
+  type: string
+  data: Record<string, unknown>
+}
+
+/** Checkpoint summary surfaced for resume actions (F5). */
+export interface TranscriptCheckpoint {
+  mode: 'dry-run' | 'normal'
+  round: number
+  maxRounds: number
+  fixedCount: number
+  resumeCount: number
+  updatedAt: string
+}
+
+/**
+ * Serializable runtime-observatory manifest the client renders. Every field is
+ * `JsonValue`-safe; the builder caps growth so a long run cannot blow up memory.
+ */
+export interface TranscriptManifest {
+  version: number
+  project: string
+  updatedAt: string
+  active: boolean
+  mode: 'dry-run' | 'normal' | null
+  goal: string
+  phases: string[]
+  round: number
+  maxRounds: number
+  rounds: TranscriptRound[]
+  convergence: number[]
+  findings: TranscriptFinding[]
+  fixes: TranscriptFix[]
+  checkpoint: TranscriptCheckpoint | null
+  timeline: TranscriptEntry[]
+  nudge: TranscriptNudge | null
+  approval: {
+    active: boolean
+    policy: 'ask' | 'deny' | 'allow'
+  }
 }

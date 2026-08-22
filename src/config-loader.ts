@@ -56,6 +56,10 @@ export function defaultConfig(): IterateConfig {
       coverage_validation: true,
       scope_chunk_size: 25,
     },
+    observatory: {
+      capture: true,
+      approval: 'ask',
+    },
   }
 }
 

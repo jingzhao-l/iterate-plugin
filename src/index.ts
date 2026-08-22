@@ -2,13 +2,15 @@
  * iterate-plugin — dsh plugin for the iterate autonomous closed-loop workflow
  *
  * Architecture:
- * - The plugin registers 13 tools (config, validate, decision-log, context, review,
- *   triage, fix, diff, rollback, checkpoint, status, history, prune)
+ * - The plugin registers 14 tools (config, validate, decision-log, context, review,
+ *   triage, fix, diff, rollback, checkpoint, status, history, prune, transcript)
  * - The plugin injects a system prompt section teaching the iterate workflow pattern
  * - The model (prompted by the skill) writes a workflow script using dsh's `workflow` tool
  * - The workflow script uses `agent()` / `parallel()` / `phase()` / `log()` to orchestrate
- * - Subagents use the 13 tools to do real work (read config, run validation, log decisions,
- *   review, triage, apply/rollback/fixing, checkpoint, status, history, prune)
+ * - Subagents use the 14 tools to do real work (read config, run validation, log decisions,
+ *   review, triage, apply/rollback/fixing, checkpoint, status, history, prune, transcript)
+ * - A `tools/pre-execute` hook gates destructive iterate calls behind human approval
+ *   (F8 observatory approval policy: ask / deny / allow).
  *
  * Tool invocation model:
  * - Workflow script CANNOT call tools directly (sandboxed vm, no Node API)
@@ -34,13 +36,15 @@ import { registerFixTool, registerDiffTool, registerRollbackTool } from './tools
 import { registerCheckpointTool, registerStatusTool } from './tools/checkpoint.ts'
 import { registerHistoryTool } from './tools/history.ts'
 import { registerPruneTool } from './tools/prune.ts'
+import { registerTranscriptTool } from './tools/transcript.ts'
+import { registerSessionHooks } from './session-hooks.ts'
 import { ITERATE_SKILL_PROMPT } from './skill-prompt.ts'
 
 export const name = 'iterate-plugin'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt'] as const
 
 export function apply(ctx: Context): void {
-  // 1. Register the 13 tools
+  // 1. Register the 14 tools
   registerConfigTool(ctx)
   registerValidateTool(ctx)
   registerDecisionLogTool(ctx)
@@ -54,6 +58,10 @@ export function apply(ctx: Context): void {
   registerStatusTool(ctx)
   registerHistoryTool(ctx)
   registerPruneTool(ctx)
+  registerTranscriptTool(ctx)
+
+  // 2. Wire the observatory approval gate onto dsh's tools/pre-execute waterfall.
+  registerSessionHooks(ctx)
 
   // 2. Inject the iterate skill prompt as a system prompt section
   // This teaches the model how to write iterate workflow scripts using the tools.

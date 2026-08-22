@@ -36,3 +36,8 @@ export function fixBackupPath(projectRoot: string, id: string, timestamp: string
 export function checkpointPath(projectRoot: string): string {
   return join(iterateDir(projectRoot), 'checkpoint.json')
 }
+
+/** Runtime-observatory transcript file (JSON). */
+export function transcriptPath(projectRoot: string): string {
+  return join(iterateDir(projectRoot), 'transcript.json')
+}

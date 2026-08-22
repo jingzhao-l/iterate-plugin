@@ -17,13 +17,14 @@
  *   - `inject`: services the shell must have up before `apply` runs.
  *   - `apply(ctx)`: called by the client runtime with the ClientContext.
  *
- * Implements the §14.4 / §16 six-part UI layer:
+ * Implements the §14.4 / §16 UI layer:
  *   1. Convergence dashboard  -> conversation.input.dock
- *   2. Findings triage panel  -> conversation.chat.turnTail
- *   3. Iteration stats card   -> conversation.chat.turnTail (same chain, empty-findings case)
- *   4. iterate theme skin     -> theme.overrideTokens
- *   5. Progress event linkage -> ctx.on('slots/changed') + round-pulse + shell.overlay capsule
- *   6. Settings page section  -> settings.section
+ *   2. Findings triage panel   -> conversation.chat.turnTail
+ *   3. Iteration stats card    -> conversation.chat.turnTail (same chain, empty-findings case)
+ *   4. iterate theme skin      -> theme.overrideTokens
+ *   5. Progress event linkage  -> ctx.on('slots/changed') + round-pulse + shell.overlay capsule
+ *   6. Settings page section   -> settings.section
+ *   7. Runtime observatory     -> conversation.input.dock (order 91, F1–F7 board)
  *
  * Design notes:
  *   - All styles are injected via one <style> tag; colors use dsh token
@@ -70,6 +71,8 @@ import {
   buildRuntimeStatusGuide,
   scanSessionForResume,
   countSessionImages,
+  scanSessionForTranscript,
+  normalizeTranscript,
   SEVERITY_LABEL,
   SEVERITY_COLOR,
 } from '../../lib/parse.js'
@@ -140,6 +143,92 @@ interface SlotsService {
 /** Client theme service exposing token overrides. */
 interface ThemeService {
   overrideTokens(source: string, tokens: IterateTokenMap): () => void
+}
+
+// ─── Runtime observatory (transcript) types ─────────────────────────────────
+// Mirrors src/types.ts Transcript* series, but every field is defensive/optional
+// so the panel never crashes on a malformed or partial manifest.
+
+interface ObsCheckpoint {
+  mode?: string
+  round?: number
+  maxRounds?: number
+  fixedCount?: number
+  resumeCount?: number
+  updatedAt?: string
+}
+
+interface ObsNudge {
+  timestamp?: string
+  text?: string
+}
+
+interface ObsApproval {
+  active?: boolean
+  policy?: string
+}
+
+interface ObsThread {
+  dimension?: string
+  attempt?: number
+  messages?: string[]
+  readFiles?: string[]
+  findings?: ObsFinding[]
+}
+
+interface ObsRound {
+  round?: number
+  threads?: ObsThread[]
+}
+
+interface ObsFinding {
+  dimension?: string
+  file?: string
+  line?: number
+  severity?: string
+  summary?: string
+  failure_scenario?: string
+  suggested_fix?: string
+  is_atomic?: boolean
+  acknowledged?: boolean
+}
+
+interface ObsFix {
+  id?: string
+  timestamp?: string
+  round?: number
+  file?: string
+  summary?: string
+  linesAdded?: number
+  linesRemoved?: number
+  success?: boolean
+}
+
+interface ObsEntry {
+  timestamp?: string
+  round?: number
+  type?: string
+  data?: Record<string, unknown>
+}
+
+interface ObsManifest {
+  version?: number
+  project?: string
+  updatedAt?: string
+  active?: boolean
+  mode?: string
+  goal?: string
+  phases?: string[]
+  round?: number
+  maxRounds?: number
+  rounds?: ObsRound[]
+  convergence?: number[]
+  findings?: ObsFinding[]
+  fixes?: ObsFix[]
+  checkpoint?: ObsCheckpoint | null
+  timeline?: ObsEntry[]
+  nudge?: ObsNudge | null
+  approval?: ObsApproval
 }
 
 /** Opaque slot props: heterogeneous per-slot payloads. */
@@ -364,6 +453,37 @@ const ITERATE_CSS = `
 .iterate-guide { margin-top: 4px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; background: var(--dsw-alias-bg-layer-2); }
 .iterate-guide-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--dsw-alias-bg-layer-2); border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .iterate-guide-body { padding: 12px 14px; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11.5px; line-height: 1.75; white-space: pre-wrap; color: var(--dsw-alias-label-primary); max-height: 260px; overflow: auto; }
+
+/* ── Runtime observatory panel ──────────────────────────────────────────── */
+.iterate-obs { margin: 6px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); overflow: hidden; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.iterate-obs-head { display: flex; align-items: center; gap: 10px; padding: 8px 14px; cursor: pointer; border-bottom: 1px solid var(--dsw-alias-border-l1); flex-wrap: wrap; }
+.iterate-obs-head[data-closed] { border-bottom: none; }
+.iterate-obs-title { font-weight: 650; }
+.iterate-obs-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); color: var(--dsw-alias-brand-primary); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.iterate-obs-badge[data-live] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); }
+.iterate-obs-head-meta { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.iterate-obs-tabs { display: flex; gap: 4px; padding: 8px 14px 0; flex-wrap: wrap; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.iterate-obs-tab { padding: 4px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+.iterate-obs-tab[data-active] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.iterate-obs-body { padding: 12px 14px; max-height: 460px; overflow: auto; }
+.iterate-obs-block { border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+.iterate-obs-block:last-child { margin-bottom: 0; }
+.iterate-obs-block-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--dsw-alias-bg-layer-2); border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-primary); flex-wrap: wrap; }
+.iterate-obs-block-head[data-click] { cursor: pointer; }
+.iterate-obs-block-body { padding: 8px 10px; }
+.iterate-obs-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.iterate-obs-msg { padding: 2px 0; color: var(--dsw-alias-label-secondary); line-height: 1.5; font-size: 11px; word-break: break-word; }
+.iterate-obs-file { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--dsw-alias-label-secondary); word-break: break-all; }
+.iterate-obs-bar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
+.iterate-obs-bar b { color: var(--dsw-alias-label-primary); font-weight: 600; }
+.iterate-obs-mono { font-family: var(--dsw-font-mono, ui-monospace, monospace); }
+.iterate-obs-code { padding: 6px 8px; margin-top: 4px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--dsw-alias-label-secondary); white-space: pre-wrap; word-break: break-all; }
+.iterate-obs-input { width: 100%; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 11px; resize: vertical; }
+.iterate-obs-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.iterate-obs-input::placeholder { color: var(--dsw-alias-label-secondary); }
+.iterate-obs-empty { font-size: 11px; color: var(--dsw-alias-label-secondary); padding: 8px 0; }
+.iterate-obs-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
+.iterate-obs-row:last-child { border-bottom: none; }
 `
 
 // ─── Small helpers ───────────────────────────────────────────────────────────
@@ -1248,6 +1368,454 @@ function SettingsPanel(_props: SlotProps) {
   )
 }
 
+// ─── Runtime observatory panel (F1–F7) ──────────────────────────────────────
+
+/** Tab id → label for the observatory's seven panels. */
+const OBS_TABS = [
+  { key: 'f1', label: '审查线程' },
+  { key: 'f2', label: '收敛趋势' },
+  { key: 'f3', label: '发现定位' },
+  { key: 'f4', label: '修复与回滚' },
+  { key: 'f5', label: '断点恢复' },
+  { key: 'f6', label: '运行控制台' },
+  { key: 'f7', label: '决策时间线' },
+] as const
+
+/** Find the latest runtime-observatory manifest inside a session snapshot. */
+function latestTranscript(session: unknown): ObsManifest | null {
+  if (!session) return null
+  const raw = scanSessionForTranscript(session)
+  return raw ? normalizeTranscript(raw) as ObsManifest : null
+}
+
+/** Build a human-pasteable `iterate_fix` instruction for one finding. */
+function buildObsFixInstruction(f: ObsFinding): string {
+  const payload = JSON.stringify({
+    file: String(f.file || ''),
+    ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
+    dimension: String(f.dimension || ''),
+    summary: String(f.summary || ''),
+    ...(f.suggested_fix ? { suggested_fix: String(f.suggested_fix) } : {}),
+  }, null, 2)
+  return `请调用 \`iterate_fix\` 修复以下 finding：\n\n\`\`\`json\n${payload}\n\`\`\``
+}
+
+/**
+ * ObservatoryPanel: a 7-tab runtime observatory that renders the latest
+ * iterate_transcript manifest found in the dsh session stream. The panel is
+ * collapsed by default to a single entry row so it never re-occludes the main
+ * convergence dashboard; clicking expands it into tabs. Every field read is
+ * defensively guarded (optional chaining + fallbacks) so a partial/malformed
+ * manifest never crashes the slot. The client cannot call harness tools
+ * directly, so every action copies a paste-able instruction text instead.
+ */
+function ObservatoryPanel(props: SlotProps) {
+  const session = props && props.session ? props.session : null
+  const manifest = latestTranscript(session)
+
+  const [open, setOpen] = React.useState(false)
+  const [tab, setTab] = React.useState('f1')
+  const [expandedThreads, setExpandedThreads] = React.useState<Set<string>>(new Set())
+  const [copiedKey, setCopiedKey] = React.useState<string | null>(null)
+  const [nudgeText, setNudgeText] = React.useState('')
+  const [timelineType, setTimelineType] = React.useState('')
+  const [timelineSearch, setTimelineSearch] = React.useState('')
+
+  // Single shared "copied" flash timer (reused across all copy buttons).
+  const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  React.useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current) }, [])
+
+  /** Copy an instruction, flashing "已复制" on the originating button only when the copy actually succeeded. */
+  const copyInstruction = (key: string, text: string) => {
+    if (!text) return
+    copyText(text).then((ok) => {
+      if (!ok) return
+      setCopiedKey(key)
+      if (copyTimer.current) clearTimeout(copyTimer.current)
+      copyTimer.current = setTimeout(() => setCopiedKey((cur) => (cur === key ? null : cur)), 1600)
+    })
+  }
+
+  const toggleThread = (key: string) => {
+    setExpandedThreads((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  // No observable transcript yet: show a compact, collapsed header row.
+  if (!manifest) {
+    return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'obs', className: 'iterate-obs' },
+      React.createElement('div', { className: 'iterate-obs-head', 'data-closed': '' },
+        React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, '暂无运行时观测数据'),
+      ),
+    )
+  }
+
+  const live = manifest.active === true
+  const roundMeta = typeof manifest.round === 'number'
+    ? (typeof manifest.maxRounds === 'number' ? `Round ${manifest.round}/${manifest.maxRounds}` : `Round ${manifest.round}`)
+    : ''
+  const headMeta = [manifest.mode || '', roundMeta, manifest.updatedAt || ''].filter(Boolean).join(' · ')
+
+  // ── F1: review threads ─────────────────────────────────────────────────
+  const threadFindingPill = (f: ObsFinding, keyBase: string) => {
+    const loc = `${String(f.file || '?')}${typeof f.line === 'number' && f.line > 0 ? `:${f.line}` : ''}`
+    return React.createElement('div', { key: keyBase, className: 'iterate-obs-row' },
+      React.createElement('span', { className: 'iterate-sev-dot', style: { background: severityColor(f.severity) } }),
+      React.createElement('span', {}, severityLabel(f.severity)),
+      React.createElement('span', { className: 'iterate-obs-file' }, loc),
+      React.createElement('span', {}, String(f.dimension || '')),
+      React.createElement('span', { className: 'iterate-obs-msg' }, String(f.summary || '')),
+    )
+  }
+
+  const renderThreads = () => {
+    const rounds = manifest.rounds || []
+    if (rounds.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无审查线程')
+    }
+    return React.createElement('div', {}, ...rounds.map((r, ri) => {
+      const threads = r.threads || []
+      const fCount = threads.reduce((sum, t) => sum + (t.findings ? t.findings.length : 0), 0)
+      const threadBlocks = threads.length === 0
+        ? [React.createElement('div', { key: 'none', className: 'iterate-obs-empty' }, '本轮无线程')]
+        : threads.map((t, ti) => {
+            const key = `${ri}-${ti}`
+            const expanded = expandedThreads.has(key)
+            const dim = t.dimension || '未命名维度'
+            const tFindings = t.findings || []
+            const files = t.readFiles || []
+            const msgs = t.messages || []
+            return React.createElement('div', { key, className: 'iterate-obs-block' },
+              React.createElement('div', { className: 'iterate-obs-block-head', 'data-click': '', onClick: () => toggleThread(key), title: expanded ? '收起线程' : '展开线程' },
+                React.createElement('span', {}, expanded ? '−' : '+'),
+                React.createElement('b', {}, dim),
+                React.createElement('span', { className: 'iterate-obs-chip' }, `attempt ${typeof t.attempt === 'number' ? t.attempt : '?'}`),
+                React.createElement('span', { className: 'iterate-obs-chip' }, `${tFindings.length} findings`),
+              ),
+              expanded
+                ? React.createElement('div', { className: 'iterate-obs-block-body' },
+                    React.createElement('div', { className: 'iterate-obs-bar' },
+                      React.createElement('b', {}, '叙述'),
+                      React.createElement('span', { className: 'iterate-obs-head-meta' }, `${msgs.length} 条`),
+                    ),
+                    ...(msgs.length === 0
+                      ? [React.createElement('div', { key: 'msg-none', className: 'iterate-obs-empty' }, '无线索叙述')]
+                      : msgs.map((m, mi) => React.createElement('div', { key: mi, className: 'iterate-obs-msg' }, String(m)))),
+                    ...(files.length > 0
+                      ? [
+                          React.createElement('div', { key: 'files-h', className: 'iterate-obs-bar', style: { marginTop: 6 } },
+                            React.createElement('b', {}, '读取文件'),
+                          ),
+                          ...files.map((f, fi) =>
+                            React.createElement('div', { key: `f${fi}`, className: 'iterate-obs-file' }, String(f)),
+                          ),
+                        ]
+                      : []),
+                    React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
+                      React.createElement('b', {}, '发现'),
+                    ),
+                    ...(tFindings.length === 0
+                      ? [React.createElement('div', { key: 'finding-none', className: 'iterate-obs-empty' }, '本线程无发现')]
+                      : tFindings.map((f, fi) => threadFindingPill(f, `tf${fi}`))),
+                  )
+                : null,
+            )
+          })
+      return React.createElement('div', { key: ri, className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('b', {}, `Round ${typeof r.round === 'number' ? r.round : ri + 1}`),
+          React.createElement('span', { className: 'iterate-obs-chip' }, `${threads.length} 线程`),
+          React.createElement('span', { className: 'iterate-obs-head-meta' }, `${fCount} findings`),
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' }, ...threadBlocks),
+      )
+    }))
+  }
+
+  // ── F2: convergence trend (inline bars, reusing TrendChart) ─────────────
+  const renderTrend = () => {
+    const conv = manifest.convergence || []
+    if (conv.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无收敛数据')
+    }
+    const points = conv.map((n, i) => ({ round: i + 1, count: n }))
+    return React.createElement('div', {},
+      React.createElement(TrendChart, { points }),
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
+        `各轮发现数量：${conv.join(' → ')}${typeof manifest.round === 'number' ? ` · 当前 Round ${manifest.round}` : ''}`,
+      ),
+    )
+  }
+
+  // ── F3: finding location + action copy buttons ─────────────────────────
+  const renderFindings = () => {
+    const findings = manifest.findings || []
+    if (findings.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无发现')
+    }
+    return React.createElement('div', {}, ...findings.map((f, i) => {
+      const k = `f3-${i}`
+      const loc = `${String(f.file || '?')}${typeof f.line === 'number' && f.line > 0 ? `:${f.line}` : ''}`
+      const entry = {
+        file: String(f.file || ''),
+        ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
+        dimension: String(f.dimension || ''),
+        reason: String(f.summary || ''),
+      }
+      const knownInstruction = buildApplyInstruction([entry])
+      const fixInstruction = buildObsFixInstruction(f)
+      return React.createElement('div', { key: k, className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('span', { className: 'iterate-sev-dot', style: { background: severityColor(f.severity) } }),
+          React.createElement('span', {}, severityLabel(f.severity)),
+          React.createElement('span', { className: 'iterate-obs-file' }, loc),
+          React.createElement('span', {}, String(f.dimension || '')),
+          f.acknowledged === true
+            ? React.createElement('span', { className: 'iterate-obs-chip' }, '已确认')
+            : null,
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' },
+          React.createElement('div', { className: 'iterate-obs-msg' }, String(f.summary || '')),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === `${k}-fix` ? '' : undefined,
+              onClick: () => copyInstruction(`${k}-fix`, String(f.suggested_fix || '')),
+              title: '复制该 finding 的建议修复文本',
+            }, copiedKey === `${k}-fix` ? '已复制' : '复制 suggested_fix'),
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === `${k}-known` ? '' : undefined,
+              onClick: () => copyInstruction(`${k}-known`, knownInstruction),
+              title: '复制 iterate_triage 指令文本（标记为 known_intentional）',
+            }, copiedKey === `${k}-known` ? '已复制' : 'known_intentional'),
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === `${k}-repair` ? '' : undefined,
+              onClick: () => copyInstruction(`${k}-repair`, fixInstruction),
+              title: '复制 iterate_fix 指令文本',
+            }, copiedKey === `${k}-repair` ? '已复制' : '复制修复指令'),
+          ),
+        ),
+      )
+    }))
+  }
+
+  // ── F4: fixes + rollback ───────────────────────────────────────────────
+  const renderFixes = () => {
+    const fixes = manifest.fixes || []
+    if (fixes.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无修复记录')
+    }
+    return React.createElement('div', {}, ...fixes.map((f, i) => {
+      const k = `f4-${i}`
+      const id = String(f.id || `fix#${i + 1}`)
+      const rollbackText = `请调用 \`iterate_rollback\` 回滚以下修复：\n\n\`\`\`json\n${JSON.stringify({ id }, null, 2)}\n\`\`\``
+      const added = typeof f.linesAdded === 'number' ? f.linesAdded : 0
+      const removed = typeof f.linesRemoved === 'number' ? f.linesRemoved : 0
+      return React.createElement('div', { key: k, className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('b', {}, id),
+          React.createElement('span', { className: 'iterate-obs-file' }, String(f.file || '?')),
+          React.createElement('span', { className: 'iterate-obs-chip' }, f.success === true ? '成功' : '失败'),
+          typeof f.round === 'number'
+            ? React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${f.round}`)
+            : null,
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' },
+          React.createElement('div', { className: 'iterate-obs-msg' }, String(f.summary || '')),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+            React.createElement('span', { className: 'iterate-obs-chip' }, `+${added}`),
+            React.createElement('span', { className: 'iterate-obs-chip' }, `−${removed}`),
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === `${k}-rb` ? '' : undefined,
+              onClick: () => copyInstruction(`${k}-rb`, rollbackText),
+              title: '复制 iterate_rollback 指令文本',
+            }, copiedKey === `${k}-rb` ? '已复制' : '回滚'),
+          ),
+        ),
+      )
+    }))
+  }
+
+  // ── F5: checkpoint resume ──────────────────────────────────────────────
+  const renderCheckpoint = () => {
+    const cp = manifest.checkpoint
+    if (!cp) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无断点')
+    }
+    const resumeText = `请调用 \`iterate_checkpoint\` 从断点恢复迭代：\n\n\`\`\`json\n${JSON.stringify({
+      operation: 'resume',
+      mode: String(cp.mode || 'normal'),
+      maxRounds: typeof cp.maxRounds === 'number' ? cp.maxRounds : null,
+    }, null, 2)}\n\`\`\``
+    const item = (label: string, value: unknown) =>
+      React.createElement('span', { className: 'iterate-obs-chip' }, `${label} ${String(value ?? '?')}`)
+    return React.createElement('div', { className: 'iterate-obs-block' },
+      React.createElement('div', { className: 'iterate-obs-block-head' },
+        React.createElement('b', {}, '断点'),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, String(cp.updatedAt || '')),
+      ),
+      React.createElement('div', { className: 'iterate-obs-block-body' },
+        React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+          item('mode', cp.mode || 'normal'),
+          item('round', cp.round),
+          item('maxRounds', cp.maxRounds),
+          item('fixed', cp.fixedCount),
+          item('resume', cp.resumeCount),
+        ),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'cp-resume' ? '' : undefined,
+          onClick: () => copyInstruction('cp-resume', resumeText),
+          title: '复制 iterate_checkpoint 综/恢复指令文本',
+        }, copiedKey === 'cp-resume' ? '已复制' : '复制恢复指令'),
+      ),
+    )
+  }
+
+  // ── F6: run console (status / approval / nudge draft) ──────────────────
+  const renderConsole = () => {
+    const approval = manifest.approval || { policy: 'ask' }
+    const policyLabelMap: Record<string, string> = { ask: '询问用户', deny: '拒绝', allow: '直接执行' }
+    const policyLabel = policyLabelMap[String(approval.policy || 'ask')] || String(approval.policy || 'ask')
+    const nudge = manifest.nudge || null
+    const present = Boolean(nudge && nudge.text)
+    const activeNudgeText = nudge && nudge.text ? nudge.text : ''
+    const nudgeInstruction = `请调用 \`iterate_transcript\` 写入 nudge 指令：\n\n\`\`\`json\n${JSON.stringify({ operation: 'nudge', text: nudgeText }, null, 2)}\n\`\`\``
+    return React.createElement('div', { className: 'iterate-obs-block' },
+      React.createElement('div', { className: 'iterate-obs-block-head' },
+        React.createElement('span', {}, '运行控制台'),
+        React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, live ? '运行中' : '已结束'),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, `批准策略：${policyLabel}`),
+      ),
+      React.createElement('div', { className: 'iterate-obs-block-body' },
+        present
+          ? React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 6 } },
+              React.createElement('b', {}, '当前 nudge'),
+              React.createElement('span', { className: 'iterate-obs-msg' }, activeNudgeText),
+              React.createElement('button', { className: 'iterate-btn', onClick: () => setNudgeText('') }, '清除'),
+            )
+          : null,
+        React.createElement('textarea', {
+          className: 'iterate-obs-input iterate-obs-mono',
+          rows: 3,
+          placeholder: '起草一条 nudge 方向指令…',
+          value: nudgeText,
+          'aria-label': 'nudge 草稿',
+          onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setNudgeText(e.target.value),
+        }),
+        React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
+          React.createElement('button', {
+            className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'nudge' ? '' : undefined,
+            disabled: !nudgeText,
+            onClick: () => copyInstruction('nudge', nudgeInstruction),
+            title: '复制 iterate_transcript nudge 指令文本',
+          }, copiedKey === 'nudge' ? '已复制' : '复制 nudge 指令'),
+        ),
+      ),
+    )
+  }
+
+  // ── F7: decision timeline (type filter + search, newest first) ──────────
+  const renderTimeline = () => {
+    const entries = manifest.timeline || []
+    if (entries.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无时间线条目')
+    }
+    const types = Array.from(new Set(entries.map((t) => String(t.type || 'unknown')).filter(Boolean))).sort()
+    const q = timelineSearch.trim().toLowerCase()
+    const filtered = entries.filter((t) => {
+      if (timelineType && String(t.type || '') !== timelineType) return false
+      if (!q) return true
+      const hay = [String(t.type || ''), String(t.round ?? ''), JSON.stringify(t.data || {})].join(' ').toLowerCase()
+      return hay.indexOf(q) >= 0
+    })
+    // Newest first: entries are not guaranteed to be reverse ordered in the
+    // manifest, so sort by timestamp string descending for a stable timeline.
+    const sorted = filtered.slice().sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+    const rows = sorted.map((t, i) => {
+      const k = `f7-${i}`
+      const dataText = t.data && typeof t.data === 'object' ? JSON.stringify(t.data) : ''
+      return React.createElement('div', { key: k, className: 'iterate-obs-row', style: { flexDirection: 'column', alignItems: 'flex-start' } },
+        React.createElement('div', { className: 'iterate-obs-bar', style: { width: '100%' } },
+          React.createElement('span', { className: 'iterate-obs-chip' }, String(t.type || '?')),
+          React.createElement('span', { className: 'iterate-obs-head-meta' },
+            `${typeof t.round === 'number' ? `Round ${t.round} · ` : ''}${String(t.timestamp || '')}`,
+          ),
+        ),
+        dataText ? React.createElement('div', { className: 'iterate-obs-code' }, dataText) : null,
+      )
+    })
+    if (rows.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的时间线条目')
+    }
+    return React.createElement('div', {},
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('select', {
+          className: 'iterate-filter-select',
+          value: timelineType,
+          'aria-label': '按时间线类型筛选',
+          onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setTimelineType(e.target.value),
+        },
+          React.createElement('option', { value: '' }, '全部类型'),
+          ...types.map((t) => React.createElement('option', { key: t, value: t }, t)),
+        ),
+        React.createElement('input', {
+          className: 'iterate-filter-search',
+          type: 'search',
+          placeholder: '搜索时间线…',
+          'aria-label': '搜索时间线',
+          value: timelineSearch,
+          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setTimelineSearch(e.target.value),
+        }),
+        React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${entries.length}`),
+      ),
+      ...rows,
+    )
+  }
+
+  const renderBody = () => {
+    switch (tab) {
+      case 'f1': return renderThreads()
+      case 'f2': return renderTrend()
+      case 'f3': return renderFindings()
+      case 'f4': return renderFixes()
+      case 'f5': return renderCheckpoint()
+      case 'f6': return renderConsole()
+      case 'f7': return renderTimeline()
+      default: return null
+    }
+  }
+
+  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'obs', className: 'iterate-obs' },
+    React.createElement('div', { className: 'iterate-obs-head', 'data-closed': open ? undefined : '', onClick: () => setOpen((v) => !v) },
+      React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
+      React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, live ? '运行中' : '已结束'),
+      React.createElement('span', { className: 'iterate-obs-head-meta' }, headMeta || 'runtime'),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-ghost': '',
+        onClick: (e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); setOpen((v) => !v) },
+      }, open ? '收起' : '展开'),
+    ),
+    open
+      ? React.createElement('div', {},
+          React.createElement('div', { className: 'iterate-obs-tabs' },
+            ...OBS_TABS.map((t) =>
+              React.createElement('button', {
+                key: t.key,
+                className: 'iterate-obs-tab',
+                'data-active': tab === t.key ? '' : undefined,
+                onClick: () => setTab(t.key),
+              }, t.label),
+            ),
+          ),
+          React.createElement('div', { className: 'iterate-obs-body' }, renderBody()),
+        )
+      : null,
+  )
+}
+
 // ─── Registration ────────────────────────────────────────────────────────────
 
 /**
@@ -1300,6 +1868,15 @@ export function apply(ctx: ClientContext): void {
       slotsSvc?.register(
         { name: 'conversation.input.dock', id: 'iterate-dashboard', order: 90 },
         (props) => React.createElement(ConvergenceDashboard, props),
+      ),
+    )
+
+    // F1–F7: runtime observatory board (order 91, below the dashboard's 90 so
+    // its collapsed header never occludes the main convergence dashboard).
+    slotsSvc.inject('conversation.input.dock', () =>
+      slotsSvc?.register(
+        { name: 'conversation.input.dock', id: 'iterate-observatory', order: 91 },
+        (props) => React.createElement(ObservatoryPanel, props),
       ),
     )
 
