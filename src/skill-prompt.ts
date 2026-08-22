@@ -23,6 +23,7 @@ You have the iterate plugin installed, which registers these tools:
 - \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence, and whether the run was interrupted (a checkpoint left on disk means the previous run was interrupted and can be resumed)
 - \`iterate_history\` — inspect the runtime state in detail: decision-log entries and applied fixes (optionally scoped to a round or a fixed file)
 - \`iterate_prune\` — remove stale runtime artifacts (\`.iterate/\` entries). Defaults to a read-only dry-run that reports what WOULD be removed; pass \`dryRun:false\` to actually prune.
+- \`iterate_transcript\` — runtime observatory file (\`.iterate/transcript.json\`). \`read\` fetches the persisted manifest including any steering \`nudge\` for this run's reviewers; \`capture\` (call once after the final report) persists the per-reviewer threads, convergence trend, findings, fixes, checkpoint, and timeline so the client observatory panel reflects the run; \`nudge\` sets/clears steering text the next round's reviewers read. Purely local, never touches source files.
 
 ### When to use
 When the user asks to review or iterate on the project (e.g. "review this project", "iterate on error handling", "check the codebase for issues", "dry-run review", "反复审查"), run an iterate **workflow** by calling the \`workflow\` tool.
@@ -78,6 +79,14 @@ const knownIntentional = (plan.knownIntentional || [])   // config personalizati
 let known = []              // cumulative DEDUPED findings fed back to reviewers
 const rounds = []           // raw per-round findings
 
+phase('transcript')
+// Read any steering nudge written (via iterate_transcript nudge) for this run's reviewers.
+const transRead = await agent(
+  'Call iterate_transcript({operation:"read"}) and return {nudge:<transcript.nudge ? transcript.nudge.text : null>}.',
+  Object.assign({ label: 'transcript:read' }, backend)
+)
+const steering = transRead && typeof transRead.nudge === 'string' && transRead.nudge ? transRead.nudge : null
+
 phase('review')
 for (let r = 1; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — finding NEW issues only')
@@ -99,6 +108,7 @@ for (let r = 1; r <= maxRounds; r++) {
         ? meta.reviewerPrompt
         : 'Review dimension "' + dim + '".'
       const extra =
+        (steering ? '\\n STEERING — read this first: ' + steering : '') +
         (attachments.length > 0 ? '\\n User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
         '\\n Already-known findings (do NOT re-report): ' +
         JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.'
@@ -157,6 +167,13 @@ const metaRes = await agent(
 const finalReport = metaRes && metaRes.finalReport ? metaRes.finalReport : null
 const metaAudit = finalReport && finalReport.metaReview ? finalReport.metaReview : null
 
+// Persist the run's observatory transcript (reviewer threads, trend, findings)
+// so the client observatory panel reflects this review. Writes ONLY .iterate/transcript.json.
+await agent(
+  'Call iterate_transcript({operation:"capture", mode:"dry-run", goal:' + JSON.stringify(report.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + report.convergence.totalRounds + ', findingsByRound:' + JSON.stringify(report.convergence.findingsByRound || []) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
+  Object.assign({ label: 'transcript:capture' }, backend)
+)
+
 return {
   mode: 'dry-run',
   goal: report.goal,
@@ -181,7 +198,7 @@ Key rules for dry-run:
 - Stop when a round reports 0 new findings (converged) or maxReviewRounds is reached.
 - The report (with per-round convergence stats + suggested fix priorities) is the deliverable.
 - **Meta-review**: after building the report, audit it with \`iterate_review({operation:"meta-review"})\` for internal consistency (counts, severity buckets, dimension sums, sort order, convergence math). The meta-review ALSO runs the hard code-evidence gate (default on): every finding's file/line is validated against real files on disk, so any fabricated location surfaces as a critical \`EVIDENCE_VIOLATION\` and flips the verdict to \`needs_revision\`. The \`finalReport.verdict\` is \`approved\` only when the report passes every check AND every finding anchors to real, read code; otherwise \`needs_revision\`. Surface the final report and its verdict as the closing deliverable.
-- Only a single \`report\` entry may be appended to the decision log; nothing else is written.
+- Only a single \`report\` entry may be appended to the decision log; nothing else is written to source files. The final \`iterate_transcript capture\` writes ONLY the observatory file (\`.iterate/transcript.json\`) so the client panel reflects the run — it is not a source-code write.
 
 ### Normal-mode workflow (autonomous closed loop)
 Set \`args.mode = "normal"\`. Loop: resume → plan → parallel review ×N → atomic fixes via \`iterate_fix\` → validate → rollback on failure → checkpoint → loop → auto-stop when zero findings remain.
@@ -239,6 +256,14 @@ let fixedCount = (checkpoint && typeof checkpoint.fixedCount === 'number') ? che
 let converged = false
 let abortedByValidation = false
 let failedCommands = []
+const fixRecords = []        // observatory fix records collected round by round
+
+// Read any steering nudge intended for this run's reviewers.
+const transRead = await agent(
+  'Call iterate_transcript({operation:"read"}) and return {nudge:<transcript.nudge ? transcript.nudge.text : null>}.',
+  Object.assign({ label: 'transcript:read' }, backend)
+)
+const steering = transRead && typeof transRead.nudge === 'string' && transRead.nudge ? transRead.nudge : null
 
 phase('loop')
 for (let r = startRound; r <= maxRounds; r++) {
@@ -265,6 +290,7 @@ for (let r = startRound; r <= maxRounds; r++) {
         ? meta.reviewerPrompt
         : 'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed).'
       const extra =
+        (steering ? '\\n STEERING — read this first: ' + steering : '') +
         (attachments.length > 0 ? '\\n User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
         '\\n Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.'
       return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
@@ -309,12 +335,14 @@ for (let r = startRound; r <= maxRounds; r++) {
       'Apply the fixes for ' + file + ' using iterate_fix. For EACH finding in this list, ' +
       'read the current file, compute the edited full content (change <= ' + atomicMaxLines + ' lines), and call ' +
       'iterate_fix({ file: "' + file + '", content: <full new file content>, finding: <that finding>, round: ' + r + ' }). ' +
-      'Apply the findings IN ORDER. After all fixes, call iterate_diff({ file: "' + file + '" }) to verify the accumulated diff. ' +
-      'Findings: ' + JSON.stringify(byFile[file]) + '. Return the array of {id, ok, error} per iterate_fix call.',
+      'Apply the findings IN ORDER. After all fixes, call iterate_diff({ file: "' + file + '" }) to verify the accumulated diff and ' +
+      'read its line statistics (lines added/removed). ' +
+      'Findings: ' + JSON.stringify(byFile[file]) + '. Return the array of {id, ok, error, file, linesAdded, linesRemoved} per iterate_fix call ' +
+      '(id/ok required; put the file-wide line stats from iterate_diff on each record, or on the last record and 0 elsewhere).',
       Object.assign({ label: 'fix:' + file, phase: 'fix', schema: {
         type: 'object', additionalProperties: false,
         properties: {
-          fixes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' } }, required: ['id', 'ok'] } }
+          fixes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, ok: { type: 'boolean' }, error: { type: 'string' }, file: { type: 'string' }, linesAdded: { type: 'integer' }, linesRemoved: { type: 'integer' } }, required: ['id', 'ok'] } }
         },
         required: ['fixes'] } }, backend)
     )))
@@ -322,6 +350,17 @@ for (let r = startRound; r <= maxRounds; r++) {
       if (res && Array.isArray(res.fixes)) {
         for (const fx of res.fixes) {
           if (fx && fx.ok === true) { fixedCount += 1; roundFixIds.push(fx.id) }
+          // Collect fix records for the observatory transcript (defensive defaults).
+          const fixFileKeys = Object.keys(byFile)
+          fixRecords.push({
+            id: fx && typeof fx.id === 'string' ? fx.id : '',
+            file: fx && typeof fx.file === 'string' ? fx.file : (fixFileKeys.length === 1 ? fixFileKeys[0] : ''),
+            round: r,
+            summary: '',
+            linesAdded: fx && typeof fx.linesAdded === 'number' ? fx.linesAdded : 0,
+            linesRemoved: fx && typeof fx.linesRemoved === 'number' ? fx.linesRemoved : 0,
+            success: !!(fx && fx.ok === true),
+          })
         }
       }
     }
@@ -404,6 +443,19 @@ if (!abortedByValidation) {
     { label: 'checkpoint:clear' }
   )
 }
+// Persist the run's observatory transcript (threads, trend, fixes, checkpoint)
+// so the client observatory panel reflects the run. Writes ONLY .iterate/transcript.json.
+const obsCheckpoint = abortedByValidation ? null : {
+  mode: 'normal',
+  round: rounds.length,
+  maxRounds: maxRounds,
+  fixedCount: fixedCount,
+  resumeCount: effectiveResumeCount,
+}
+await agent(
+  'Call iterate_transcript({operation:"capture", mode:"normal", goal:' + JSON.stringify(plan.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + rounds.length + ', findingsByRound:' + JSON.stringify(rounds.map(rr => (rr.findings && rr.findings.length) ? rr.findings.length : 0)) + ', fixes:' + JSON.stringify(fixRecords) + ', checkpoint:' + JSON.stringify(obsCheckpoint) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
+  { label: 'transcript:capture' }
+)
 return {
   mode: 'normal',
   goal: plan.goal,

@@ -126,6 +126,7 @@ export function registerTranscriptTool(ctx) {
             goal: { type: 'string', description: 'For `capture`: run goal.' },
             maxRounds: { type: 'integer', description: 'For `capture`: round cap.' },
             roundsExecuted: { type: 'integer', description: 'For `capture`: number of rounds actually executed.' },
+            findingsByRound: { type: 'json', description: 'For `capture`: the per-round new-findings count series (report.convergence.findingsByRound). Preferred over passing the whole report.' },
             checkpoint: { type: 'json', description: 'For `capture`: checkpoint summary (optional).' },
             fixes: {
                 type: 'json',
@@ -212,9 +213,10 @@ export function registerTranscriptTool(ctx) {
             const reportFindings = report && typeof report === 'object' && Array.isArray(report.findings)
                 ? report.findings
                 : [];
-            const convergence = report && typeof report === 'object' && report.convergence
-                ? report.convergence.findingsByRound ?? []
-                : [];
+            const convergence = Array.isArray(args.findingsByRound) ? args.findingsByRound
+                : report && typeof report === 'object' && report.convergence
+                    ? report.convergence.findingsByRound ?? []
+                    : [];
             const rounds = Array.isArray(args.rounds) ? args.rounds : [];
             for (const r of rounds)
                 captureRound(builder, r);

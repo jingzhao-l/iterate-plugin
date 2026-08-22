@@ -22,9 +22,8 @@
  * Safety properties:
  *   - Read-only tools and non-iterate tools are always allowed (the gate only
  *     inspects the three destructive iterate toolnames).
- *   - Any failure while classifying/resolving policy degrades to `allow` for
- *     non-destructive calls and to a refused `deny` for unknown config, so the
- *     gateway can never silently permit a destructive write it meant to gate.
+ *   - If the project root / observatory config cannot be resolved, the policy
+ *     degrades to `ask` (fail-safe: destructive writes always require consent).
  */
 import { loadEffectiveConfig, resolveProjectRoot } from "./config-loader.js";
 import { decideApproval, isDestructiveIterateTool } from "./approval-gate.js";
