@@ -89,14 +89,28 @@ for (let r = 1; r <= maxRounds; r++) {
     const nudge = retries > 0
       ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
       : ''
-    const raw = await parallel(dims.map(dim => () => agent(
-      'Review dimension "' + dim + '".' +
-      (attachments.length > 0 ? ' User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
-      ' Already-known findings (do NOT re-report): ' +
-      JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.',
-      Object.assign({ label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }, backend)
-    )))
-    const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
+    const raw = await parallel(dims.map(dim => () => {
+      // Pass the plan's full per-dimension reviewerPrompt (goal, COVERAGE RULE
+      // with the assigned file inventory, EVIDENCE RULE, output language) and
+      // append the round-specific context — the reviewers must receive the
+      // file inventory or the coverage machinery has nothing to enforce.
+      const meta = plan.dimensions.find(x => x.id === dim)
+      const base = (meta && typeof meta.reviewerPrompt === 'string' && meta.reviewerPrompt)
+        ? meta.reviewerPrompt
+        : 'Review dimension "' + dim + '".'
+      const extra =
+        (attachments.length > 0 ? '\\n User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
+        '\\n Already-known findings (do NOT re-report): ' +
+        JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.'
+      return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
+    }))
+    const thisRound = {
+      round: r,
+      findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])),
+      // readFiles are threaded through so the aggregate/meta-review coverage
+      // gate can compare self-reported reads against the assigned inventory.
+      readFiles: [].concat(...raw.map(x => x && Array.isArray(x.readFiles) ? x.readFiles : [])),
+    }
     if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
     // Deterministic aggregate: cross-round dedupe + known_intentional filter + severity sort.
     agg = await agent(
@@ -229,6 +243,11 @@ let failedCommands = []
 phase('loop')
 for (let r = startRound; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — review current state, fix atomics via iterate_fix, validate')
+  // Audit-trail: record the round start (SKILL.md Phase 4 requires per-round records).
+  await agent(
+    'Call iterate_decision_log({operation:"append", type:"round_start", round:' + r + ', data:{maxRounds:' + maxRounds + ', fixedSoFar:' + fixedCount + '}})',
+    Object.assign({ label: 'log:start:r' + r }, backend)
+  )
   let agg = null
   let schemaInvalid = false
   let retries = 0
@@ -237,13 +256,24 @@ for (let r = startRound; r <= maxRounds; r++) {
     const nudge = retries > 0
       ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
       : ''
-    const raw = await parallel(dims.map(dim => () => agent(
-      'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed). ' +
-      (attachments.length > 0 ? ' User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
-      'Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.',
-      Object.assign({ label: 'review:' + dim + ':r' + r, schema: plan.dimensions.find(x => x.id === dim).findingsSchema }, backend)
-    )))
-    const thisRound = { round: r, findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])) }
+    const raw = await parallel(dims.map(dim => () => {
+      // Pass the plan's full per-dimension reviewerPrompt (COVERAGE RULE with
+      // the assigned file inventory, EVIDENCE RULE, output language) plus the
+      // round-specific context.
+      const meta = plan.dimensions.find(x => x.id === dim)
+      const base = (meta && typeof meta.reviewerPrompt === 'string' && meta.reviewerPrompt)
+        ? meta.reviewerPrompt
+        : 'Review dimension "' + dim + '" on the CURRENT code state (previous atomic findings are fixed).'
+      const extra =
+        (attachments.length > 0 ? '\\n User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
+        '\\n Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.'
+      return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
+    }))
+    const thisRound = {
+      round: r,
+      findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])),
+      readFiles: [].concat(...raw.map(x => x && Array.isArray(x.readFiles) ? x.readFiles : [])),
+    }
     if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
 
     // Deterministic dedupe / known_intentional filter / severity sort for this round.

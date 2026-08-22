@@ -38,14 +38,30 @@ export interface GitScopeResult {
 }
 
 /**
- * Parse `git diff --name-only` stdout into a list of relative paths.
- * Pure: strips blank lines, trims whitespace, drops quotes (git can quote
- * paths with special characters).
+ * Parse `git diff --name-only -z` stdout into a list of relative paths.
+ * Pure. NUL-delimited mode is machine-safe (handles any filename); when no
+ * NUL is present (callers that did not pass -z) fall back to newline-split
+ * with C-style quote/escape unescaping for core.quotePath output.
  */
 export function parseChangedFiles(stdout: string): string[] {
+  if (stdout.includes('\0')) {
+    return stdout.split('\0').map((s) => s.trim()).filter((s) => s.length > 0)
+  }
   return stdout
     .split('\n')
-    .map((line) => line.trim().replace(/^"|"$/g, ''))
+    .map((line) => {
+      const trimmed = line.trim()
+      // git core.quotePath wraps paths with special characters in "..."; the
+      // content uses C-style escapes (\" \\ \t \n and \ooo octal for non-ASCII).
+      const quoted = trimmed.match(/^"(.*)"$/)
+      if (!quoted) return trimmed
+      return quoted[1]!
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\')
+        .replace(/\\t/g, '\t')
+        .replace(/\\n/g, '\n')
+        .replace(/\\([0-7]{3})/g, (_m, oct: string) => String.fromCharCode(parseInt(oct, 8)))
+    })
     .filter((line) => line.length > 0)
 }
 
@@ -118,9 +134,21 @@ export async function resolveChangedFiles(
   root: string,
   targetBranch: string,
 ): Promise<GitScopeResult> {
-  const { ok, stdout, stderr } = await runGit(['diff', '--name-only', targetBranch, '--'], root)
+  // Option-injection guard: a branch name starting with '-' would be parsed by
+  // git as an option (e.g. --output=...), not a ref. Reject it outright.
+  if (typeof targetBranch !== 'string' || targetBranch.trim() === '' || targetBranch.startsWith('-')) {
+    return {
+      scope: 'full',
+      changedFiles: [],
+      fallbackToFull: true,
+      error: `invalid target branch "${String(targetBranch)}"`,
+    }
+  }
+  // -z: NUL-delimited names — machine-safe for any filename (spaces, quotes,
+  // non-ASCII), and never confused with option-like content.
+  const { ok, stdout, stderr } = await runGit(['diff', '--name-only', '-z', targetBranch, '--'], root)
   if (!ok) {
-    const reason = stderr.trim() || `git diff --name-only ${targetBranch} failed`
+    const reason = stderr.trim() || `git diff --name-only -z ${targetBranch} failed`
     return { scope: 'full', changedFiles: [], fallbackToFull: true, error: reason }
   }
   const existing = filterExistingFiles(root, parseChangedFiles(stdout))

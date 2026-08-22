@@ -16,6 +16,7 @@ import {
   upsertRecord,
   removeRecord,
   resolveProjectFile,
+  globMatch,
   registerFixTool,
   registerDiffTool,
   registerRollbackTool,
@@ -393,5 +394,30 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
     } finally {
       cleanup()
     }
+  })
+})
+
+describe('globMatch', () => {
+  it('matches literal paths and * within a segment', () => {
+    assert.equal(globMatch('src/a.ts', 'src/a.ts'), true)
+    assert.equal(globMatch('src/a.ts', 'src/*.ts'), true)
+    assert.equal(globMatch('src/a.ts', 'src/*.js'), false)
+    assert.equal(globMatch('src/deep/a.ts', 'src/*.ts'), false)
+  })
+  it('matches ** across separators', () => {
+    assert.equal(globMatch('src/deep/a.ts', 'src/**/*.ts'), true)
+    // ** requires at least one segment (standard glob semantics)
+    assert.equal(globMatch('src/a.ts', 'src/**/*.ts'), false)
+    assert.equal(globMatch('src/deep/a.ts', '**/a.ts'), true)
+  })
+  it('escapes regex specials literally', () => {
+    assert.equal(globMatch('a.b.ts', 'a.b.ts'), true)
+    assert.equal(globMatch('a.b.ts', 'aXb.ts'), false)
+  })
+  it('rejects non-string inputs', () => {
+    assert.equal(globMatch('a', 'a'), true)
+    assert.equal(globMatch('a', ''), false)
+    assert.equal(globMatch(undefined as unknown as string, 'x'), false)
+    assert.equal(globMatch('x', undefined as unknown as string), false)
   })
 })

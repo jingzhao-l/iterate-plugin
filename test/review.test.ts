@@ -369,8 +369,8 @@ describe('reviewer tasks & schema', () => {
     assert.match(prompt, /read_file tool BEFORE judging/)
     assert.match(prompt, /NEVER report a location you did not actually read/)
     assert.match(prompt, /fabricated line numbers are treated as poisoned evidence/)
-    // line is REQUIRED for anchored, line-targeted issues.
-    assert.match(prompt, /line \(REQUIRED positive integer/)
+    // line is optional; the exact line for anchored issues, 0/omitted for whole-file.
+    assert.match(prompt, /line \(optional; the exact line you READ/)
   })
 
   it('reviewerTaskPrompt injects a COVERAGE RULE with the assigned inventory', () => {

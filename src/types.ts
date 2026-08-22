@@ -76,6 +76,11 @@ export interface ReviewReport {
   rounds: ReviewRound[]
   /** Globally deduped, known-intentional-filtered, severity-sorted findings. */
   findings: ReviewFinding[]
+  /**
+   * Every file the reviewers self-reported opening (readFiles across rounds).
+   * Consumed by the meta-review coverage gate. Optional for back-compat.
+   */
+  readFiles?: string[]
   convergence: {
     totalRounds: number
     findingsByRound: number[]
@@ -98,6 +103,13 @@ export interface ReviewReport {
 export interface ReviewRound {
   round: number
   findings: ReviewFinding[]
+  /**
+   * Files the reviewer subagents actually opened with read_file (from their
+   * `readFiles` output). Threaded through aggregate → report → meta-review so
+   * the coverage gate can compare self-reported reads against the assigned
+   * inventory. Optional — older callers omit it.
+   */
+  readFiles?: string[]
 }
 
 /** Known intentional entry (filtered out from findings) */

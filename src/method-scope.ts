@@ -96,6 +96,8 @@ const SIGNATURE_PATTERNS: Array<{ kind: string; re: RegExp; nameIndex: number }>
 export function collectMethodSignatures(text: string): MethodSignature[] {
   const lines = text.split('\n')
   const out: MethodSignature[] = []
+  // Set lookup instead of scanning the growing array (O(S²) → O(S)).
+  const seen = new Set<string>()
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]!
     const line = i + 1
@@ -105,7 +107,9 @@ export function collectMethodSignatures(text: string): MethodSignature[] {
       const name = m[p.nameIndex]
       if (!name || RESERVED_WORDS.has(name) || CALLABLE_NOISE.has(name)) continue
       // Avoid two patterns claiming the same line (e.g. TS method + arrow).
-      if (out.some((s) => s.line === line && s.name === name)) break
+      const key = `${line}|${name}`
+      if (seen.has(key)) break
+      seen.add(key)
       out.push({ name, line })
       break
     }

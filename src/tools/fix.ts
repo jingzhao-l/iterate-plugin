@@ -17,8 +17,8 @@
  *   - Atomicity is enforced against `config.atomic.max_lines` unless `force`.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { join, sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
@@ -123,6 +123,11 @@ export function readRegistry(projectRoot: string): FixRegistry {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf-8')) as FixRegistry
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.rounds)) return emptyRegistry()
+    // Defensive: a hand-edited or partially-written registry may contain a
+    // round without a `records` array — normalize instead of crashing readers.
+    parsed.rounds = parsed.rounds.filter(
+      (r) => r && typeof r === 'object' && Array.isArray(r.records),
+    )
     return parsed
   } catch {
     return emptyRegistry()
@@ -198,10 +203,55 @@ export function resolveProjectFile(projectRoot: string, file: string): { ok: tru
   if (resolved === projectRoot || !resolved.startsWith(projectRoot + '/') && !resolved.startsWith(projectRoot + '\\')) {
     return { ok: false, reason: 'file resolves outside the project root' }
   }
+  // Symlink containment: the lexical prefix check above does not resolve
+  // symlinks. If the target exists, verify its REAL path stays inside the REAL
+  // project root so a symlinked directory/file inside the repo can never route
+  // a fix (write/rollback/diff) outside the project.
+  if (existsSync(resolved)) {
+    let rootReal: string
+    let real: string
+    try {
+      rootReal = realpathSync(projectRoot)
+      real = realpathSync(resolved)
+    } catch {
+      return { ok: false, reason: 'failed to resolve real path for containment check' }
+    }
+    const rootPrefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep
+    if (real !== rootReal && !real.startsWith(rootPrefix)) {
+      return { ok: false, reason: 'file resolves outside the project root (symlink escape)' }
+    }
+  }
   return { ok: true, resolved }
 }
 
 // ─── Shared execute helpers ──────────────────────────────────────────────────
+
+/**
+ * Minimal glob matcher for personalization.protected_paths.
+ * Supports `*` (any run of chars within one segment) and `**` (any chars,
+ * including separators). All other characters are literal. Pure, unit-testable.
+ */
+export function globMatch(path: string, pattern: string): boolean {
+  if (typeof path !== 'string' || typeof pattern !== 'string') return false
+  // Escape regex specials except our two wildcards.
+  let re = ''
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i] as string
+    if (ch === '*') {
+      const isDouble = pattern[i + 1] === '*'
+      if (isDouble) { re += '[\\s\\S]*'; i++ } else { re += '[^/\\\\]*' }
+    } else if ('.[]{}()+-^$|?'.includes(ch)) {
+      re += '\\' + ch
+    } else {
+      re += ch
+    }
+  }
+  try {
+    return new RegExp('^' + re + '$').test(path)
+  } catch {
+    return false
+  }
+}
 
 /** Read the current content of a file under the project root. */
 function readProjectFile(projectRoot: string, file: string): { ok: true; content: string } | { ok: false; reason: string } {
@@ -314,6 +364,28 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         if (typeof finding.dimension !== 'string' || finding.dimension.trim().length === 0) {
           return { ok: false, error: 'finding.dimension must be a non-empty string' }
         }
+        // The finding must reference the file being fixed — the fix id and the
+        // rollback/diff target are derived from finding.file, so a mismatch
+        // would back up/restore the WRONG file.
+        if (finding.file !== file) {
+          return { ok: false, error: `finding.file ("${finding.file}") must match the file being fixed ("${file}")` }
+        }
+        // Full finding validation, mirroring the review schema: malformed
+        // findings would produce lossy registry/log entries and a degraded id.
+        const SEVERITY_SET = new Set(['critical', 'high', 'medium', 'low'])
+        if (!SEVERITY_SET.has(finding.severity)) {
+          return { ok: false, error: 'finding.severity must be one of critical/high/medium/low' }
+        }
+        if (typeof finding.summary !== 'string' || finding.summary.trim().length === 0) {
+          return { ok: false, error: 'finding.summary must be a non-empty string' }
+        }
+        if (typeof finding.is_atomic !== 'boolean') {
+          return { ok: false, error: 'finding.is_atomic must be a boolean' }
+        }
+        if (finding.line !== undefined && finding.line !== null &&
+            (typeof finding.line !== 'number' || !Number.isInteger(finding.line) || finding.line < 0)) {
+          return { ok: false, error: 'finding.line must be a non-negative integer (0 = whole-file)' }
+        }
 
         const current = readProjectFile(projectRoot, file)
         if (!current.ok) return { ok: false, error: current.reason }
@@ -346,6 +418,30 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         const target = resolveProjectFile(projectRoot, file)
         if (!target.ok) return { ok: false, error: target.reason }
 
+        // Personalization guards (SKILL.md Phase 2): protected_paths veto the
+        // fix outright; forbidden_fixes veto fix approaches appearing in the
+        // new content. Both are security-relevant, so they are enforced here
+        // in the tool, not left to the model.
+        const pers = config.personalization as
+          | { protected_paths?: unknown; forbidden_fixes?: unknown }
+          | undefined
+        const protectedPaths = Array.isArray(pers?.protected_paths)
+          ? (pers.protected_paths as unknown[]).filter((p): p is string => typeof p === 'string' && p.length > 0)
+          : []
+        for (const pattern of protectedPaths) {
+          if (globMatch(file, pattern)) {
+            return { ok: false, error: `skipped: ${file} matches protected path "${pattern}" (personalization.protected_paths forbids modifying it)` }
+          }
+        }
+        const forbiddenFixes = Array.isArray(pers?.forbidden_fixes)
+          ? (pers.forbidden_fixes as unknown[]).filter((f): f is string => typeof f === 'string' && f.length > 0)
+          : []
+        for (const forbidden of forbiddenFixes) {
+          if (args.content.includes(forbidden)) {
+            return { ok: false, error: `fix uses a forbidden approach: "${forbidden}" appears in the new content (personalization.forbidden_fixes)` }
+          }
+        }
+
         const timestamp = new Date().toISOString()
         const backupPath = fixBackupPath(projectRoot, id, timestamp)
         try {
@@ -376,7 +472,19 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         try {
           writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(nextRegistry, null, 2), 'utf-8')
         } catch (err) {
-          return { ok: false, error: `failed to write fix registry: ${String(err)}` }
+          // Registry write failed → the file was already modified but no record
+          // exists, so a later rollback/diff could never see it and a retry would
+          // back up the already-fixed content as "original". Restore the file
+          // from the backup to leave the tree exactly as it was.
+          try {
+            copyFileSync(backupPath, target.resolved)
+          } catch (restoreErr) {
+            return {
+              ok: false,
+              error: `failed to write fix registry: ${String(err)}; additionally failed to restore ${file} from backup: ${String(restoreErr)}`,
+            }
+          }
+          return { ok: false, error: `failed to write fix registry: ${String(err)} (file restored from backup)` }
         }
 
         appendDecisionEntry(projectRoot, {
@@ -485,6 +593,9 @@ export function registerDiffTool(ctx: { tools: { register: (def: ReturnType<type
             if (existing) {
               existing.linesAdded += r.linesAdded
               existing.linesRemoved += r.linesRemoved
+              // Recompute the summary from the summed counts so a multi-fix
+              // file's text does not contradict its accumulated numbers.
+              existing.diffSummary = `+${existing.linesAdded}/-${existing.linesRemoved} lines`
             } else {
               files.push({
                 file: r.finding.file,

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import yaml from 'js-yaml';
@@ -71,6 +71,11 @@ export function mergeConfig(base, override) {
     const out = { ...base };
     for (const [key, value] of Object.entries(override)) {
         if (value === undefined)
+            continue;
+        // Prototype-pollution guard: a YAML `__proto__`/`constructor`/`prototype`
+        // key must never be plain-assigned — js-yaml stores __proto__ as an own
+        // data property, and `out[key] = value` would invoke the __proto__ setter.
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype')
             continue;
         const baseValue = out[key];
         if (baseValue &&
@@ -223,8 +228,14 @@ function effectiveCwd(sessionCwd) {
         if (encoded && encoded.startsWith('--') && encoded.endsWith('--')) {
             try {
                 const decoded = decodeURIComponent(encoded.slice(2, -2).replace(/~/g, '%'));
-                if (decoded && decoded.startsWith(sep))
-                    return decoded;
+                // The workspace encoding drops the leading root separator (`/Volumes/…`
+                // → `Volumes-…`), so re-attach it when absent. `~<hex>` → `%<hex>` is
+                // the documented percent spelling; '-' doubles as the '/' separator, so
+                // literal dashes in a path cannot round-trip — verify the result exists
+                // and fall through otherwise.
+                const candidate = decoded && !decoded.startsWith(sep) ? sep + decoded : decoded;
+                if (candidate && candidate.startsWith(sep) && existsSync(candidate))
+                    return candidate;
             }
             catch {
                 // malformed encoding — fall through to cwd

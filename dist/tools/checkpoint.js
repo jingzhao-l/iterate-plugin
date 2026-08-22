@@ -8,7 +8,7 @@
  *
  * Checkpoint layout: `.iterate/checkpoint.json`.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
 import { checkpointPath, iterateDir } from "../paths.js";
@@ -89,7 +89,9 @@ export function computeStatus(input) {
         totalRounds,
         fixedCount,
         architecturalCount,
-        findingsCount: checkpoint?.findings.length ?? 0,
+        // A checkpoint may predate the `findings` field (or be hand-edited) — a
+        // missing findings must degrade to 0, never throw.
+        findingsCount: Array.isArray(checkpoint?.findings) ? checkpoint.findings.length : 0,
         totalDecisionLogEntries: entries.length,
         hasCheckpoint: checkpoint !== null,
         // A checkpoint left on disk means the previous run was interrupted before
@@ -187,7 +189,12 @@ export function registerCheckpointTool(ctx) {
                 };
                 try {
                     mkdirSync(iterateDir(projectRoot), { recursive: true });
-                    writeFileSync(checkpointPath(projectRoot), JSON.stringify(checkpoint, null, 2), 'utf-8');
+                    // Atomic write (temp + rename): a crash mid-write must not corrupt
+                    // the checkpoint and silently lose the interruption state.
+                    const cpPath = checkpointPath(projectRoot);
+                    const tmpPath = `${cpPath}.tmp-${Date.now()}`;
+                    writeFileSync(tmpPath, JSON.stringify(checkpoint, null, 2), 'utf-8');
+                    renameSync(tmpPath, cpPath);
                 }
                 catch (err) {
                     return { operation: 'save', ok: false, error: `failed to write checkpoint: ${String(err)}` };

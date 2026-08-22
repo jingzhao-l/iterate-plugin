@@ -60,6 +60,7 @@ import {
   batchSetVerdict,
   setAllVerdicts,
   buildRoundHistory,
+  buildFindingTrend,
   computeTrendMetrics,
   trendMax,
   buildCompletionSummary,
@@ -165,9 +166,6 @@ const TRIAGE_STORAGE_PREFIX = 'iterate.triage.'
 
 /** localStorage key for the theme skin toggle. */
 const THEME_STORAGE_KEY = 'iterate.theme.enabled'
-
-/** localStorage key for the dashboard empty-state dismissal. */
-const DASH_EMPTY_DISMISS_KEY = 'iterate.dash.empty.dismissed'
 
 /** Theme override source name (matches the doc §16.1). */
 const THEME_SOURCE = 'iterate'
@@ -328,19 +326,33 @@ const ITERATE_CSS = `
 .iterate-chip-resume { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent); }
 .iterate-chip-images { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent); }
 
-
-/* Dashboard empty state (no report in this session yet) */
-.iterate-dash-empty { justify-content: space-between; color: var(--dsw-alias-label-secondary); }
-.iterate-dash-empty-text { color: var(--dsw-alias-label-secondary); white-space: nowrap; }
-.iterate-dash-empty-dismiss { padding: 2px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
-.iterate-dash-empty-dismiss:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
-
 /* Accessibility-switch toggle */
 .iterate-switch { position: relative; width: 42px; height: 24px; border-radius: 999px; padding: 0; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); transition: background-color 160ms ease, border-color 160ms ease; }
 .iterate-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .iterate-switch-knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-label-secondary); transition: transform 160ms ease, background-color 160ms ease; }
 .iterate-switch[data-on] { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
 .iterate-switch[data-on] .iterate-switch-knob { transform: translateX(18px); background: #FFFFFF; }
+
+/* Shared keyboard focus ring for every iterate interactive control */
+.iterate-btn:focus-visible, .iterate-vbtn:focus-visible, .iterate-batch-btn:focus-visible,
+.iterate-filter-select:focus-visible, .iterate-filter-search:focus-visible,
+.iterate-finding:focus-visible, .iterate-switch:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px;
+}
+
+/* Dashboard empty/onboarding state */
+.iterate-dashboard-empty { opacity: 0.75; }
+.iterate-empty-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+
+/* Convergence-completed progress fill */
+.iterate-progress-fill-done { background: var(--dsw-alias-state-success-primary); }
+
+/* Batch scope segmented control */
+.iterate-batch-scope { opacity: 0.6; }
+.iterate-batch-scope-on { opacity: 1; border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-label-primary); }
+
+/* Overflow dimension chip */
+.iterate-dim-more { opacity: 0.7; font-style: italic; }
 
 /* Button variants */
 .iterate-btn[data-ghost] { background: transparent; }
@@ -411,16 +423,15 @@ function removeStorageByPrefix(prefix: string): number {
   return removed
 }
 
-/** Copy text to the clipboard, returning whether it succeeded. */
-function copyText(text: string): boolean {
+/** Copy text to the clipboard, resolving to whether it actually succeeded. */
+function copyText(text: string): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-    navigator.clipboard.writeText(text).then(
+    return navigator.clipboard.writeText(text).then(
       () => true,
       () => false,
     )
-    return true
   }
-  return false
+  return Promise.resolve(false)
 }
 
 /** Literal severity keys recognized by SEVERITY_LABEL / SEVERITY_COLOR. */
@@ -532,7 +543,14 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
       style: { height: `${Math.max(4, Math.round((p.count / max) * 24))}px` },
     }),
   )
-  return React.createElement('div', { className: 'iterate-trend', title: '各轮发现数量趋势' }, ...bars)
+  // Accessible summary: the per-round counts are otherwise invisible to
+  // assistive tech (mouse-only title divs).
+  const summary = points.map((p) => `Round ${p.round}: ${p.count}`).join(', ')
+  return React.createElement('div', {
+    className: 'iterate-trend',
+    role: 'img',
+    'aria-label': `各轮发现数量趋势：${summary}`,
+  }, ...bars)
 }
 
 /** Dashboard: live convergence strip above the composer.
@@ -543,29 +561,6 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
  * off the owner share — both are point-in-time snapshots re-rendered for
  * you, never subscribe."
  */
-/**
- * Helpful no-report placeholder for the input dock (dismissible, persisted).
- * Fills the vacuous/empty state: without it the dock renders blank and the
- * user has no affordance for how to start an iterate run.
- */
-function EmptyDashboardState() {
-  const [dismissed, setDismissed] = React.useState(() => {
-    try { return storage ? storage.get(DASH_EMPTY_DISMISS_KEY) === '1' : false } catch { return false }
-  })
-  if (dismissed) return null
-  const dismiss = (): void => {
-    try { if (storage) storage.set(DASH_EMPTY_DISMISS_KEY, '1') } catch { /* noop */ }
-    setDismissed(true)
-  }
-  return React.createElement(
-    'div',
-    { 'data-iterate-root': '', 'data-iterate': 'dashboard-empty', className: 'iterate-dashboard iterate-dash-empty' },
-    React.createElement('span', { className: 'iterate-dash-empty-text' },
-      'iterate：发送「review / 反复审查」请求即可开始自动审查'),
-    React.createElement('button', { className: 'iterate-dash-empty-dismiss', title: '不再显示', onClick: dismiss }, '隐藏'),
-  )
-}
-
 function ConvergenceDashboard(props: SlotProps) {
   const [pulseKey, setPulseKey] = React.useState(0)
   // The `conversation.input.dock` slot owner share (InputZone) provides
@@ -582,9 +577,14 @@ function ConvergenceDashboard(props: SlotProps) {
   }, [report && hashReport(report) + ':' + getCurrentRound(report)])
 
   if (!report) {
-    // No report in this session yet: show a subtle, dismissible hint instead
-    // of a blank dock, so discoverability of "how to start" is not zero.
-    return React.createElement(EmptyDashboardState, {})
+    // Empty/onboarding state: first-time users otherwise see nothing and have
+    // no idea the plugin exists or how to start.
+    return React.createElement(
+      'div',
+      { 'data-iterate-root': '', 'data-iterate': 'dashboard', className: 'iterate-dashboard iterate-dashboard-empty' },
+      React.createElement('span', { className: 'iterate-round-badge' }, 'iterate'),
+      React.createElement('span', { className: 'iterate-empty-hint' }, '运行一次评审后，这里会显示收敛进度与发现统计。试试「review this project」或「/iterate review-only」'),
+    )
   }
 
   const round = getCurrentRound(report)
@@ -613,13 +613,25 @@ function ConvergenceDashboard(props: SlotProps) {
       }, `附件图片 ${String(imageCount)}`)
     : null
 
-  const dimBadges = Object.keys(dims).slice(0, 6).map((dim) =>
+  const dimNames = Object.keys(dims)
+  const dimBadges = dimNames.slice(0, 6).map((dim) =>
     React.createElement(
       'span',
       { key: dim, className: 'iterate-dim-badge' },
       `${dim} · ${(dims[dim]?.length ?? 0)}`,
     ),
   )
+  // Don't silently drop dimensions: surface the overflow as a +N chip.
+  const overflow = dimNames.length - 6
+  if (overflow > 0) {
+    dimBadges.push(
+      React.createElement(
+        'span',
+        { key: '+more', className: 'iterate-dim-badge iterate-dim-more', title: dimNames.slice(6).join(', ') },
+        `+${overflow} 更多`,
+      ),
+    )
+  }
 
   // Fix-count badge: show a running "fixes applied" metric when the report
   // carries a number (normal mode only — threaded through `fixedCount`).
@@ -635,6 +647,23 @@ function ConvergenceDashboard(props: SlotProps) {
       }, `${String(fixCount)} fixes`)
     : null
 
+  // Convergence is the payoff of the review — make it visible on the
+  // persistent dashboard, not only in the transient 3.6s capsule.
+  const converged = report.convergence && report.convergence.converged === true
+  const convChip = converged
+    ? React.createElement('span', {
+        className: 'iterate-chip-resume',
+        key: 'converged',
+        title: '审查已收敛：最后一轮未发现新问题',
+      }, '✓ 已收敛')
+    : null
+
+  const sevMetric = (key: 'critical' | 'high' | 'medium' | 'low', label: string) =>
+    React.createElement('span', { className: 'iterate-metric', key, title: label },
+      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR[key] } }),
+      `${label} ${String(stats[key])}`,
+    )
+
   return React.createElement(
     'div',
     { 'data-iterate-root': '', 'data-iterate': 'dashboard', className: 'iterate-dashboard' },
@@ -644,20 +673,16 @@ function ConvergenceDashboard(props: SlotProps) {
       `Round ${round} / ${total}`,
     ),
     React.createElement('div', { className: 'iterate-progress' },
-      React.createElement('div', { className: 'iterate-progress-fill', style: { width: `${progress}%` } }),
+      React.createElement('div', {
+        className: converged ? 'iterate-progress-fill iterate-progress-fill-done' : 'iterate-progress-fill',
+        style: { width: `${progress}%` },
+      }),
     ),
-    React.createElement('span', { className: 'iterate-metric' },
-      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR.critical } }),
-      stats.critical,
-    ),
-    React.createElement('span', { className: 'iterate-metric' },
-      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR.high } }),
-      stats.high,
-    ),
-    React.createElement('span', { className: 'iterate-metric' },
-      React.createElement('span', { className: 'iterate-sev-dot', style: { background: SEVERITY_COLOR.medium } }),
-      stats.medium,
-    ),
+    convChip,
+    sevMetric('critical', 'CRIT'),
+    sevMetric('high', 'HIGH'),
+    sevMetric('medium', 'MED'),
+    sevMetric('low', 'LOW'),
     fixBadge,
     resumeChip,
     imageChip,
@@ -767,14 +792,15 @@ function TriagePanel(props: SlotProps) {
   const [selected, setSelected] = React.useState<number | null>(null)
   const [selectAll, setSelectAll] = React.useState(false)
 
-  /** Persist + return the next verdicts state. */
-  const persistVerdicts = (next: Record<string, 'keep' | 'skip' | 'ignore'>) => {
-    if (storage) storage.set(storageKey, JSON.stringify(next))
-    return next
-  }
+  /** Persist the verdicts to localStorage whenever they change. Kept OUT of
+   *  the state updater (updaters must stay pure — React may double-invoke them
+   *  under StrictMode, and a storage throw must not surface during render). */
+  React.useEffect(() => {
+    if (storage) storage.set(storageKey, JSON.stringify(verdicts))
+  }, [storageKey, verdicts])
 
   const setVerdict = (index: number, verdict: 'keep' | 'skip' | 'ignore') => {
-    setVerdicts((prev) => persistVerdicts({ ...prev, [String(index)]: verdict }))
+    setVerdicts((prev) => ({ ...prev, [String(index)]: verdict }))
   }
 
   // ── Filtering (visible findings + their original indices) ───────────────
@@ -793,13 +819,10 @@ function TriagePanel(props: SlotProps) {
   const allIndices = allVerdictKeys(verdicts)
   const batchTarget = selectAll ? allIndices : indices
   const applyBatch = (verdict: 'keep' | 'skip' | 'ignore') => {
-    setVerdicts((prev) => persistVerdicts(batchSetVerdict(prev, batchTarget, verdict)))
-  }
-  const applyBatchAll = (verdict: 'keep' | 'skip' | 'ignore') => {
-    setVerdicts((prev) => persistVerdicts(setAllVerdicts(prev, verdict)))
+    setVerdicts((prev) => batchSetVerdict(prev, batchTarget, verdict))
   }
   const doResetVerdicts = () => {
-    setVerdicts((prev) => persistVerdicts(setAllVerdicts(prev, 'keep')))
+    setVerdicts((prev) => setAllVerdicts(prev, 'keep'))
     setSelectAll(false)
   }
 
@@ -808,8 +831,13 @@ function TriagePanel(props: SlotProps) {
     const doc = typeof document !== 'undefined' ? document : null
     if (!doc) return
     const onKeyDown = (ev: KeyboardEvent) => {
+      // Never hijack modified shortcuts (Cmd/Ctrl/Alt combos like Cmd+A
+      // select-all) or keystrokes typed into an editable surface (the composer
+      // may be a contenteditable div, not a textarea).
+      if (ev.metaKey || ev.ctrlKey || ev.altKey) return
       const t = ev.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
+      if (t && typeof t.isContentEditable === 'boolean' && t.isContentEditable) return
       const verdict = keyToVerdict(ev.key)
       if (verdict && selected !== null && indices.includes(selected)) {
         ev.preventDefault()
@@ -843,10 +871,16 @@ function TriagePanel(props: SlotProps) {
   const doCopyYaml = () => {
     const yaml = toKnownIntentionalYaml(ignored)
     if (!yaml) return
-    const ok = copyText(yaml)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1600)
-    if (!ok) setPayload(yaml)
+    copyText(yaml).then((ok) => {
+      if (ok) {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1600)
+      } else {
+        // Copy failed (permissions/unsupported) — reveal the payload as a
+        // manual-copy fallback instead of claiming success.
+        setPayload(yaml)
+      }
+    })
   }
 
   const doBuildInstruction = () => {
@@ -877,7 +911,14 @@ function TriagePanel(props: SlotProps) {
       key: String(index),
       className: 'iterate-finding',
       'data-selected': isSelected ? '' : undefined,
+      role: 'option',
+      'aria-selected': isSelected,
+      tabIndex: 0,
       onClick: () => setSelected(index),
+      onFocus: () => setSelected(index),
+      onKeyDown: (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(index) }
+      },
     },
       React.createElement('div', { className: 'iterate-finding-meta' },
         React.createElement('span', { className: 'iterate-sev-dot', style: { background: severityColor(severity) } }),
@@ -897,17 +938,17 @@ function TriagePanel(props: SlotProps) {
 
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'triage', className: 'iterate-triage' },
     React.createElement('div', { className: 'iterate-triage-head' },
-      React.createElement('span', {}, `Iterate · Findings 分诊 (${filtered.length}/${findings.length})`),
+      React.createElement('span', { role: 'heading', 'aria-level': 3 }, `Iterate · Findings 分诊 (${filtered.length}/${findings.length})`),
       React.createElement('span', { className: 'iterate-triage-hint' }, 'y=修复 · n=跳过 · a=已知有意 · ↑/↓ 选择'),
     ),
     React.createElement('div', { className: 'iterate-filter' },
-      React.createElement('select', { className: 'iterate-filter-select', value: filter.severities[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setSeverityFilter(e.target.value), title: '按严重度筛选' },
+      React.createElement('select', { className: 'iterate-filter-select', value: filter.severities[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setSeverityFilter(e.target.value), 'aria-label': '按严重度筛选' },
         React.createElement('option', { value: '' }, '全部严重度'),
         ...options.severities.map((s) =>
           React.createElement('option', { key: s.value, value: s.value }, `${severityLabel(s.value)} (${s.count})`),
         ),
       ),
-      React.createElement('select', { className: 'iterate-filter-select', value: filter.dimensions[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDimensionFilter(e.target.value), title: '按维度筛选' },
+      React.createElement('select', { className: 'iterate-filter-select', value: filter.dimensions[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDimensionFilter(e.target.value), 'aria-label': '按维度筛选' },
         React.createElement('option', { value: '' }, '全部维度'),
         ...options.dimensions.map((d) =>
           React.createElement('option', { key: d.value, value: d.value }, `${d.value} (${d.count})`),
@@ -917,6 +958,7 @@ function TriagePanel(props: SlotProps) {
         className: 'iterate-filter-search',
         type: 'search',
         placeholder: '搜索文件 / 摘要…',
+        'aria-label': '搜索文件或摘要',
         value: filter.search,
         onChange: (e: React.ChangeEvent<HTMLInputElement>) => setSearchFilter(e.target.value),
       }),
@@ -927,26 +969,35 @@ function TriagePanel(props: SlotProps) {
       ),
     ),
     React.createElement('div', { className: 'iterate-batch' },
-      React.createElement('span', { className: 'iterate-batch-label' }, '批量：'),
-      React.createElement('label', { className: 'iterate-batch-check', title: '勾选后批量按钮作用于全部 findings，否则仅当前可见' },
-        React.createElement('input', { type: 'checkbox', checked: selectAll, onChange: (e) => setSelectAll(e.target.checked) }),
-        selectAll ? `全部 ${allIndices.length}` : '全选',
-      ),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('keep') }, '全部 y'),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('skip') }, '全部 n'),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('ignore') }, '全部 a'),
-      React.createElement('span', { className: 'iterate-batch-label', style: { marginLeft: 8 } }, '全部：'),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatchAll('keep') }, 'y'),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatchAll('skip') }, 'n'),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatchAll('ignore') }, 'a'),
+      React.createElement('span', { className: 'iterate-batch-label' }, '批量作用于：'),
+      React.createElement('button', {
+        className: selectAll ? 'iterate-batch-btn iterate-batch-scope' : 'iterate-batch-btn iterate-batch-scope iterate-batch-scope-on',
+        onClick: () => setSelectAll(false),
+        title: '批量按钮仅作用于当前筛选可见的 findings',
+      }, `可见 ${indices.length}`),
+      React.createElement('button', {
+        className: selectAll ? 'iterate-batch-btn iterate-batch-scope iterate-batch-scope-on' : 'iterate-batch-btn iterate-batch-scope',
+        onClick: () => setSelectAll(true),
+        title: '批量按钮作用于全部 findings',
+      }, `全部 ${allIndices.length}`),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('keep') }, 'y'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('skip') }, 'n'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('ignore') }, 'a'),
       React.createElement('button', { className: 'iterate-batch-btn', onClick: doResetVerdicts, title: '把所有判定恢复为默认 y（修复）' }, '重置'),
     ),
     ...rows,
     React.createElement('div', { className: 'iterate-triage-foot' },
       React.createElement('span', {}, `y ${counts.keep} · n ${counts.skip} · a ${counts.ignore} · 待写回 known_intentional：${ignoredCount} 条`),
       React.createElement('span', { style: { display: 'flex', gap: 6 } },
-        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': copied ? '' : undefined, onClick: doCopyYaml }, copied ? '已复制' : '复制 known_intentional'),
-        React.createElement('button', { className: 'iterate-btn', onClick: doBuildInstruction }, '生成应用指令'),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-primary': '', 'data-copied': copied ? '' : undefined,
+          onClick: doCopyYaml, disabled: ignoredCount === 0,
+          title: ignoredCount === 0 ? '当前没有标记为「已知有意」的 finding' : '复制 known_intentional YAML',
+        }, copied ? '已复制' : `复制 known_intentional${ignoredCount > 0 ? `（${ignoredCount}）` : ''}`),
+        React.createElement('button', {
+          className: 'iterate-btn', onClick: doBuildInstruction, disabled: ignoredCount === 0,
+          title: ignoredCount === 0 ? '当前没有标记为「已知有意」的 finding' : '生成 iterate_triage 应用指令',
+        }, '生成应用指令'),
       ),
     ),
     payload
@@ -1067,10 +1118,11 @@ function SettingsPanel(_props: SlotProps) {
     setTimeout(() => setter(false), 1600)
   }
 
-  /** Copy a guide/status block; keep the copy button state in sync. */
+  /** Copy a guide/status block; flash success only when it actually copied. */
   const doCopy = (text: string, slot: 'guide' | 'status') => {
-    copyText(text)
-    flashCopied(slot)
+    copyText(text).then((ok) => {
+      if (ok) flashCopied(slot)
+    })
   }
 
   /** Two-step destroy guard: first click arms, second click clears. */

@@ -70,6 +70,8 @@ const SIGNATURE_PATTERNS = [
 export function collectMethodSignatures(text) {
     const lines = text.split('\n');
     const out = [];
+    // Set lookup instead of scanning the growing array (O(S²) → O(S)).
+    const seen = new Set();
     for (let i = 0; i < lines.length; i++) {
         const raw = lines[i];
         const line = i + 1;
@@ -81,8 +83,10 @@ export function collectMethodSignatures(text) {
             if (!name || RESERVED_WORDS.has(name) || CALLABLE_NOISE.has(name))
                 continue;
             // Avoid two patterns claiming the same line (e.g. TS method + arrow).
-            if (out.some((s) => s.line === line && s.name === name))
+            const key = `${line}|${name}`;
+            if (seen.has(key))
                 break;
+            seen.add(key);
             out.push({ name, line });
             break;
         }
