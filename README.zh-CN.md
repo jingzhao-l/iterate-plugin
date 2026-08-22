@@ -23,7 +23,7 @@
 
 `iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 项目在 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 桌面客户端中的落地插件。它把 iterate 的开环审查闭环（review → triage → fix → validate → 收敛）直接带进 dsh 的界面：提供**自治闭环代码迭代**（normal 模式）与 **dry-run 纯多轮审查**（只读）两种能力。
 
-除 13 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（技能 / 无头引擎）完全一致，迁移零成本。
+除 13 个纯函数工具外，还内置一套**免构建的 Web UI 层**（分诊面板、收敛看板、统计卡片、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（[技能](https://github.com/jingzhao-l/iterate-skill) / [无头引擎](https://github.com/jingzhao-l/iterate-harness)）完全一致，迁移零成本。
 
 ## 特性
 

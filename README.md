@@ -23,7 +23,7 @@
 
 `iterate-plugin` is the [iterate](https://github.com/jingzhao-l/iterate-skill) integration for the [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) desktop client. It brings iterate's review loop (review → triage → fix → validate → converge) directly into the dsh UI, offering **autonomous closed-loop code iteration** (normal mode) and **dry-run read-only multi-round review**.
 
-Besides 13 pure-function tools, it ships a **build-free Web UI layer** (triage panel, convergence dashboard, stats card, theme skin, etc.) that plugs straight into dsh's existing UI slots. Configuration (`iterate.config.yaml` and the review dimensions) is identical across the other two components of the iterate ecosystem (skill / headless engine) — zero migration cost.
+Besides 13 pure-function tools, it ships a **build-free Web UI layer** (triage panel, convergence dashboard, stats card, theme skin, etc.) that plugs straight into dsh's existing UI slots. Configuration (`iterate.config.yaml` and the review dimensions) is identical across the other two components of the iterate ecosystem ([skill](https://github.com/jingzhao-l/iterate-skill) / [headless engine](https://github.com/jingzhao-l/iterate-harness)) — zero migration cost.
 
 ## Features
 
