@@ -38,6 +38,7 @@ import { registerHistoryTool } from './tools/history.ts'
 import { registerPruneTool } from './tools/prune.ts'
 import { registerTranscriptTool } from './tools/transcript.ts'
 import { registerSessionHooks } from './session-hooks.ts'
+import { registerLiveCapture } from './live.ts'
 import { ITERATE_SKILL_PROMPT } from './skill-prompt.ts'
 
 export const name = 'iterate-plugin'
@@ -60,8 +61,10 @@ export function apply(ctx: Context): void {
   registerPruneTool(ctx)
   registerTranscriptTool(ctx)
 
-  // 2. Wire the observatory approval gate onto dsh's tools/pre-execute waterfall.
+  // 2. Wire the observatory approval gate onto dsh's tools/pre-execute waterfall,
+  //    and the live reviewer-activity feed onto tools/result.
   registerSessionHooks(ctx)
+  registerLiveCapture(ctx)
 
   // 2. Inject the iterate skill prompt as a system prompt section
   // This teaches the model how to write iterate workflow scripts using the tools.

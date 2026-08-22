@@ -24,6 +24,7 @@ import { dirname } from 'node:path';
 import { loadEffectiveConfig, resolveProjectRootForExec, } from "../config-loader.js";
 import { transcriptPath } from "../paths.js";
 import { ReviewTranscriptBuilder } from "../transcript.js";
+import { readLive } from "../live.js";
 /** Build per-dimension threads for one round from its (dimension-tagged) findings. */
 function captureRound(builder, round) {
     if (!round || typeof round !== 'object')
@@ -144,6 +145,7 @@ export function registerTranscriptTool(ctx) {
                     operation: { type: 'string', required: true },
                     found: { type: 'boolean' },
                     transcript: { type: 'json' },
+                    live: { type: 'json', description: 'Recent live reviewer-activity entries (newest first).' },
                     updated: { type: 'boolean' },
                     error: { type: 'string' },
                 },
@@ -159,10 +161,12 @@ export function registerTranscriptTool(ctx) {
             const { config } = loadEffectiveConfig(projectRoot);
             const approval = config.observatory?.approval ?? 'ask';
             if (args.operation === 'read') {
+                const live = await readLive(projectRoot);
                 if (!existsSync(file)) {
                     return {
                         operation: 'read',
                         found: false,
+                        live: live,
                         transcript: new ReviewTranscriptBuilder({
                             project: projectRoot,
                             approval,
@@ -172,7 +176,12 @@ export function registerTranscriptTool(ctx) {
                 try {
                     const raw = await readFile(file, 'utf-8');
                     const parsed = JSON.parse(raw);
-                    return { operation: 'read', found: true, transcript: parsed };
+                    return {
+                        operation: 'read',
+                        found: true,
+                        live: live,
+                        transcript: parsed,
+                    };
                 }
                 catch (err) {
                     return {
@@ -258,10 +267,12 @@ export function registerTranscriptTool(ctx) {
             if (convergence.length > 0 && last === 0)
                 builder.finish();
             await persist(file, builder.serialize());
+            const live = await readLive(projectRoot);
             return {
                 operation: 'capture',
                 found: true,
                 updated: true,
+                live: live,
                 transcript: builder.serialize(),
             };
         },

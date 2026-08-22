@@ -211,6 +211,13 @@ interface ObsEntry {
   data?: Record<string, unknown>
 }
 
+interface ObsLive {
+  ts?: string
+  type?: string
+  tool?: string
+  target?: string
+}
+
 interface ObsManifest {
   version?: number
   project?: string
@@ -225,6 +232,7 @@ interface ObsManifest {
   convergence?: number[]
   findings?: ObsFinding[]
   fixes?: ObsFix[]
+  live?: ObsLive[]
   checkpoint?: ObsCheckpoint | null
   timeline?: ObsEntry[]
   nudge?: ObsNudge | null
@@ -484,6 +492,7 @@ const ITERATE_CSS = `
 .iterate-obs-empty { font-size: 11px; color: var(--dsw-alias-label-secondary); padding: 8px 0; }
 .iterate-obs-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
 .iterate-obs-row:last-child { border-bottom: none; }
+.iterate-obs-livebadge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; border: 1px solid currentColor; background: color-mix(in srgb, currentColor 10%, transparent); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
 `
 
 // ─── Small helpers ───────────────────────────────────────────────────────────
@@ -1370,8 +1379,10 @@ function SettingsPanel(_props: SlotProps) {
 
 // ─── Runtime observatory panel (F1–F7) ──────────────────────────────────────
 
-/** Tab id → label for the observatory's seven panels. */
+/** Tab id → label for the observatory's eight panels. Live (real-time activity
+ * stream) is first so it is the default view; F-panels follow. */
 const OBS_TABS = [
+  { key: 'live', label: '实时活动流' },
   { key: 'f1', label: '审查线程' },
   { key: 'f2', label: '收敛趋势' },
   { key: 'f3', label: '发现定位' },
@@ -1380,6 +1391,44 @@ const OBS_TABS = [
   { key: 'f6', label: '运行控制台' },
   { key: 'f7', label: '决策时间线' },
 ] as const
+
+/** Live subagent activity badges: type → Chinese label + dsw token color accent. */
+const OBS_LIVE_META: Record<string, { label: string; color: string }> = {
+  read: { label: '阅读', color: 'var(--dsw-alias-brand-primary)' },
+  fix: { label: '修复', color: 'var(--dsw-alias-state-success-primary)' },
+  rollback: { label: '回滚', color: 'var(--dsw-alias-state-error-primary)' },
+  diff: { label: '差异', color: 'var(--dsw-alias-state-warn-primary)' },
+  review: { label: '审查', color: 'var(--dsw-alias-brand-primary)' },
+  triage: { label: '分流', color: 'var(--dsw-alias-state-warn-primary)' },
+  checkpoint: { label: '断点', color: 'var(--dsw-alias-brand-primary)' },
+  validate: { label: '校验', color: 'var(--dsw-alias-state-success-primary)' },
+  log: { label: '记录', color: 'var(--dsw-alias-label-secondary)' },
+  prune: { label: '清理', color: 'var(--dsw-alias-state-warn-primary)' },
+  info: { label: '信息', color: 'var(--dsw-alias-label-secondary)' },
+}
+const OBS_LIVE_FALLBACK_COLOR = 'var(--dsw-alias-label-secondary)'
+
+/**
+ * Format a live-event timestamp as DD/MM HH:mm:ss (0-padded). Accepts an epoch
+ * ms number or an ISO-ish string; any unparseable value degrades to ''.
+ */
+function formatObsLiveTime(ts?: string): string {
+  if (!ts) return ''
+  let date: Date | null = null
+  const num = Number(ts)
+  if (typeof ts === 'string' && ts !== '' && !Number.isNaN(num) && /^\d+$/.test(ts)) {
+    date = new Date(num)
+  } else {
+    const d = new Date(ts)
+    date = Number.isNaN(d.getTime()) ? null : d
+  }
+  if (!date) return String(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const h = p(date.getHours())
+  const mi = p(date.getMinutes())
+  const s = p(date.getSeconds())
+  return `${p(date.getDate())}/${p(date.getMonth() + 1)} ${h}:${mi}:${s}`
+}
 
 /** Find the latest runtime-observatory manifest inside a session snapshot. */
 function latestTranscript(session: unknown): ObsManifest | null {
@@ -1401,7 +1450,7 @@ function buildObsFixInstruction(f: ObsFinding): string {
 }
 
 /**
- * ObservatoryPanel: a 7-tab runtime observatory that renders the latest
+ * ObservatoryPanel: an 8-tab runtime observatory that renders the latest
  * iterate_transcript manifest found in the dsh session stream. The panel is
  * collapsed by default to a single entry row so it never re-occludes the main
  * convergence dashboard; clicking expands it into tabs. Every field read is
@@ -1414,7 +1463,7 @@ function ObservatoryPanel(props: SlotProps) {
   const manifest = latestTranscript(session)
 
   const [open, setOpen] = React.useState(false)
-  const [tab, setTab] = React.useState('f1')
+  const [tab, setTab] = React.useState('live')
   const [expandedThreads, setExpandedThreads] = React.useState<Set<string>>(new Set())
   const [copiedKey, setCopiedKey] = React.useState<string | null>(null)
   const [nudgeText, setNudgeText] = React.useState('')
@@ -1775,8 +1824,39 @@ function ObservatoryPanel(props: SlotProps) {
     )
   }
 
+  // ── Live: real-time secondary-subagent activity stream (newest first) ─────
+  const renderLive = () => {
+    const liveEntries = manifest.live || []
+    if (liveEntries.length === 0) {
+      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无实时活动')
+    }
+    const rows = liveEntries.map((e, i) => {
+      const type = String(e.type || 'unknown')
+      const meta = OBS_LIVE_META[type] || { label: String(e.type || '?'), color: OBS_LIVE_FALLBACK_COLOR }
+      const tool = String(e.tool || '')
+      const target = String(e.target || '')
+      const time = formatObsLiveTime(e.ts)
+      return React.createElement('div', { key: `live-${i}`, className: 'iterate-obs-row' },
+        React.createElement('span', { className: 'iterate-obs-livebadge', style: { color: meta.color } }, meta.label),
+        tool
+          ? React.createElement('span', { className: 'iterate-obs-chip' }, tool)
+          : null,
+        React.createElement('span', { className: 'iterate-obs-msg' }, target || '—'),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, time),
+      )
+    })
+    return React.createElement('div', {},
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('b', {}, '实时活动'),
+        React.createElement('span', { className: 'iterate-obs-chip' }, `${liveEntries.length} 项`),
+      ),
+      ...rows,
+    )
+  }
+
   const renderBody = () => {
     switch (tab) {
+      case 'live': return renderLive()
       case 'f1': return renderThreads()
       case 'f2': return renderTrend()
       case 'f3': return renderFindings()

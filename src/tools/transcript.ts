@@ -29,6 +29,7 @@ import {
 } from '../config-loader.ts'
 import { transcriptPath } from '../paths.ts'
 import { ReviewTranscriptBuilder } from '../transcript.ts'
+import { readLive } from '../live.ts'
 import type {
   TranscriptManifest,
   TranscriptFix,
@@ -157,6 +158,7 @@ export function registerTranscriptTool(ctx: {
             operation: { type: 'string', required: true },
             found: { type: 'boolean' },
             transcript: { type: 'json' },
+            live: { type: 'json', description: 'Recent live reviewer-activity entries (newest first).' },
             updated: { type: 'boolean' },
             error: { type: 'string' },
           },
@@ -173,10 +175,12 @@ export function registerTranscriptTool(ctx: {
         const approval = config.observatory?.approval ?? 'ask'
 
         if (args.operation === 'read') {
+          const live = await readLive(projectRoot)
           if (!existsSync(file)) {
             return {
               operation: 'read',
               found: false,
+              live: live as unknown as JsonValue,
               transcript: new ReviewTranscriptBuilder({
                 project: projectRoot,
                 approval,
@@ -186,7 +190,12 @@ export function registerTranscriptTool(ctx: {
           try {
             const raw = await readFile(file, 'utf-8')
             const parsed = JSON.parse(raw) as unknown as TranscriptManifest
-            return { operation: 'read', found: true, transcript: parsed as unknown as JsonValue }
+            return {
+              operation: 'read',
+              found: true,
+              live: live as unknown as JsonValue,
+              transcript: parsed as unknown as JsonValue,
+            }
           } catch (err) {
             return {
               operation: 'read',
@@ -273,10 +282,12 @@ export function registerTranscriptTool(ctx: {
         if (convergence.length > 0 && last === 0) builder.finish()
 
         await persist(file, builder.serialize())
+        const live = await readLive(projectRoot)
         return {
           operation: 'capture',
           found: true,
           updated: true,
+          live: live as unknown as JsonValue,
           transcript: builder.serialize() as unknown as JsonValue,
         }
       },

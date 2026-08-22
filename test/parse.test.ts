@@ -43,6 +43,8 @@ import {
   buildRuntimeStatusGuide,
   scanSessionForResume,
   countSessionImages,
+  scanSessionForTranscript,
+  normalizeTranscript,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -720,6 +722,104 @@ describe('countSessionImages', () => {
     assert.equal(countSessionImages(session), 0)
   })
 })
+
+// ─── Transcript live-feed bridge (attachLive + normalizeTranscript) ────────
+
+const LIVE_SAMPLE = [
+  { ts: '2026-01-01T00:00:00.000Z', type: 'read', tool: 'read_file', target: 'src/a.ts' },
+  { ts: 1780123456789, type: 'fix', tool: 'iterate_fix', target: 'src/b.ts' },
+]
+
+/** A valid TranscriptManifest (isTranscriptManifest requires version+rounds+convergence-array). */
+function makeTranscriptManifest() {
+  return {
+    version: 1,
+    project: 'proj',
+    mode: 'normal',
+    goal: 'Improve code quality',
+    maxRounds: 3,
+    rounds: [{ round: 1, threads: [], findings: [], readFiles: [] }],
+    convergence: [1, 0],
+    findings: [],
+    fixes: [],
+    checkpoint: null,
+    timeline: [],
+    nudge: null,
+  }
+}
+
+describe('transcript live bridge', () => {
+  it('scanSessionForTranscript surfaces the sibling live array on the manifest', () => {
+    const transcript = makeTranscriptManifest()
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_transcript',
+          result: { operation: 'capture', found: true, live: LIVE_SAMPLE, transcript },
+        },
+      ],
+    }
+    const manifest = scanSessionForTranscript(session) as Record<string, unknown> | null
+    assert.ok(manifest)
+    assert.deepEqual(safeLiveOf(manifest), LIVE_SAMPLE.map((e) => ({ ...e })))
+  })
+
+  it('does not mutate the found manifest when attaching live (shallow copy)', () => {
+    const transcript = makeTranscriptManifest()
+    const session = {
+      toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', live: LIVE_SAMPLE, transcript } }],
+    }
+    const snapshot = JSON.stringify(transcript)
+    const manifest = scanSessionForTranscript(session) as Record<string, unknown> | null
+    assert.ok(manifest)
+    assert.notEqual(manifest, transcript) // not the same reference
+    assert.equal(JSON.stringify(transcript), snapshot) // input untouched
+  })
+
+  it('keeps the manifest unchanged when the source has no live array', () => {
+    const transcript = makeTranscriptManifest()
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', transcript } }] }
+    const manifest = scanSessionForTranscript(session) as Record<string, unknown> | null
+    assert.ok(manifest)
+    assert.equal(safeLiveOf(manifest), undefined)
+  })
+
+  it('normalizeTranscript maps live entries into strings and tolerates missing live', () => {
+    const normWithLive = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      live: LIVE_SAMPLE,
+    }) as unknown as { live: Array<{ ts?: string; type?: string; tool?: string; target?: string }> }
+    assert.ok(Array.isArray(normWithLive.live))
+    assert.equal(normWithLive.live.length, 2)
+    // Numeric epoch ms is stringified; ISO string is preserved as-is.
+    assert.equal(normWithLive.live[0]!.ts, '2026-01-01T00:00:00.000Z')
+    assert.equal(normWithLive.live[1]!.ts, String(1780123456789))
+    assert.equal(normWithLive.live[1]!.type, 'fix')
+    assert.equal(normWithLive.live[1]!.target, 'src/b.ts')
+
+    const normNoLive = normalizeTranscript(makeTranscriptManifest()) as unknown as { live: unknown[] }
+    assert.ok(Array.isArray(normNoLive.live))
+    assert.equal(normNoLive.live.length, 0)
+  })
+
+  it('drops malformed live entries that lack a ts string', () => {
+    const norm = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      live: [
+        { type: 'read', tool: 'read_file', target: 'ok.ts' }, // no ts -> asStr -> ''
+        { ts: 'bad-ts', type: 'fix', tool: 'iterate_fix', target: 'x.ts' },
+      ],
+    }) as unknown as { live: Array<{ ts?: string }> }
+    assert.equal(norm.live.length, 2)
+    // Entries without a usable ts degrade to '' rather than throwing.
+    assert.equal(norm.live[0]!.ts, '')
+  })
+})
+
+function safeLiveOf(manifest: Record<string, unknown>): unknown[] | undefined {
+  const v = manifest.live
+  return Array.isArray(v) ? (v as unknown[]) : undefined
+}
 
 describe('hashReport (content digest)', () => {
   const base = {

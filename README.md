@@ -237,6 +237,8 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
 .iterate/
   decision-log.jsonl      # append-only decision log (plan/review/fix/revert…)
   checkpoint.json         # iteration breakpoint (resume)
+  transcript.json         # runtime-observatory manifest (per-reviewer threads, trend, fixes, timeline, nudge)
+  transcript-live.ndjson  # append-only near-real-time reviewer-activity feed (read/fix/rollback/validate…), byte-capped
   fixes/
     registry.json         # fix registry (list of FixRecords, grouped by round)
     <fix-id>_<ts>.bak     # original file backup before each fix

@@ -36,6 +36,7 @@ import { registerHistoryTool } from "./tools/history.js";
 import { registerPruneTool } from "./tools/prune.js";
 import { registerTranscriptTool } from "./tools/transcript.js";
 import { registerSessionHooks } from "./session-hooks.js";
+import { registerLiveCapture } from "./live.js";
 import { ITERATE_SKILL_PROMPT } from "./skill-prompt.js";
 export const name = 'iterate-plugin';
 export const inject = ['tools', 'systemPrompt'];
@@ -55,8 +56,10 @@ export function apply(ctx) {
     registerHistoryTool(ctx);
     registerPruneTool(ctx);
     registerTranscriptTool(ctx);
-    // 2. Wire the observatory approval gate onto dsh's tools/pre-execute waterfall.
+    // 2. Wire the observatory approval gate onto dsh's tools/pre-execute waterfall,
+    //    and the live reviewer-activity feed onto tools/result.
     registerSessionHooks(ctx);
+    registerLiveCapture(ctx);
     // 2. Inject the iterate skill prompt as a system prompt section
     // This teaches the model how to write iterate workflow scripts using the tools.
     ctx.systemPrompt.section({
