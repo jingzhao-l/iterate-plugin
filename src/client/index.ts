@@ -967,6 +967,14 @@ function TriagePanel(props: SlotProps) {
       const t = ev.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
       if (t && typeof t.isContentEditable === 'boolean' && t.isContentEditable) return
+      // Only act when focus is INSIDE the triage panel. Everything else keeps
+      // standard behavior (↑/↓ page scroll, typing in the composer), so we do
+      // not hijack document-level keys just because a report is mounted.
+      const rootEl = doc.querySelector('[data-iterate="triage"]')
+      if (!rootEl) return
+      const activeEl = doc.activeElement as HTMLElement | null
+      if (!activeEl) return
+      if (activeEl !== rootEl && !(typeof rootEl.contains === 'function' && rootEl.contains(activeEl))) return
       const verdict = keyToVerdict(ev.key)
       if (verdict && selected !== null && indices.includes(selected)) {
         ev.preventDefault()
@@ -1466,6 +1474,10 @@ function ObservatoryPanel(props: SlotProps) {
   const [tab, setTab] = React.useState('live')
   const [expandedThreads, setExpandedThreads] = React.useState<Set<string>>(new Set())
   const [copiedKey, setCopiedKey] = React.useState<string | null>(null)
+  // When a clipboard write is blocked (permissions/unsupported), reveal the
+  // raw instruction text so the user can copy it manually instead of silently
+  // dropping the action (mirrors the triage/settings fallback).
+  const [copyFailText, setCopyFailText] = React.useState<string | null>(null)
   const [nudgeText, setNudgeText] = React.useState('')
   const [timelineType, setTimelineType] = React.useState('')
   const [timelineSearch, setTimelineSearch] = React.useState('')
@@ -1478,7 +1490,7 @@ function ObservatoryPanel(props: SlotProps) {
   const copyInstruction = (key: string, text: string) => {
     if (!text) return
     copyText(text).then((ok) => {
-      if (!ok) return
+      if (!ok) { setCopyFailText(text); return }
       setCopiedKey(key)
       if (copyTimer.current) clearTimeout(copyTimer.current)
       copyTimer.current = setTimeout(() => setCopiedKey((cur) => (cur === key ? null : cur)), 1600)
@@ -1732,6 +1744,10 @@ function ObservatoryPanel(props: SlotProps) {
     const present = Boolean(nudge && nudge.text)
     const activeNudgeText = nudge && nudge.text ? nudge.text : ''
     const nudgeInstruction = `请调用 \`iterate_transcript\` 写入 nudge 指令：\n\n\`\`\`json\n${JSON.stringify({ operation: 'nudge', text: nudgeText }, null, 2)}\n\`\`\``
+    // Clearing the PERSISTED nudge (as opposed to the draft) requires
+    // text:null. Copied as a paste-able instruction, mirroring the panel's
+    // copy-to-command pattern — it cannot be cleared from the client directly.
+    const activeClearInstruction = `请调用 \`iterate_transcript\` 清除当前 nudge：\n\n\`\`\`json\n${JSON.stringify({ operation: 'nudge', text: null }, null, 2)}\n\`\`\``
     return React.createElement('div', { className: 'iterate-obs-block' },
       React.createElement('div', { className: 'iterate-obs-block-head' },
         React.createElement('span', {}, '运行控制台'),
@@ -1743,7 +1759,11 @@ function ObservatoryPanel(props: SlotProps) {
           ? React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 6 } },
               React.createElement('b', {}, '当前 nudge'),
               React.createElement('span', { className: 'iterate-obs-msg' }, activeNudgeText),
-              React.createElement('button', { className: 'iterate-btn', onClick: () => setNudgeText('') }, '清除'),
+              React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': copiedKey === 'nudge-clear' ? '' : undefined,
+                onClick: () => copyInstruction('nudge-clear', activeClearInstruction),
+                title: '复制清除 nudge 指令（写 text:null），在运行控制台提示清除已持久化的 nudge',
+              }, copiedKey === 'nudge-clear' ? '已复制清除指令' : '复制清除指令'),
             )
           : null,
         React.createElement('textarea', {
@@ -1828,6 +1848,20 @@ function ObservatoryPanel(props: SlotProps) {
   const renderLive = () => {
     const liveEntries = manifest.live || []
     if (liveEntries.length === 0) {
+      // Live entries only accumulate during an ACTIVE run. For a completed run
+      // (or before any capture) this tab is empty — guide the user to the
+      // populated summary tabs instead of leaving a dead-end "暂无实时活动" state.
+      const hasThreads = (manifest.rounds || []).length > 0
+      const hasFindings = (manifest.findings || []).length > 0
+      if (hasThreads || hasFindings) {
+        return React.createElement('div', { className: 'iterate-obs-empty' },
+          React.createElement('div', {}, '实时活动流仅在运行期间记录，当前已完成。'),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+            React.createElement('button', { className: 'iterate-btn', onClick: () => setTab('f1') }, '查看审查线程'),
+            React.createElement('button', { className: 'iterate-btn', onClick: () => setTab('f3') }, '查看发现'),
+          ),
+        )
+      }
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无实时活动')
     }
     const rows = liveEntries.map((e, i) => {
@@ -1880,6 +1914,19 @@ function ObservatoryPanel(props: SlotProps) {
     ),
     open
       ? React.createElement('div', {},
+          copyFailText
+            ? React.createElement('div', { className: 'iterate-obs-block' },
+                React.createElement('div', { className: 'iterate-obs-block-head' },
+                  React.createElement('b', {}, '复制未成功'),
+                  React.createElement('span', { className: 'iterate-obs-head-meta' }, '剪贴板写入被拒绝，请手动选中下方指令复制'),
+                  React.createElement('button', {
+                    className: 'iterate-btn', 'data-ghost': '', 'aria-label': '关闭复制失败提示',
+                    onClick: () => setCopyFailText(null),
+                  }, '关闭'),
+                ),
+                React.createElement('div', { className: 'iterate-obs-code' }, copyFailText),
+              )
+            : null,
           React.createElement('div', { className: 'iterate-obs-tabs' },
             ...OBS_TABS.map((t) =>
               React.createElement('button', {
