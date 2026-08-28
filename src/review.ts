@@ -20,6 +20,7 @@
 import type {
   IterateConfig,
   KnownIntentional,
+  ReviewAttachment,
   ReviewFinding,
   ReviewReport,
   ReviewRound,
@@ -547,6 +548,39 @@ export function sanitizeRounds(
 }
 
 /**
+ * Build the "attached visual context" instruction block for a reviewer prompt.
+ *
+ * ``path``/``data`` attachments (screenshots, mockups, failure repros) are
+ * evidence a reviewer must weigh alongside the code — this clause names each
+ * one and mandates that the reviewer inspect/consider it (e.g. by opening the
+ * file with a vision-capable tool or the ``image_to_text`` bridge) before
+ * judging. Pure string construction; returns ``""`` when there are none.
+ */
+export function attachmentClause(attachments: ReviewAttachment[] | undefined): string {
+  if (!attachments || attachments.length === 0) return ''
+  const lines: string[] = []
+  for (const a of attachments) {
+    if (!a || typeof a !== 'object') continue
+    if (typeof a.path === 'string' && a.path) {
+      lines.push(`- ${a.path}${typeof a.caption === 'string' && a.caption ? ` (${a.caption})` : ''}`)
+    } else if (typeof a.data === 'string' && a.data) {
+      const kind = typeof a.media_type === 'string' && a.media_type ? a.media_type : 'image'
+      lines.push(`- inline ${kind} image${typeof a.caption === 'string' && a.caption ? ` (${a.caption})` : ''}`)
+    }
+  }
+  if (lines.length === 0) return ''
+  return (
+    'ATTACHED VISUAL CONTEXT (mandatory): the following image attachment(s) were provided ' +
+    'with this review — each one is part of the evidence you must weigh:\n' +
+    lines.join('\n') +
+    '\nYou MUST inspect/consider EVERY attachment before judging your dimension (open it ' +
+    'with a vision-capable tool, or use image_to_text if your model cannot see images). ' +
+    'If an attachment is inaccessible, state that and judge solely on the code. Do not ' +
+    'ignore an attachment just because it is not code.'
+  )
+}
+
+/**
  * Build the task prompt for one dimension's reviewer subagent.
  * In dry-run mode, pass `alreadyKnown` (the findings from earlier rounds) so the
  * reviewer hunts for NEW issues only — that is what makes "反复审查" converge.
@@ -581,6 +615,12 @@ export function reviewerTaskPrompt(input: {
    * review concentrates on the areas the user cares about.
    */
   focus?: string
+  /**
+   * Image/visual attachments to weigh alongside the code (screenshots,
+   * mockups, failure repros). Injected as a mandatory review-aware clause so
+   * every dimension reviewer inspects/considers them before judging.
+   */
+  attachments?: ReviewAttachment[]
 }): string {
   const parts: string[] = []
   parts.push(
@@ -590,6 +630,10 @@ export function reviewerTaskPrompt(input: {
   )
   if (input.focus) {
     parts.push(`FOCUS: ${input.focus}`)
+  }
+  const attached = attachmentClause(input.attachments)
+  if (attached) {
+    parts.push(attached)
   }
   if (input.scopeFiles && input.scopeFiles.length > 0) {
     parts.push(
@@ -672,6 +716,12 @@ export function buildReviewPlan(input: {
    * complete inventory it must open file-by-file.
    */
   scopeFiles?: string[]
+  /**
+   * Image/visual attachments to thread into the review. Injected as a
+   * mandatory clause into every dimension's reviewer prompt and surfaced on
+   * the returned plan so the orchestrator/report can reference them.
+   */
+  attachments?: ReviewAttachment[]
 }): {
   mode: 'normal' | 'dry-run'
   goal: string
@@ -683,6 +733,8 @@ export function buildReviewPlan(input: {
   changedFiles: string[]
   /** True when scope was `changed-only` but no changes were found. */
   fallbackToFull: boolean
+  /** The attachments threaded into every reviewer prompt (empty when none). */
+  attachments: ReviewAttachment[]
 } {
   // Defensive reads: a malformed config (e.g. `dimensions` as a non-array, or
   // `review`/`atomic` missing) must degrade to sane defaults instead of
@@ -693,6 +745,16 @@ export function buildReviewPlan(input: {
   const dimensions = Array.isArray(input.config.dimensions) ? input.config.dimensions : []
   const maxLines = input.config.atomic?.max_lines ?? 20
   const changedFiles = Array.isArray(input.changedFiles) ? input.changedFiles : []
+  // Defensive parse: keep only well-formed attachment entries (path or data).
+  const attachments = Array.isArray(input.attachments)
+    ? input.attachments.filter(
+        (a): a is ReviewAttachment =>
+          Boolean(a) &&
+          typeof a === 'object' &&
+          ((typeof a.path === 'string' && a.path.length > 0) ||
+            (typeof a.data === 'string' && a.data.length > 0)),
+      )
+    : []
   // changed-only with zero detected changes → auto-fallback to full scope.
   const effectiveChangedOnly = configuredScope === 'changed-only' && changedFiles.length > 0
   const scope: 'full' | 'changed-only' = effectiveChangedOnly ? 'changed-only' : 'full'
@@ -744,6 +806,7 @@ export function buildReviewPlan(input: {
           changedFiles: effectiveChangedOnly ? changedFiles : undefined,
           scopeFiles: batch,
           focus: focusMap.get(d),
+          attachments,
         }),
         findingsSchema: findingsSchema(),
       })
@@ -759,5 +822,6 @@ export function buildReviewPlan(input: {
     knownIntentional: input.knownIntentional ?? [],
     changedFiles: effectiveChangedOnly ? changedFiles : [],
     fallbackToFull,
+    attachments,
   }
 }

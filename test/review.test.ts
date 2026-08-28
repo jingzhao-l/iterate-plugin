@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   aggregateRounds,
+  attachmentClause,
   buildReviewReport,
   buildReviewPlan,
   computeConvergence,
@@ -19,7 +20,7 @@ import {
   validateFindingsSchema,
   validateRoundsSchema,
 } from '../src/review.ts'
-import type { IterateConfig, ReviewFinding, ReviewRound } from '../src/types.ts'
+import type { IterateConfig, ReviewAttachment, ReviewFinding, ReviewRound } from '../src/types.ts'
 
 const f = (partial: Partial<ReviewFinding>): ReviewFinding => ({
   dimension: 'correctness',
@@ -662,17 +663,83 @@ describe('validateRoundsSchema / sanitizeRounds', () => {
 })
 
 describe('schema constants mirror findingsSchema', () => {
-  it('REQUIRED_FINDING_FIELDS and SEVERITY_VALUES align with the JSON schema', () => {
-    const schema = findingsSchema() as {
-      properties: {
-        findings: { items: { required: string[]; properties: Record<string, { enum?: string[] }> } }
+    it('REQUIRED_FINDING_FIELDS and SEVERITY_VALUES align with the JSON schema', () => {
+      const schema = findingsSchema() as {
+        properties: { findings: { items: { required: string[]; properties: Record<string, { enum?: string[] }> } } }
       }
-    }
-    const item = schema.properties.findings.items
-    for (const key of REQUIRED_FINDING_FIELDS) {
-      assert.ok(item.required.includes(key), `schema requires ${key}`)
-    }
-    assert.deepEqual(SEVERITY_VALUES, ['critical', 'high', 'medium', 'low'])
-    assert.deepEqual(item.properties.severity?.enum, [...SEVERITY_VALUES])
+      const item = schema.properties.findings.items
+      for (const key of REQUIRED_FINDING_FIELDS) {
+        assert.ok(item.required.includes(key), `schema requires ${key}`)
+      }
+      assert.deepEqual(SEVERITY_VALUES, ['critical', 'high', 'medium', 'low'])
+      assert.deepEqual(item.properties.severity?.enum, [...SEVERITY_VALUES])
+    })
   })
-})
+
+  describe('visual attachments passthrough', () => {
+    it('attachmentClause returns empty for no attachments', () => {
+      assert.equal(attachmentClause(undefined), '')
+      assert.equal(attachmentClause([]), '')
+    })
+
+    it('attachmentClause lists path and inline base64 attachments with captions', () => {
+      const clause = attachmentClause([
+        { path: 'screens/hits.png', caption: 'layout bug' },
+        { data: 'QUJD', media_type: 'image/png', caption: 'repro' },
+      ])
+      assert.match(clause, /ATTACHED VISUAL CONTEXT/)
+      assert.match(clause, /screens\/hits\.png \(layout bug\)/)
+      assert.match(clause, /inline image\/png image \(repro\)/)
+      assert.match(clause, /image_to_text/)
+    })
+
+    it('reviewerTaskPrompt injects the clause only when attachments are passed', () => {
+      const withAttr = reviewerTaskPrompt({
+        dimension: 'security',
+        goal: 'Improve quality',
+        scope: 'full',
+        mode: 'dry-run',
+        outputLanguage: 'English',
+        maxLines: 20,
+        attachments: [{ path: 'mock/onboarding.png', caption: 'onboarding' }],
+      })
+      assert.match(withAttr, /mock\/onboarding\.png \(onboarding\)/)
+
+      const noAttr = reviewerTaskPrompt({
+        dimension: 'security',
+        goal: 'Improve quality',
+        scope: 'full',
+        mode: 'dry-run',
+        outputLanguage: 'English',
+        maxLines: 20,
+      })
+      assert.doesNotMatch(noAttr, /ATTACHED VISUAL CONTEXT/)
+    })
+
+    it('buildReviewPlan threads attachments into every dimension prompt and the plan', () => {
+      const plan = buildReviewPlan({
+        config: baseConfig,
+        mode: 'dry-run',
+        maxReviewRounds: 4,
+        attachments: [{ data: '', caption: '' }, { path: 'screens/flow.png', caption: 'flow' }],
+      })
+      assert.equal(plan.attachments.length, 1, 'malformed entries are dropped')
+      assert.equal(plan.attachments[0]!.path, 'screens/flow.png')
+      for (const dim of plan.dimensions) {
+        assert.match(dim.reviewerPrompt, /screens\/flow\.png \(flow\)/)
+      }
+    })
+
+    it('buildReviewPlan keeps attachments empty when none are supplied', () => {
+      const plan = buildReviewPlan({ config: baseConfig, mode: 'dry-run', maxReviewRounds: 4 })
+      assert.deepEqual(plan.attachments, [])
+    })
+
+    it('attachmentClause skips entries with neither path nor data', () => {
+      const attrs: ReviewAttachment[] = [
+        { caption: 'just a caption' },
+        {} as ReviewAttachment,
+      ]
+      assert.equal(attachmentClause(attrs), '')
+    })
+  })

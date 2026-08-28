@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
+import { runWithJob } from '../jobs.ts'
 import {
   buildReviewPlan,
   buildReviewReport,
@@ -15,7 +16,7 @@ import {
   coverageToDict,
 } from '../review-scope.ts'
 import { resolveChangedFiles } from '../git-scope.ts'
-import type { KnownIntentional, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
+import type { KnownIntentional, ReviewAttachment, ReviewFinding, ReviewReport, ReviewRound } from '../types.ts'
 import type { CoverageResult } from '../review-scope.ts'
 
 /** Default round cap when neither the arg nor config provides one. */
@@ -85,6 +86,16 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
             'For `meta-review`: the ReviewReport JSON (as returned by `aggregate`) to audit for ' +
             'internal consistency and produce the final review report.',
         },
+        attachments: {
+          type: 'json',
+          description:
+            'Optional (plan only): image/visual attachments to thread into the review, e.g. ' +
+            '[{"path":"screens/hits.png","caption":"reproduced layout bug"}]. Each entry: ' +
+            '{path?, data?, media_type?, caption?} — path resolves relative to the project root, ' +
+            'data is a base64 payload (media_type e.g. image/png), caption gives human context. ' +
+            'Injected as a mandatory clause into every dimension reviewer prompt so screenshots/' +
+            'mockups/failure repros are weighed alongside the code.',
+        },
         fixedCount: {
           type: 'integer',
           description:
@@ -132,6 +143,7 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
       },
 
       async execute(args, exec) {
+        const { result } = await runWithJob(ctx, 'iterate-review', `iterate_review ${String(args.operation ?? '')} (${String(args.mode ?? 'dry-run')})`, async () => {
         const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) {
           return { operation: args.operation, error: resolved.reason }
@@ -162,7 +174,18 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           if (config.review?.scope === 'full') {
             scopeFiles = collectScopeFiles(projectRoot, { scope: 'full' })
           }
-          const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles, scopeFiles })
+          // Thread image/visual attachments (screenshots/mockups/failure repros)
+          // into the plan so every reviewer prompt weighs them alongside code.
+          const attachments = Array.isArray(args.attachments)
+            ? (args.attachments as ReviewAttachment[]).filter(
+                (a): a is ReviewAttachment =>
+                  Boolean(a) &&
+                  typeof a === 'object' &&
+                  ((typeof a.path === 'string' && a.path.length > 0) ||
+                    (typeof a.data === 'string' && a.data.length > 0)),
+              )
+            : []
+          const plan = buildReviewPlan({ config, mode, maxReviewRounds, knownIntentional, changedFiles, scopeFiles, attachments })
           return { operation: 'plan', mode, found: true, plan: plan as unknown as JsonValue }
         }
 
@@ -268,6 +291,8 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           operation: args.operation,
           error: `Unknown operation "${args.operation}". Use "plan", "aggregate", or "meta-review".`,
         }
+        })
+        return result
       },
     }),
   )

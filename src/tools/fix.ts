@@ -22,6 +22,7 @@ import { join, sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
+import { runWithJob } from '../jobs.ts'
 import { countTouchedMethods } from '../method-scope.ts'
 import { fixBackupPath, fixRegistryPath, fixesDir } from '../paths.ts'
 import { appendDecisionEntry } from './decision-log.ts'
@@ -335,6 +336,7 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
       },
 
       async execute(args, exec) {
+        const { result } = await runWithJob(ctx, 'iterate-fix', `iterate_fix ${typeof args.file === 'string' && args.file ? args.file : '(?)'}`, async () => {
         const resolved = resolveProjectRootForExec(exec, args.path)
         if (!resolved.ok) return { ok: false, error: resolved.reason }
         const projectRoot = resolved.root
@@ -504,6 +506,8 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
           diffSummary: record.diffSummary,
           backupPath,
         }
+        })
+        return result
       },
     }),
   )

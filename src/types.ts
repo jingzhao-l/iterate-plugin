@@ -16,6 +16,13 @@ export interface IterateConfig {
     command_whitelist: string[]
     commands: Record<string, string[]>
   }
+  /**
+   * LLM reasoning effort for review passes ('low' | 'medium' | 'high').
+   * Absent → follow the provider default. The harness forwards it into the
+   * OpenAI-compatible request body; the plugin surfaces it in the settings
+   * panel and review plan (dsh 0.1.1-rc.7+ exposes the same 'low' effort).
+   */
+  reasoning_effort?: 'low' | 'medium' | 'high'
   reviewer: {
     output_schema_validation: boolean
     evidence_validation: boolean
@@ -68,6 +75,25 @@ export interface ValidationResult {
   stderr: string
   timedOut: boolean
   durationMs: number
+}
+
+/**
+ * An image (or other visual) attachment threaded into a review.
+ *
+ * The user/context can attach screenshots, UI mockups, or reproduced-failure
+ * images that reviewers should weigh alongside the code. Only ``path`` or
+ * ``data`` need be present; ``media_type`` describes ``data`` (base64);
+ * ``caption`` supplies human context for the reviewer prompt.
+ */
+export interface ReviewAttachment {
+  /** Local path to the image (resolved relative to the project root). */
+  path?: string
+  /** Base64-encoded image content (alternative to ``path``). */
+  data?: string
+  /** MIME type of ``data`` (e.g. image/png, image/jpeg, image/webp). */
+  media_type?: string
+  /** Short human caption explaining what the attachment shows and why it matters. */
+  caption?: string
 }
 
 /** A single finding from a dimension review */
