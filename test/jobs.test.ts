@@ -69,20 +69,29 @@ test('runWithJob: failure settles the job failed and rethrows', async () => {
 
 test('runWithJob: cancel hook settles the job killed', async () => {
   let capturedCancel: (() => void) | undefined
-  let settleResolve: ((o: unknown) => void) | undefined
-  const done = new Promise((resolve) => {
-    settleResolve = resolve
-  })
+  let internalDone: Promise<unknown> | undefined
   const registry = {
     start(spec: { run(): { done: Promise<unknown>; cancel: () => void } }) {
       const hooks = spec.run()
       capturedCancel = hooks.cancel
+      internalDone = hooks.done
       return 'job-1'
     },
   }
-  const { result } = await runWithJob({ jobs: registry }, 'iterate-review', 'label', async () => ({ ok: true }))
-  assert.deepEqual(result, { ok: true })
+  // Keep `fn` pending until the gate releases, so cancel() can be invoked
+  // BEFORE runWithJob settles the job 'completed'.
+  let release!: () => void
+  const gate = new Promise<void>((r) => { release = r })
+  const runPromise = runWithJob({ jobs: registry }, 'iterate-review', 'label', async () => {
+    await gate
+    return { ok: true }
+  })
+  // jobs.start() runs synchronously inside runWithJob, so the hooks (including
+  // the cancel hook and the runWithJob-owned done promise) are captured by now.
   assert.equal(typeof capturedCancel, 'function')
   capturedCancel!()
-  assert.deepEqual(await done, { status: 'killed', detail: 'cancelled' })
+  assert.deepEqual(await internalDone, { status: 'killed', detail: 'cancelled' })
+  release()
+  const { result } = await runPromise
+  assert.deepEqual(result, { ok: true })
 })

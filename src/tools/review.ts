@@ -1,5 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
 import { runWithJob } from '../jobs.ts'
 import {

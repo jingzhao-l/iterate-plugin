@@ -73,6 +73,10 @@ import {
   countSessionImages,
   scanSessionForTranscript,
   normalizeTranscript,
+  filterLiveEntries,
+  filterTimelineEntries,
+  serializeObservatoryExport,
+  latestPhase,
   SEVERITY_LABEL,
   SEVERITY_COLOR,
 } from '../../lib/parse.js'
@@ -370,6 +374,11 @@ const ITERATE_CSS = `
 .iterate-filter-search { padding: 4px 8px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 11px; min-width: 140px; }
 .iterate-filter-search::placeholder { color: var(--dsw-alias-label-secondary); }
 .iterate-filter-count { margin-left: auto; white-space: nowrap; }
+.iterate-filter-chip { padding: 3px 9px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+.iterate-filter-chip:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.iterate-filter-chip[data-active] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); font-weight: 600; }
+.iterate-filter-clear { padding: 3px 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent); color: var(--dsw-alias-state-warn-primary); background: transparent; font-size: 11px; cursor: pointer; }
+.iterate-filter-clear:hover { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); }
 .iterate-batch { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .iterate-batch-label { margin-right: 2px; }
 .iterate-batch-btn { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
@@ -422,6 +431,9 @@ const ITERATE_CSS = `
 /* Interruption / resume + attachment chips (dashboard) */
 .iterate-chip-resume { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent); }
 .iterate-chip-images { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent); }
+/* Live workflow-phase chip (dashboard) */
+.iterate-chip-phase { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-label-primary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 26%, transparent); }
+.iterate-chip-phase[data-live] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
 
 /* Accessibility-switch toggle */
 .iterate-switch { position: relative; width: 42px; height: 24px; border-radius: 999px; padding: 0; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); transition: background-color 160ms ease, border-color 160ms ease; }
@@ -561,6 +573,31 @@ function copyText(text: string): Promise<boolean> {
     )
   }
   return Promise.resolve(false)
+}
+
+/**
+ * Trigger a browser download of `text` as a file. Resolves to whether the
+ * download was actually initiated (fails silently when the DOM/Blob APIs are
+ * unavailable, e.g. in a sandboxed renderer without scripting).
+ */
+function downloadTextFile(filename: string, text: string): boolean {
+  if (typeof document === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined') return false
+  try {
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    // Release the object URL on the next tick so the download has time to start.
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Literal severity keys recognized by SEVERITY_LABEL / SEVERITY_COLOR. */
@@ -742,6 +779,22 @@ function ConvergenceDashboard(props: SlotProps) {
       }, `附件图片 ${String(imageCount)}`)
     : null
 
+  // Live run-state awareness: surface the transcript's current workflow phase
+  // (plan / review / fix / validate / report …) plus run liveness, so a
+  // long-running round never looks stale on the persistent dashboard.
+  const transcript = latestTranscript(session)
+  const phase = transcript ? latestPhase(transcript.phases) : ''
+  const liveChip = transcript && phase
+    ? React.createElement('span', {
+        className: 'iterate-chip-phase',
+        key: 'phase',
+        'data-live': transcript.active === true ? '' : undefined,
+        title: transcript.active === true
+          ? `当前处于「${phase}」阶段（运行中）`
+          : `最近一次执行停留在「${phase}」阶段（已结束）`,
+      }, `${phase} · ${transcript.active === true ? '运行中' : '已结束'}`)
+    : null
+
   const dimNames = Object.keys(dims)
   const dimBadges = dimNames.slice(0, 6).map((dim) =>
     React.createElement(
@@ -815,6 +868,7 @@ function ConvergenceDashboard(props: SlotProps) {
     fixBadge,
     resumeChip,
     imageChip,
+    liveChip,
     React.createElement(TrendChart, { points: trend.points }),
     ...dimBadges,
   )
@@ -1473,6 +1527,8 @@ function ObservatoryPanel(props: SlotProps) {
   const [open, setOpen] = React.useState(false)
   const [tab, setTab] = React.useState('live')
   const [expandedThreads, setExpandedThreads] = React.useState<Set<string>>(new Set())
+  // 'auto' follows the per-thread set; 'all'/'none' force every thread open/closed.
+  const [threadMode, setThreadMode] = React.useState<'auto' | 'all' | 'none'>('auto')
   const [copiedKey, setCopiedKey] = React.useState<string | null>(null)
   // When a clipboard write is blocked (permissions/unsupported), reveal the
   // raw instruction text so the user can copy it manually instead of silently
@@ -1480,7 +1536,13 @@ function ObservatoryPanel(props: SlotProps) {
   const [copyFailText, setCopyFailText] = React.useState<string | null>(null)
   const [nudgeText, setNudgeText] = React.useState('')
   const [timelineType, setTimelineType] = React.useState('')
+  const [timelineRound, setTimelineRound] = React.useState('')
   const [timelineSearch, setTimelineSearch] = React.useState('')
+  const [liveType, setLiveType] = React.useState('')
+  // F3 findings triage-light filter (severity / dimension / search).
+  const [f3Filter, setF3Filter] = React.useState<{ severities: string[]; dimensions: string[]; search: string }>(
+    { severities: [], dimensions: [], search: '' },
+  )
 
   // Single shared "copied" flash timer (reused across all copy buttons).
   const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1497,12 +1559,45 @@ function ObservatoryPanel(props: SlotProps) {
     })
   }
 
+  /** Toggle one thread; a manual toggle exits any forced all/none mode. */
   const toggleThread = (key: string) => {
+    setThreadMode('auto')
     setExpandedThreads((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key); else next.add(key)
       return next
     })
+  }
+
+  /** Export the full observatory snapshot as JSON (download, then copy fallback). */
+  const exportObservatory = () => {
+    const json = serializeObservatoryExport(manifest, manifest.live || [])
+    const filename = `iterate-observatory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+    const flash = () => {
+      setCopiedKey('export')
+      if (copyTimer.current) clearTimeout(copyTimer.current)
+      copyTimer.current = setTimeout(() => setCopiedKey((cur) => (cur === 'export' ? null : cur)), 1600)
+    }
+    if (downloadTextFile(filename, json)) { flash(); return }
+    // Download unavailable: fall back to copying the payload to the clipboard,
+    // and reveal the raw text if even the clipboard write is blocked.
+    copyText(json).then((ok) => {
+      if (!ok) { setCopyFailText(json); return }
+      flash()
+    })
+  }
+
+  /** Force every thread open (or closed) and drop per-thread state. */
+  const setAllThreads = (mode: 'all' | 'none') => {
+    setThreadMode(mode)
+    setExpandedThreads(new Set())
+  }
+
+  /** Whether a thread should render expanded given the forced mode + per-thread set. */
+  const isThreadExpanded = (key: string): boolean => {
+    if (threadMode === 'all') return true
+    if (threadMode === 'none') return false
+    return expandedThreads.has(key)
   }
 
   // No observable transcript yet: show a compact, collapsed header row.
@@ -1538,14 +1633,23 @@ function ObservatoryPanel(props: SlotProps) {
     if (rounds.length === 0) {
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无审查线程')
     }
-    return React.createElement('div', {}, ...rounds.map((r, ri) => {
+    return React.createElement('div', {},
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8, flexWrap: 'wrap' } },
+        React.createElement('b', {}, '审查线程'),
+        React.createElement('button', { className: 'iterate-btn', onClick: () => setAllThreads('all'), title: '展开全部线程' }, '全部展开'),
+        React.createElement('button', { className: 'iterate-btn', onClick: () => setAllThreads('none'), title: '收起全部线程' }, '全部收起'),
+        React.createElement('span', { className: 'iterate-filter-count' },
+          `${threadMode === 'all' ? '全部展开' : threadMode === 'none' ? '全部收起' : '自由切换'} · ${rounds.length} 轮`,
+        ),
+      ),
+      ...rounds.map((r, ri) => {
       const threads = r.threads || []
       const fCount = threads.reduce((sum, t) => sum + (t.findings ? t.findings.length : 0), 0)
       const threadBlocks = threads.length === 0
         ? [React.createElement('div', { key: 'none', className: 'iterate-obs-empty' }, '本轮无线程')]
         : threads.map((t, ti) => {
             const key = `${ri}-${ti}`
-            const expanded = expandedThreads.has(key)
+            const expanded = isThreadExpanded(key)
             const dim = t.dimension || '未命名维度'
             const tFindings = t.findings || []
             const files = t.readFiles || []
@@ -1618,7 +1722,61 @@ function ObservatoryPanel(props: SlotProps) {
     if (findings.length === 0) {
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无发现')
     }
-    return React.createElement('div', {}, ...findings.map((f, i) => {
+    const opts = buildFilterOptions(findings)
+    const { filtered } = filterFindingsWithIndices(findings, f3Filter)
+    const filterActive = f3Filter.severities.length > 0 || f3Filter.dimensions.length > 0 || f3Filter.search.trim() !== ''
+    const toggleSeverity = (sev: string) => {
+      setF3Filter((prev) => ({
+        ...prev,
+        severities: prev.severities.includes(sev)
+          ? prev.severities.filter((s) => s !== sev)
+          : [...prev.severities, sev],
+      }))
+    }
+    const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8, flexWrap: 'wrap' } },
+      React.createElement('b', {}, '发现'),
+      ...opts.severities.map((s) =>
+        React.createElement('button', {
+          key: `sev-${s.value}`,
+          className: 'iterate-filter-chip',
+          'data-active': f3Filter.severities.includes(s.value) ? '' : undefined,
+          title: `${s.value}（${s.count} 项）`,
+          onClick: () => toggleSeverity(s.value),
+        }, `${s.value} ${s.count}`),
+      ),
+      React.createElement('select', {
+        className: 'iterate-filter-select',
+        value: f3Filter.dimensions[0] || '',
+        'aria-label': '按维度筛选',
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
+          const v = e.target.value
+          setF3Filter((prev) => ({ ...prev, dimensions: v ? [v] : [] }))
+        },
+      },
+        React.createElement('option', { value: '' }, '全部维度'),
+        ...opts.dimensions.map((d) =>
+          React.createElement('option', { key: d.value, value: d.value }, `${d.value} (${d.count})`),
+        ),
+      ),
+      React.createElement('input', {
+        className: 'iterate-filter-search',
+        type: 'search',
+        placeholder: '搜索发现…',
+        'aria-label': '搜索发现',
+        value: f3Filter.search,
+        onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
+          setF3Filter((prev) => ({ ...prev, search: e.target.value })),
+      }),
+      filterActive
+        ? React.createElement('button', {
+            className: 'iterate-filter-clear',
+            onClick: () => setF3Filter({ severities: [], dimensions: [], search: '' }),
+            title: '清除全部筛选',
+          }, '清除筛选')
+        : null,
+      React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${findings.length}`),
+    )
+    const findingBlocks = filtered.map((f, i) => {
       const k = `f3-${i}`
       const loc = `${String(f.file || '?')}${typeof f.line === 'number' && f.line > 0 ? `:${f.line}` : ''}`
       const entry = {
@@ -1660,7 +1818,14 @@ function ObservatoryPanel(props: SlotProps) {
           ),
         ),
       )
-    }))
+    })
+    if (filtered.length === 0) {
+      return React.createElement('div', {},
+        filterBar,
+        React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的发现'),
+      )
+    }
+    return React.createElement('div', {}, filterBar, ...findingBlocks)
   }
 
   // ── F4: fixes + rollback ───────────────────────────────────────────────
@@ -1786,23 +1951,29 @@ function ObservatoryPanel(props: SlotProps) {
     )
   }
 
-  // ── F7: decision timeline (type filter + search, newest first) ──────────
+  // ── F7: decision timeline (type/round filter + search, newest first) ────
   const renderTimeline = () => {
     const entries = manifest.timeline || []
     if (entries.length === 0) {
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无时间线条目')
     }
     const types = Array.from(new Set(entries.map((t) => String(t.type || 'unknown')).filter(Boolean))).sort()
-    const q = timelineSearch.trim().toLowerCase()
-    const filtered = entries.filter((t) => {
-      if (timelineType && String(t.type || '') !== timelineType) return false
-      if (!q) return true
-      const hay = [String(t.type || ''), String(t.round ?? ''), JSON.stringify(t.data || {})].join(' ').toLowerCase()
-      return hay.indexOf(q) >= 0
+    const rounds = Array.from(
+      new Set(entries.map((t) => (typeof t.round === 'number' ? String(t.round) : '')).filter(Boolean)),
+    ).sort((a, b) => Number(a) - Number(b))
+    const filtered = filterTimelineEntries(entries, {
+      type: timelineType,
+      round: timelineRound,
+      search: timelineSearch,
     })
-    // Newest first: entries are not guaranteed to be reverse ordered in the
-    // manifest, so sort by timestamp string descending for a stable timeline.
-    const sorted = filtered.slice().sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+    const filterActive = Boolean(timelineType || timelineRound || timelineSearch.trim())
+    const clearTimelineFilter = () => {
+      setTimelineType('')
+      setTimelineRound('')
+      setTimelineSearch('')
+    }
+    // filterTimelineEntries already returns entries newest-first.
+    const sorted = filtered.slice()
     const rows = sorted.map((t, i) => {
       const k = `f7-${i}`
       const dataText = t.data && typeof t.data === 'object' ? JSON.stringify(t.data) : ''
@@ -1816,32 +1987,50 @@ function ObservatoryPanel(props: SlotProps) {
         dataText ? React.createElement('div', { className: 'iterate-obs-code' }, dataText) : null,
       )
     })
-    if (rows.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的时间线条目')
-    }
-    return React.createElement('div', {},
-      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-        React.createElement('select', {
-          className: 'iterate-filter-select',
-          value: timelineType,
-          'aria-label': '按时间线类型筛选',
-          onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setTimelineType(e.target.value),
-        },
-          React.createElement('option', { value: '' }, '全部类型'),
-          ...types.map((t) => React.createElement('option', { key: t, value: t }, t)),
-        ),
-        React.createElement('input', {
-          className: 'iterate-filter-search',
-          type: 'search',
-          placeholder: '搜索时间线…',
-          'aria-label': '搜索时间线',
-          value: timelineSearch,
-          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setTimelineSearch(e.target.value),
-        }),
-        React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${entries.length}`),
+    const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+      React.createElement('b', {}, '时间线'),
+      React.createElement('select', {
+        className: 'iterate-filter-select',
+        value: timelineType,
+        'aria-label': '按时间线类型筛选',
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setTimelineType(e.target.value),
+      },
+        React.createElement('option', { value: '' }, '全部类型'),
+        ...types.map((t) => React.createElement('option', { key: t, value: t }, t)),
       ),
-      ...rows,
+      React.createElement('select', {
+        className: 'iterate-filter-select',
+        value: timelineRound,
+        'aria-label': '按轮次筛选',
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setTimelineRound(e.target.value),
+      },
+        React.createElement('option', { value: '' }, '全部轮次'),
+        ...rounds.map((r) => React.createElement('option', { key: r, value: r }, `Round ${r}`)),
+      ),
+      React.createElement('input', {
+        className: 'iterate-filter-search',
+        type: 'search',
+        placeholder: '搜索时间线…',
+        'aria-label': '搜索时间线',
+        value: timelineSearch,
+        onChange: (e: React.ChangeEvent<HTMLInputElement>) => setTimelineSearch(e.target.value),
+      }),
+      filterActive
+        ? React.createElement('button', {
+            className: 'iterate-filter-clear',
+            onClick: clearTimelineFilter,
+            title: '清除全部筛选',
+          }, '清除')
+        : null,
+      React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${entries.length}`),
     )
+    if (rows.length === 0) {
+      return React.createElement('div', {},
+        filterBar,
+        React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的时间线条目'),
+      )
+    }
+    return React.createElement('div', {}, filterBar, ...rows)
   }
 
   // ── Live: real-time secondary-subagent activity stream (newest first) ─────
@@ -1864,7 +2053,9 @@ function ObservatoryPanel(props: SlotProps) {
       }
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无实时活动')
     }
-    const rows = liveEntries.map((e, i) => {
+    const types = Array.from(new Set(liveEntries.map((e) => String(e.type || 'unknown')).filter(Boolean))).sort()
+    const filtered = filterLiveEntries(liveEntries, liveType)
+    const rows = filtered.map((e, i) => {
       const type = String(e.type || 'unknown')
       const meta = OBS_LIVE_META[type] || { label: String(e.type || '?'), color: OBS_LIVE_FALLBACK_COLOR }
       const tool = String(e.tool || '')
@@ -1879,13 +2070,33 @@ function ObservatoryPanel(props: SlotProps) {
         React.createElement('span', { className: 'iterate-obs-head-meta' }, time),
       )
     })
-    return React.createElement('div', {},
-      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-        React.createElement('b', {}, '实时活动'),
-        React.createElement('span', { className: 'iterate-obs-chip' }, `${liveEntries.length} 项`),
+    const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+      React.createElement('b', {}, '实时活动'),
+      React.createElement('select', {
+        className: 'iterate-filter-select',
+        value: liveType,
+        'aria-label': '按活动类型筛选',
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setLiveType(e.target.value),
+      },
+        React.createElement('option', { value: '' }, '全部活动'),
+        ...types.map((t) => React.createElement('option', { key: t, value: t }, t)),
       ),
-      ...rows,
+      liveType
+        ? React.createElement('button', {
+            className: 'iterate-filter-clear',
+            onClick: () => setLiveType(''),
+            title: '清除类型筛选',
+          }, '清除')
+        : null,
+      React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${liveEntries.length}`),
     )
+    if (rows.length === 0) {
+      return React.createElement('div', {},
+        filterBar,
+        React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的实时活动'),
+      )
+    }
+    return React.createElement('div', {}, filterBar, ...rows)
   }
 
   const renderBody = () => {
@@ -1927,6 +2138,16 @@ function ObservatoryPanel(props: SlotProps) {
                 React.createElement('div', { className: 'iterate-obs-code' }, copyFailText),
               )
             : null,
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8, flexWrap: 'wrap' } },
+            React.createElement('span', { className: 'iterate-obs-head-meta' },
+              `${manifest.mode || 'runtime'} · ${String(manifest.updatedAt || '')}`,
+            ),
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'export' ? '' : undefined,
+              onClick: exportObservatory,
+              title: '将观测台全部数据导出为 JSON（优先下载，失败则复制）',
+            }, copiedKey === 'export' ? '已导出' : '导出 JSON'),
+          ),
           React.createElement('div', { className: 'iterate-obs-tabs' },
             ...OBS_TABS.map((t) =>
               React.createElement('button', {

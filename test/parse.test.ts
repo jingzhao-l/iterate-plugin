@@ -45,6 +45,10 @@ import {
   countSessionImages,
   scanSessionForTranscript,
   normalizeTranscript,
+  filterLiveEntries,
+  filterTimelineEntries,
+  serializeObservatoryExport,
+  latestPhase,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -852,5 +856,150 @@ describe('hashReport (content digest)', () => {
     const other = JSON.parse(JSON.stringify(base))
     other.findings[0].line = 2
     assert.notEqual(hashReport(base), hashReport(other))
+  })
+})
+
+// ─── Runtime-observatory UI pure helpers ─────────────────────────────────────
+
+describe('filterLiveEntries', () => {
+  const entries = [
+    { ts: 't1', type: 'read', tool: 'read_file', target: 'a.ts' },
+    { ts: 't2', type: 'fix', tool: 'iterate_fix', target: 'b.ts' },
+    { ts: 't3', type: 'rollback', tool: 'iterate_rollback', target: 'fix-1' },
+    { ts: 't4', type: 'read', tool: 'read_file', target: 'c.ts' },
+  ]
+  it('returns a copy of all entries when type is empty', () => {
+    const out = filterLiveEntries(entries, '')
+    assert.deepEqual(out, entries)
+    assert.notEqual(out, entries) // copy, not the same reference
+  })
+  it('filters by exact type', () => {
+    const out = filterLiveEntries(entries, 'read')
+    assert.deepEqual(out.map((e) => e.target), ['a.ts', 'c.ts'])
+  })
+  it('returns [] for an unknown type', () => {
+    assert.deepEqual(filterLiveEntries(entries, 'prune'), [])
+  })
+  it('treats non-string / missing type as "match everything"', () => {
+    assert.equal(filterLiveEntries(entries, undefined).length, 4)
+    assert.equal(filterLiveEntries(entries, 5 as unknown as string).length, 4)
+  })
+  it('is defensive for non-array input', () => {
+    assert.deepEqual(filterLiveEntries(null, 'read'), [])
+    assert.deepEqual(filterLiveEntries({}, 'read'), [])
+  })
+  it('preserves the original (newest first) order', () => {
+    const out = filterLiveEntries(entries, '')
+    assert.deepEqual(out.map((e) => e.ts), ['t1', 't2', 't3', 't4'])
+  })
+})
+
+describe('filterTimelineEntries', () => {
+  const entries = [
+    { timestamp: '2026-01-01T00:00:00.000Z', round: 2, type: 'atomic_fix', data: { file: 'b.ts' } },
+    { timestamp: '2026-01-01T00:00:01.000Z', round: 1, type: 'round_start', data: { round: 1 } },
+    { timestamp: '2026-01-01T00:00:02.000Z', round: 1, type: 'review_result', data: { count: 2 } },
+    { timestamp: '2026-01-01T00:00:03.000Z', round: 2, type: 'revert', data: { id: 'f1' } },
+  ]
+  it('returns all entries newest first when no filters are set', () => {
+    const out = filterTimelineEntries(entries, {})
+    assert.deepEqual(out.map((e) => e.timestamp), [
+      '2026-01-01T00:00:03.000Z',
+      '2026-01-01T00:00:02.000Z',
+      '2026-01-01T00:00:01.000Z',
+      '2026-01-01T00:00:00.000Z',
+    ])
+  })
+  it('filters by type', () => {
+    const out = filterTimelineEntries(entries, { type: 'revert' })
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.type, 'revert')
+  })
+  it('filters by round (string-compared)', () => {
+    const out = filterTimelineEntries(entries, { round: '1' })
+    assert.equal(out.length, 2)
+    for (const e of out) assert.equal(String(e.round), '1')
+  })
+  it('filters by case-insensitive search over type/round/data', () => {
+    const out = filterTimelineEntries(entries, { search: 'b.ts' })
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.type, 'atomic_fix')
+    const byType = filterTimelineEntries(entries, { search: 'REVIEW_RESULT' })
+    assert.equal(byType.length, 1)
+    assert.equal(byType[0]!.type, 'review_result')
+  })
+  it('combines type + round + search filters', () => {
+    const out = filterTimelineEntries(entries, { type: 'round_start', round: '1', search: 'round_start' })
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.type, 'round_start')
+  })
+  it('returns [] when no entry matches', () => {
+    assert.deepEqual(filterTimelineEntries(entries, { round: '9' }), [])
+  })
+  it('is defensive for non-array input and drops non-object entries', () => {
+    assert.deepEqual(filterTimelineEntries(null, {}), [])
+    assert.deepEqual(filterTimelineEntries([null, 42, 'x', ...entries], { type: 'revert' }), [
+      entries[3],
+    ])
+  })
+  it('still sorts newest first when timestamps are absent (localeCompare on "")', () => {
+    const out = filterTimelineEntries(
+      [{ type: 'a' }, { type: 'b', timestamp: '2026-01-01T00:00:00.000Z' }],
+      {},
+    )
+    assert.equal(out.length, 2)
+  })
+})
+
+describe('serializeObservatoryExport', () => {
+  it('produces valid JSON with exportedAt, manifest and live', () => {
+    const manifest = { version: 1, goal: 'g', rounds: [] }
+    const live = [{ type: 'read', target: 'a.ts' }]
+    const parsed = JSON.parse(serializeObservatoryExport(manifest, live)) as {
+      exportedAt: string
+      manifest: Record<string, unknown>
+      live: unknown[]
+    }
+    assert.equal(typeof parsed.exportedAt, 'string')
+    assert.deepEqual(parsed.manifest, manifest)
+    assert.deepEqual(parsed.live, live)
+  })
+  it('includes a parseable exportedAt stamp', () => {
+    const before = Date.now()
+    const parsed = JSON.parse(serializeObservatoryExport({}, [])) as { exportedAt: string }
+    const stamp = Date.parse(parsed.exportedAt)
+    assert.ok(Number.isFinite(stamp), 'exportedAt must be a parseable ISO timestamp')
+    assert.ok(stamp >= before - 1000 && stamp <= Date.now() + 1000, 'exportedAt must be "now"')
+  })
+  it('guards a null manifest and non-array live', () => {
+    const parsed = JSON.parse(serializeObservatoryExport(null, 'nope')) as {
+      manifest: unknown
+      live: unknown[]
+    }
+    assert.equal(parsed.manifest, null)
+    assert.deepEqual(parsed.live, [])
+  })
+  it('never throws on a non-serializable manifest (cyclic)', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const text = serializeObservatoryExport(cyclic, [])
+    const parsed = JSON.parse(text) as { manifest: unknown }
+    assert.equal(parsed.manifest, null)
+  })
+})
+
+describe('latestPhase', () => {
+  it('returns the last non-empty phase', () => {
+    assert.equal(latestPhase(['plan', 'review', 'fix']), 'fix')
+    assert.equal(latestPhase(['plan', 'review']), 'review')
+  })
+  it('skips blank / non-string entries', () => {
+    assert.equal(latestPhase(['plan', '', '  review  ']), 'review')
+    assert.equal(latestPhase(['', null, 42]), '')
+  })
+  it('returns "" for an empty or non-array input', () => {
+    assert.equal(latestPhase([]), '')
+    assert.equal(latestPhase(null), '')
+    assert.equal(latestPhase('plan'), '')
   })
 })

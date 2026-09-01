@@ -43,6 +43,51 @@ export interface GitScopeResult {
  * NUL is present (callers that did not pass -z) fall back to newline-split
  * with C-style quote/escape unescaping for core.quotePath output.
  */
+/**
+ * Decode the quoted body of a git core.quotePath output line into the real
+ * filename bytes, then interpret them as UTF-8.
+ *
+ * Single-pass and escape-atomic: each `\` consumes exactly one escape (\" \\
+ * \t \n or a 3-digit octal for a raw byte), so a literal `\\303` in a filename
+ * (escaped backslash + literal "303") is decoded as the byte `\` followed by
+ * ASCII "303" rather than as the single byte 0xC3. Ordinary characters in the
+ * quoted body are ASCII (git always octal-escapes non-ASCII bytes), so they map
+ * 1:1 to bytes.
+ */
+function decodeQuotedPath(content: string): string {
+  const bytes: number[] = []
+  let i = 0
+  while (i < content.length) {
+    const ch = content[i]!
+    if (ch !== '\\') {
+      bytes.push(ch.charCodeAt(0))
+      i++
+      continue
+    }
+    const next = content[i + 1]
+    if (next === '"') { bytes.push(0x22); i += 2 }
+    else if (next === '\\') { bytes.push(0x5c); i += 2 }
+    else if (next === 't') { bytes.push(0x09); i += 2 }
+    else if (next === 'n') { bytes.push(0x0a); i += 2 }
+    else if (next !== undefined && next >= '0' && next <= '7') {
+      const oct = content.slice(i + 1, i + 4)
+      if (oct.length === 3 && /^[0-7]{3}$/.test(oct)) {
+        bytes.push(parseInt(oct, 8))
+        i += 4
+      } else {
+        // Malformed octal — keep the backslash literally.
+        bytes.push(0x5c)
+        i++
+      }
+    } else {
+      // Unknown escape — keep the backslash literally.
+      bytes.push(0x5c)
+      i++
+    }
+  }
+  return Buffer.from(bytes).toString('utf-8')
+}
+
 export function parseChangedFiles(stdout: string): string[] {
   if (stdout.includes('\0')) {
     return stdout.split('\0').map((s) => s.trim()).filter((s) => s.length > 0)
@@ -52,15 +97,11 @@ export function parseChangedFiles(stdout: string): string[] {
     .map((line) => {
       const trimmed = line.trim()
       // git core.quotePath wraps paths with special characters in "..."; the
-      // content uses C-style escapes (\" \\ \t \n and \ooo octal for non-ASCII).
+      // content uses C-style escapes (\" \\ \t \n) and \ooo octal escapes for
+      // non-ASCII bytes (which are raw UTF-8 BYTES, not Latin-1 code points).
       const quoted = trimmed.match(/^"(.*)"$/)
       if (!quoted) return trimmed
-      return quoted[1]!
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\')
-        .replace(/\\t/g, '\t')
-        .replace(/\\n/g, '\n')
-        .replace(/\\([0-7]{3})/g, (_m, oct: string) => String.fromCharCode(parseInt(oct, 8)))
+      return decodeQuotedPath(quoted[1]!)
     })
     .filter((line) => line.length > 0)
 }

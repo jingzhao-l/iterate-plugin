@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import yaml from 'js-yaml'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 import type { KnownIntentional } from '../types.ts'

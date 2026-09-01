@@ -95,7 +95,8 @@ dsh plugin --profile web add iterate-plugin
 
 | UI 组件 | 挂载槽位 | 功能 |
 |---------|---------|------|
-| 收敛看板 `ConvergenceDashboard` | `conversation.input.dock` | 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图，normal 模式另显示修复计数徽章 |
+| 收敛看板 `ConvergenceDashboard` | `conversation.input.dock` | 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图，normal 模式另显示修复计数徽章；并显示运行阶段芯片（当前工作流阶段 + 运行中/已结束） |
+| 运行时观测台 `ObservatoryPanel` | `conversation.input.dock` | 输入框下方七个标签页：实时活动流（支持按活动类型筛选）、审查线程（支持全部展开/全部收起）、收敛趋势、发现定位（支持按严重度/维度/关键词筛选）、修复与回滚、断点恢复、决策时间线（支持按类型/轮次筛选与关键词搜索）；支持一键导出全部观测数据为 JSON（优先下载，失败回退复制） |
 | Findings 分诊面板 `TriagePanel` | `conversation.chat.turnTail` | 逐条 y/n/a 判定，支持筛选、批量（含一键全选所有 findings）、键盘快捷键、localStorage 持久化、复制 YAML/应用指令 |
 | 收敛统计卡片 `StatsCard` | `conversation.chat.turnTail` | 无 findings 时显示收敛统计、历史轮次表、趋势图、完成摘要 |
 | iterate 主题皮肤 | `theme.overrideTokens` | 暖琥珀配色的 13 个 dsw token 覆盖，明暗双模式，可在设置页开关 |

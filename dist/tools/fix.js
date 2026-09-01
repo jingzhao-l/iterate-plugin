@@ -20,6 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeF
 import { join, sep } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { loadEffectiveConfig, resolveProjectRootForExec } from "../config-loader.js";
+import { runWithJob } from "../jobs.js";
 import { countTouchedMethods } from "../method-scope.js";
 import { fixBackupPath, fixRegistryPath, fixesDir } from "../paths.js";
 import { appendDecisionEntry } from "./decision-log.js";
@@ -331,170 +332,173 @@ export function registerFixTool(ctx) {
             ],
         },
         async execute(args, exec) {
-            const resolved = resolveProjectRootForExec(exec, args.path);
-            if (!resolved.ok)
-                return { ok: false, error: resolved.reason };
-            const projectRoot = resolved.root;
-            const { config } = loadEffectiveConfig(projectRoot);
-            const maxLines = config.atomic?.max_lines ?? 20;
-            const maxAdjacentMethods = config.atomic?.max_adjacent_methods ?? 3;
-            const file = typeof args.file === 'string' ? args.file : '';
-            if (!file)
-                return { ok: false, error: 'file is required' };
-            if (typeof args.content !== 'string')
-                return { ok: false, error: 'content must be a string' };
-            if (args.content.length > MAX_FIX_CONTENT_CHARS) {
-                return {
-                    ok: false,
-                    error: `content exceeds the ${MAX_FIX_CONTENT_CHARS}-character limit (got ${args.content.length})`,
-                };
-            }
-            if (typeof args.round !== 'number' || !Number.isInteger(args.round) || args.round < 1) {
-                return { ok: false, error: 'round must be a positive integer' };
-            }
-            const finding = args.finding;
-            if (!finding || typeof finding !== 'object') {
-                return { ok: false, error: 'finding must be an object' };
-            }
-            if (typeof finding.file !== 'string' || finding.file.trim().length === 0) {
-                return { ok: false, error: 'finding.file must be a non-empty string' };
-            }
-            if (typeof finding.dimension !== 'string' || finding.dimension.trim().length === 0) {
-                return { ok: false, error: 'finding.dimension must be a non-empty string' };
-            }
-            // The finding must reference the file being fixed — the fix id and the
-            // rollback/diff target are derived from finding.file, so a mismatch
-            // would back up/restore the WRONG file.
-            if (finding.file !== file) {
-                return { ok: false, error: `finding.file ("${finding.file}") must match the file being fixed ("${file}")` };
-            }
-            // Full finding validation, mirroring the review schema: malformed
-            // findings would produce lossy registry/log entries and a degraded id.
-            const SEVERITY_SET = new Set(['critical', 'high', 'medium', 'low']);
-            if (!SEVERITY_SET.has(finding.severity)) {
-                return { ok: false, error: 'finding.severity must be one of critical/high/medium/low' };
-            }
-            if (typeof finding.summary !== 'string' || finding.summary.trim().length === 0) {
-                return { ok: false, error: 'finding.summary must be a non-empty string' };
-            }
-            if (typeof finding.is_atomic !== 'boolean') {
-                return { ok: false, error: 'finding.is_atomic must be a boolean' };
-            }
-            if (finding.line !== undefined && finding.line !== null &&
-                (typeof finding.line !== 'number' || !Number.isInteger(finding.line) || finding.line < 0)) {
-                return { ok: false, error: 'finding.line must be a non-negative integer (0 = whole-file)' };
-            }
-            const current = readProjectFile(projectRoot, file);
-            if (!current.ok)
-                return { ok: false, error: current.reason };
-            const hunks = diffLines(current.content, args.content);
-            const { added, removed } = countChangedLines(current.content, args.content);
-            if (!args.force && (added > maxLines || removed > maxLines)) {
-                return {
-                    ok: false,
-                    error: `Change to ${file} exceeds the atomic threshold (max_lines=${maxLines}, change is +${added}/-${removed}). ` +
-                        'Either split it into smaller atomic fixes or pass force:true if this is a deliberate architectural change.',
-                };
-            }
-            const touchedMethods = countTouchedMethods(current.content, args.content, hunks);
-            if (!args.force && touchedMethods > maxAdjacentMethods) {
-                return {
-                    ok: false,
-                    error: `Change to ${file} touches ${touchedMethods} adjacent method(s), exceeds atomic.max_adjacent_methods (${maxAdjacentMethods}). ` +
-                        'Split it into smaller atomic fixes or pass force:true if this is a deliberate multi-method change.',
-                };
-            }
-            const id = fixId(finding);
-            const registry = readRegistry(projectRoot);
-            if (findFixRecord(registry, id)) {
-                return { ok: false, error: `finding already fixed this run (id: ${id})`, id };
-            }
-            const target = resolveProjectFile(projectRoot, file);
-            if (!target.ok)
-                return { ok: false, error: target.reason };
-            // Personalization guards (SKILL.md Phase 2): protected_paths veto the
-            // fix outright; forbidden_fixes veto fix approaches appearing in the
-            // new content. Both are security-relevant, so they are enforced here
-            // in the tool, not left to the model.
-            const pers = config.personalization;
-            const protectedPaths = Array.isArray(pers?.protected_paths)
-                ? pers.protected_paths.filter((p) => typeof p === 'string' && p.length > 0)
-                : [];
-            for (const pattern of protectedPaths) {
-                if (globMatch(file, pattern)) {
-                    return { ok: false, error: `skipped: ${file} matches protected path "${pattern}" (personalization.protected_paths forbids modifying it)` };
-                }
-            }
-            const forbiddenFixes = Array.isArray(pers?.forbidden_fixes)
-                ? pers.forbidden_fixes.filter((f) => typeof f === 'string' && f.length > 0)
-                : [];
-            for (const forbidden of forbiddenFixes) {
-                if (args.content.includes(forbidden)) {
-                    return { ok: false, error: `fix uses a forbidden approach: "${forbidden}" appears in the new content (personalization.forbidden_fixes)` };
-                }
-            }
-            const timestamp = new Date().toISOString();
-            const backupPath = fixBackupPath(projectRoot, id, timestamp);
-            try {
-                mkdirSync(fixesDir(projectRoot), { recursive: true });
-                copyFileSync(target.resolved, backupPath);
-            }
-            catch (err) {
-                return { ok: false, error: `failed to create backup: ${String(err)}` };
-            }
-            try {
-                writeFileSync(target.resolved, args.content, 'utf-8');
-            }
-            catch (err) {
-                return { ok: false, error: `failed to write file: ${String(err)}` };
-            }
-            const record = {
-                id,
-                timestamp,
-                round: args.round,
-                finding,
-                backupPath,
-                diffSummary: buildDiffSummary(hunks),
-                linesAdded: added,
-                linesRemoved: removed,
-                success: true,
-            };
-            const nextRegistry = upsertRecord(registry, record);
-            try {
-                writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(nextRegistry, null, 2), 'utf-8');
-            }
-            catch (err) {
-                // Registry write failed → the file was already modified but no record
-                // exists, so a later rollback/diff could never see it and a retry would
-                // back up the already-fixed content as "original". Restore the file
-                // from the backup to leave the tree exactly as it was.
-                try {
-                    copyFileSync(backupPath, target.resolved);
-                }
-                catch (restoreErr) {
+            const { result } = await runWithJob(ctx, 'iterate-fix', `iterate_fix ${typeof args.file === 'string' && args.file ? args.file : '(?)'}`, async () => {
+                const resolved = resolveProjectRootForExec(exec, args.path);
+                if (!resolved.ok)
+                    return { ok: false, error: resolved.reason };
+                const projectRoot = resolved.root;
+                const { config } = loadEffectiveConfig(projectRoot);
+                const maxLines = config.atomic?.max_lines ?? 20;
+                const maxAdjacentMethods = config.atomic?.max_adjacent_methods ?? 3;
+                const file = typeof args.file === 'string' ? args.file : '';
+                if (!file)
+                    return { ok: false, error: 'file is required' };
+                if (typeof args.content !== 'string')
+                    return { ok: false, error: 'content must be a string' };
+                if (args.content.length > MAX_FIX_CONTENT_CHARS) {
                     return {
                         ok: false,
-                        error: `failed to write fix registry: ${String(err)}; additionally failed to restore ${file} from backup: ${String(restoreErr)}`,
+                        error: `content exceeds the ${MAX_FIX_CONTENT_CHARS}-character limit (got ${args.content.length})`,
                     };
                 }
-                return { ok: false, error: `failed to write fix registry: ${String(err)} (file restored from backup)` };
-            }
-            appendDecisionEntry(projectRoot, {
-                timestamp,
-                round: args.round,
-                type: 'atomic_fix',
-                data: { id, file, finding: finding.summary, linesAdded: added, linesRemoved: removed },
+                if (typeof args.round !== 'number' || !Number.isInteger(args.round) || args.round < 1) {
+                    return { ok: false, error: 'round must be a positive integer' };
+                }
+                const finding = args.finding;
+                if (!finding || typeof finding !== 'object') {
+                    return { ok: false, error: 'finding must be an object' };
+                }
+                if (typeof finding.file !== 'string' || finding.file.trim().length === 0) {
+                    return { ok: false, error: 'finding.file must be a non-empty string' };
+                }
+                if (typeof finding.dimension !== 'string' || finding.dimension.trim().length === 0) {
+                    return { ok: false, error: 'finding.dimension must be a non-empty string' };
+                }
+                // The finding must reference the file being fixed — the fix id and the
+                // rollback/diff target are derived from finding.file, so a mismatch
+                // would back up/restore the WRONG file.
+                if (finding.file !== file) {
+                    return { ok: false, error: `finding.file ("${finding.file}") must match the file being fixed ("${file}")` };
+                }
+                // Full finding validation, mirroring the review schema: malformed
+                // findings would produce lossy registry/log entries and a degraded id.
+                const SEVERITY_SET = new Set(['critical', 'high', 'medium', 'low']);
+                if (!SEVERITY_SET.has(finding.severity)) {
+                    return { ok: false, error: 'finding.severity must be one of critical/high/medium/low' };
+                }
+                if (typeof finding.summary !== 'string' || finding.summary.trim().length === 0) {
+                    return { ok: false, error: 'finding.summary must be a non-empty string' };
+                }
+                if (typeof finding.is_atomic !== 'boolean') {
+                    return { ok: false, error: 'finding.is_atomic must be a boolean' };
+                }
+                if (finding.line !== undefined && finding.line !== null &&
+                    (typeof finding.line !== 'number' || !Number.isInteger(finding.line) || finding.line < 0)) {
+                    return { ok: false, error: 'finding.line must be a non-negative integer (0 = whole-file)' };
+                }
+                const current = readProjectFile(projectRoot, file);
+                if (!current.ok)
+                    return { ok: false, error: current.reason };
+                const hunks = diffLines(current.content, args.content);
+                const { added, removed } = countChangedLines(current.content, args.content);
+                if (!args.force && (added > maxLines || removed > maxLines)) {
+                    return {
+                        ok: false,
+                        error: `Change to ${file} exceeds the atomic threshold (max_lines=${maxLines}, change is +${added}/-${removed}). ` +
+                            'Either split it into smaller atomic fixes or pass force:true if this is a deliberate architectural change.',
+                    };
+                }
+                const touchedMethods = countTouchedMethods(current.content, args.content, hunks);
+                if (!args.force && touchedMethods > maxAdjacentMethods) {
+                    return {
+                        ok: false,
+                        error: `Change to ${file} touches ${touchedMethods} adjacent method(s), exceeds atomic.max_adjacent_methods (${maxAdjacentMethods}). ` +
+                            'Split it into smaller atomic fixes or pass force:true if this is a deliberate multi-method change.',
+                    };
+                }
+                const id = fixId(finding);
+                const registry = readRegistry(projectRoot);
+                if (findFixRecord(registry, id)) {
+                    return { ok: false, error: `finding already fixed this run (id: ${id})`, id };
+                }
+                const target = resolveProjectFile(projectRoot, file);
+                if (!target.ok)
+                    return { ok: false, error: target.reason };
+                // Personalization guards (SKILL.md Phase 2): protected_paths veto the
+                // fix outright; forbidden_fixes veto fix approaches appearing in the
+                // new content. Both are security-relevant, so they are enforced here
+                // in the tool, not left to the model.
+                const pers = config.personalization;
+                const protectedPaths = Array.isArray(pers?.protected_paths)
+                    ? pers.protected_paths.filter((p) => typeof p === 'string' && p.length > 0)
+                    : [];
+                for (const pattern of protectedPaths) {
+                    if (globMatch(file, pattern)) {
+                        return { ok: false, error: `skipped: ${file} matches protected path "${pattern}" (personalization.protected_paths forbids modifying it)` };
+                    }
+                }
+                const forbiddenFixes = Array.isArray(pers?.forbidden_fixes)
+                    ? pers.forbidden_fixes.filter((f) => typeof f === 'string' && f.length > 0)
+                    : [];
+                for (const forbidden of forbiddenFixes) {
+                    if (args.content.includes(forbidden)) {
+                        return { ok: false, error: `fix uses a forbidden approach: "${forbidden}" appears in the new content (personalization.forbidden_fixes)` };
+                    }
+                }
+                const timestamp = new Date().toISOString();
+                const backupPath = fixBackupPath(projectRoot, id, timestamp);
+                try {
+                    mkdirSync(fixesDir(projectRoot), { recursive: true });
+                    copyFileSync(target.resolved, backupPath);
+                }
+                catch (err) {
+                    return { ok: false, error: `failed to create backup: ${String(err)}` };
+                }
+                try {
+                    writeFileSync(target.resolved, args.content, 'utf-8');
+                }
+                catch (err) {
+                    return { ok: false, error: `failed to write file: ${String(err)}` };
+                }
+                const record = {
+                    id,
+                    timestamp,
+                    round: args.round,
+                    finding,
+                    backupPath,
+                    diffSummary: buildDiffSummary(hunks),
+                    linesAdded: added,
+                    linesRemoved: removed,
+                    success: true,
+                };
+                const nextRegistry = upsertRecord(registry, record);
+                try {
+                    writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(nextRegistry, null, 2), 'utf-8');
+                }
+                catch (err) {
+                    // Registry write failed → the file was already modified but no record
+                    // exists, so a later rollback/diff could never see it and a retry would
+                    // back up the already-fixed content as "original". Restore the file
+                    // from the backup to leave the tree exactly as it was.
+                    try {
+                        copyFileSync(backupPath, target.resolved);
+                    }
+                    catch (restoreErr) {
+                        return {
+                            ok: false,
+                            error: `failed to write fix registry: ${String(err)}; additionally failed to restore ${file} from backup: ${String(restoreErr)}`,
+                        };
+                    }
+                    return { ok: false, error: `failed to write fix registry: ${String(err)} (file restored from backup)` };
+                }
+                appendDecisionEntry(projectRoot, {
+                    timestamp,
+                    round: args.round,
+                    type: 'atomic_fix',
+                    data: { id, file, finding: finding.summary, linesAdded: added, linesRemoved: removed },
+                });
+                return {
+                    ok: true,
+                    id,
+                    file,
+                    round: args.round,
+                    linesAdded: added,
+                    linesRemoved: removed,
+                    diffSummary: record.diffSummary,
+                    backupPath,
+                };
             });
-            return {
-                ok: true,
-                id,
-                file,
-                round: args.round,
-                linesAdded: added,
-                linesRemoved: removed,
-                diffSummary: record.diffSummary,
-                backupPath,
-            };
+            return result;
         },
     }));
 }

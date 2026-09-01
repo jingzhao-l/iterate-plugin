@@ -95,7 +95,8 @@ Besides 13 pure-function tools, it ships a **build-free Web UI layer** (triage p
 
 | UI component | Mounted slot | Function |
 | --- | --- | --- |
-| ConvergenceDashboard | `conversation.input.dock` | Live round progress bar, severity stats, dimension badges, trend mini-chart above the input; normal mode also shows fix-count badges |
+| ConvergenceDashboard | `conversation.input.dock` | Live round progress bar, severity stats, dimension badges, trend mini-chart above the input; normal mode also shows fix-count badges; plus a live workflow-phase chip (current phase + running/stopped) |
+| ObservatoryPanel | `conversation.input.dock` | Seven-tab runtime observatory below the input: live activity stream (type filter), review threads (expand/collapse all), convergence trend, finding locations (severity/dimension/search filter), fixes + rollback, checkpoint resume, decision timeline (type/round filter + search); one-click export of all observatory data to JSON (download, copy fallback) |
 | TriagePanel | `conversation.chat.turnTail` | Per-finding y/n/a triage, filtering, batch (incl. select-all), keyboard shortcuts, localStorage persistence, copy-YAML / apply-instruction |
 | StatsCard | `conversation.chat.turnTail` | When no findings remain: convergence stats, round history table, trend chart, completion summary |
 | iterate theme skin | `theme.overrideTokens` | Warm-amber 13-dsw-token override, light/dark modes, togglable in settings |
