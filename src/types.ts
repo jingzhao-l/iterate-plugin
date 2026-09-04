@@ -230,6 +230,20 @@ export interface IterationStatus {
   resumeCount: number
   checkpoint: IterationCheckpoint | null
   lastUpdated: string | null
+  /** v3.0: Quality gate snapshot */
+  qualityGate?: QualityGateSnapshot
+  /** v3.0: Experience bank summary */
+  experienceBank?: {
+    totalEntries: number
+    totalHits: number
+  }
+  /** v3.0: Defense events summary */
+  defenseEvents?: {
+    totalEvents: number
+    counts: Record<DefenseEventType, number>
+  }
+  /** v3.0: task_mode from harness */
+  taskMode?: 'code' | 'iterate' | null
 }
 
 /** ─── Runtime observatory (transcript) ───────────────────────────────────── */
@@ -331,4 +345,108 @@ export interface TranscriptManifest {
     active: boolean
     policy: 'ask' | 'deny' | 'allow'
   }
+  /** v3.0: task_mode indicator from harness status */
+  taskMode?: 'code' | 'iterate' | null
+}
+
+// ─── v3.0: Quality Gate ──────────────────────────────────────────────────────
+
+/** A single dimension's quality gate status. */
+export interface QualityGateDimension {
+  dimension: string
+  convergenceRate: number
+  findingsCount: number
+  fixedCount: number
+  /** 0-100 score based on findings severity and count */
+  score: number
+  status: 'pass' | 'warn' | 'fail'
+}
+
+/** Quality gate snapshot for the current iteration. */
+export interface QualityGateSnapshot {
+  timestamp: string
+  overallStatus: 'pass' | 'fail' | 'pending'
+  overallScore: number
+  dimensions: QualityGateDimension[]
+  verificationPassRate: number
+  totalChecks: number
+  passedChecks: number
+  failedChecks: number
+  /** Reason for overall FAIL status, if applicable */
+  failReason?: string
+  /** Total findings across all dimensions */
+  totalFindings: number
+  /** Findings by severity */
+  criticalCount: number
+  highCount: number
+  mediumCount: number
+  lowCount: number
+}
+
+// ─── v3.0: Experience Bank ───────────────────────────────────────────────────
+
+/** A single experience entry in the experience bank. */
+export interface ExperienceEntry {
+  id: string
+  timestamp: string
+  dimension: string
+  pattern: string
+  description: string
+  /** The fix that was applied and verified */
+  verifiedFix: string
+  /** Files involved in this experience */
+  files: string[]
+  /** How many times this pattern has been encountered */
+  hitCount: number
+  /** Last time this experience was hit */
+  lastHitAt?: string
+  /** Tags for categorization */
+  tags: string[]
+  /** Related finding summary */
+  findingSummary: string
+  /** Severity of the original finding */
+  severity: 'critical' | 'high' | 'medium' | 'low'
+}
+
+/** Experience bank state for the project. */
+export interface ExperienceBank {
+  entries: ExperienceEntry[]
+  lastUpdated: string
+  totalHits: number
+}
+
+// ─── v3.0: Defense Events ────────────────────────────────────────────────────
+
+/** Defense event types */
+export type DefenseEventType =
+  | 'precondition_failed'
+  | 'rollback'
+  | 'invariant_violated'
+  | 'assumption_falsified'
+
+/** A single defense event recorded during iteration. */
+export interface DefenseEvent {
+  id: string
+  timestamp: string
+  round: number
+  type: DefenseEventType
+  /** What was being checked */
+  description: string
+  /** The defense that was triggered */
+  defense: string
+  /** Outcome: what was protected against */
+  outcome: string
+  /** Optional file/location context */
+  file?: string
+  line?: number
+  /** Severity of the event */
+  severity: 'critical' | 'high' | 'medium' | 'low'
+}
+
+/** Defense events stream for the current iteration. */
+export interface DefenseEventStream {
+  events: DefenseEvent[]
+  lastUpdated: string
+  /** Summary counts by type */
+  counts: Record<DefenseEventType, number>
 }

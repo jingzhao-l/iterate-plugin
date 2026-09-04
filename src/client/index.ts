@@ -435,6 +435,43 @@ const ITERATE_CSS = `
 .iterate-chip-phase { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--dsw-alias-label-primary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 26%, transparent); }
 .iterate-chip-phase[data-live] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
 
+/* v3.0: task_mode indicator chip */
+.iterate-chip-taskmode { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.iterate-chip-taskmode[data-mode="code"] { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent); }
+.iterate-chip-taskmode[data-mode="iterate"] { color: #B45309; background: color-mix(in srgb, #B45309 12%, transparent); border: 1px solid color-mix(in srgb, #B45309 28%, transparent); }
+
+/* v3.0: Quality gate status */
+.iterate-gate { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.iterate-gate[data-status="pass"] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
+.iterate-gate[data-status="fail"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 28%, transparent); }
+.iterate-gate[data-status="pending"] { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 28%, transparent); }
+
+/* v3.0: Experience bank hit highlight */
+.iterate-exp-hit { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); font-size: 11px; color: var(--dsw-alias-state-success-primary); }
+.iterate-exp-hit b { font-weight: 600; }
+
+/* v3.0: Defense event type badges */
+.iterate-defense-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.iterate-defense-badge[data-type="precondition_failed"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 28%, transparent); }
+.iterate-defense-badge[data-type="rollback"] { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent); }
+.iterate-defense-badge[data-type="invariant_violated"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 28%, transparent); }
+.iterate-defense-badge[data-type="assumption_falsified"] { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent); }
+
+/* v3.0: Command buttons */
+.iterate-cmd { padding: 4px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 11px; cursor: pointer; font-weight: 500; }
+.iterate-cmd:hover { background: var(--dsw-alias-bg-layer-2); }
+.iterate-cmd[data-primary] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.iterate-cmd[data-danger] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent); color: var(--dsw-alias-state-error-primary); }
+.iterate-cmd:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* v3.0: Dimension score bar */
+.iterate-dim-score { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.iterate-dim-score-bar { width: 60px; height: 6px; border-radius: 3px; background: var(--dsw-alias-bg-layer-2); overflow: hidden; }
+.iterate-dim-score-fill { height: 100%; border-radius: 3px; transition: width 300ms ease; }
+.iterate-dim-score-fill[data-status="pass"] { background: var(--dsw-alias-state-success-primary); }
+.iterate-dim-score-fill[data-status="warn"] { background: var(--dsw-alias-state-warn-primary); }
+.iterate-dim-score-fill[data-status="fail"] { background: var(--dsw-alias-state-error-primary); }
+
 /* Accessibility-switch toggle */
 .iterate-switch { position: relative; width: 42px; height: 24px; border-radius: 999px; padding: 0; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); transition: background-color 160ms ease, border-color 160ms ease; }
 .iterate-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
@@ -795,6 +832,19 @@ function ConvergenceDashboard(props: SlotProps) {
       }, `${phase} · ${transcript.active === true ? '运行中' : '已结束'}`)
     : null
 
+  // v3.0: task_mode indicator (code/iterate)
+  // task_mode is read from the session transcript if available
+  const taskModeTranscript = latestTranscript(session)
+  const taskMode = (taskModeTranscript as unknown as { taskMode?: string })?.taskMode
+  const taskModeChip = taskMode
+    ? React.createElement('span', {
+        className: 'iterate-chip-taskmode',
+        key: 'taskmode',
+        'data-mode': taskMode,
+        title: taskMode === 'code' ? '代码模式：直接修改文件' : '迭代模式：审查-修复循环',
+      }, taskMode === 'code' ? '● code' : '● iterate')
+    : null
+
   const dimNames = Object.keys(dims)
   const dimBadges = dimNames.slice(0, 6).map((dim) =>
     React.createElement(
@@ -869,6 +919,7 @@ function ConvergenceDashboard(props: SlotProps) {
     resumeChip,
     imageChip,
     liveChip,
+    taskModeChip,
     React.createElement(TrendChart, { points: trend.points }),
     ...dimBadges,
   )
@@ -974,6 +1025,8 @@ function TriagePanel(props: SlotProps) {
   const [filter, setFilter] = React.useState<{ severities: string[]; dimensions: string[]; search: string }>({ severities: [], dimensions: [], search: '' })
   const [selected, setSelected] = React.useState<number | null>(null)
   const [selectAll, setSelectAll] = React.useState(false)
+  // v3.0: Command mode for native action buttons
+  const [cmdCopied, setCmdCopied] = React.useState<string | null>(null)
 
   /** Persist the verdicts to localStorage whenever they change. Kept OUT of
    *  the state updater (updaters must stay pure — React may double-invoke them
@@ -1058,6 +1111,37 @@ function TriagePanel(props: SlotProps) {
   const ignored = collectIgnoredEntries(verdicts, findings)
   const ignoredCount = ignored.length
   const counts = countVerdicts(verdicts)
+
+  // v3.0: Command handlers for native action buttons
+  const doApproveArchitecturalFix = () => {
+    const cmd = '请调用 `iterate_fix` 批准架构修复（设置 is_architectural: true）'
+    copyText(cmd).then((ok) => {
+      if (ok) {
+        setCmdCopied('approve-arch')
+        setTimeout(() => setCmdCopied(null), 1600)
+      }
+    })
+  }
+
+  const doTriggerNewRound = () => {
+    const cmd = '请继续执行下一轮迭代审查'
+    copyText(cmd).then((ok) => {
+      if (ok) {
+        setCmdCopied('new-round')
+        setTimeout(() => setCmdCopied(null), 1600)
+      }
+    })
+  }
+
+  const doRollbackToCheckpoint = () => {
+    const cmd = '请调用 `iterate_checkpoint` 回滚到上一个检查点'
+    copyText(cmd).then((ok) => {
+      if (ok) {
+        setCmdCopied('rollback')
+        setTimeout(() => setCmdCopied(null), 1600)
+      }
+    })
+  }
 
   const doCopyYaml = () => {
     const yaml = toKnownIntentionalYaml(ignored)
@@ -1189,6 +1273,27 @@ function TriagePanel(props: SlotProps) {
           className: 'iterate-btn', onClick: doBuildInstruction, disabled: ignoredCount === 0,
           title: ignoredCount === 0 ? '当前没有标记为「已知有意」的 finding' : '生成 iterate_triage 应用指令',
         }, '生成应用指令'),
+      ),
+    ),
+    // v3.0: Command buttons for native actions (§8)
+    React.createElement('div', { className: 'iterate-triage-foot', style: { borderTop: '1px solid var(--dsw-alias-border-l1)' } },
+      React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' } }, '指挥操作'),
+      React.createElement('span', { style: { display: 'flex', gap: 6 } },
+        React.createElement('button', {
+          className: 'iterate-cmd', 'data-primary': '', 'data-copied': cmdCopied === 'approve-arch' ? '' : undefined,
+          onClick: doApproveArchitecturalFix,
+          title: '批准架构修复（复制指令文本）',
+        }, cmdCopied === 'approve-arch' ? '已复制' : '批准架构修复'),
+        React.createElement('button', {
+          className: 'iterate-cmd', 'data-copied': cmdCopied === 'new-round' ? '' : undefined,
+          onClick: doTriggerNewRound,
+          title: '触发新一轮迭代审查',
+        }, cmdCopied === 'new-round' ? '已复制' : '触发新一轮'),
+        React.createElement('button', {
+          className: 'iterate-cmd', 'data-danger': '', 'data-copied': cmdCopied === 'rollback' ? '' : undefined,
+          onClick: doRollbackToCheckpoint,
+          title: '回滚到上一个检查点',
+        }, cmdCopied === 'rollback' ? '已复制' : '回滚检查点'),
       ),
     ),
     payload
@@ -1452,6 +1557,10 @@ const OBS_TABS = [
   { key: 'f5', label: '断点恢复' },
   { key: 'f6', label: '运行控制台' },
   { key: 'f7', label: '决策时间线' },
+  // v3.0: Quality Command Center tabs
+  { key: 'f8', label: '质量门禁' },
+  { key: 'f9', label: '经验银行' },
+  { key: 'f10', label: '防御事件' },
 ] as const
 
 /** Live subagent activity badges: type → Chinese label + dsw token color accent. */
@@ -1543,6 +1652,11 @@ function ObservatoryPanel(props: SlotProps) {
   const [f3Filter, setF3Filter] = React.useState<{ severities: string[]; dimensions: string[]; search: string }>(
     { severities: [], dimensions: [], search: '' },
   )
+  // v3.0: Experience bank search state
+  const [expSearch, setExpSearch] = React.useState('')
+  const [expResults, setExpResults] = React.useState<unknown[]>([])
+  // v3.0: Defense events filter
+  const [defenseFilter, setDefenseFilter] = React.useState('')
 
   // Single shared "copied" flash timer (reused across all copy buttons).
   const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1571,6 +1685,7 @@ function ObservatoryPanel(props: SlotProps) {
 
   /** Export the full observatory snapshot as JSON (download, then copy fallback). */
   const exportObservatory = () => {
+    if (!manifest) return
     const json = serializeObservatoryExport(manifest, manifest.live || [])
     const filename = `iterate-observatory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
     const flash = () => {
@@ -1722,8 +1837,8 @@ function ObservatoryPanel(props: SlotProps) {
     if (findings.length === 0) {
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无发现')
     }
-    const opts = buildFilterOptions(findings)
-    const { filtered } = filterFindingsWithIndices(findings, f3Filter)
+    const opts = buildFilterOptions(findings as unknown as Record<string, unknown>[])
+    const { filtered } = filterFindingsWithIndices(findings as unknown as Record<string, unknown>[], f3Filter)
     const filterActive = f3Filter.severities.length > 0 || f3Filter.dimensions.length > 0 || f3Filter.search.trim() !== ''
     const toggleSeverity = (sev: string) => {
       setF3Filter((prev) => ({
@@ -1778,31 +1893,32 @@ function ObservatoryPanel(props: SlotProps) {
     )
     const findingBlocks = filtered.map((f, i) => {
       const k = `f3-${i}`
-      const loc = `${String(f.file || '?')}${typeof f.line === 'number' && f.line > 0 ? `:${f.line}` : ''}`
+      const finding = f as unknown as ObsFinding
+      const loc = `${String(finding.file || '?')}${typeof finding.line === 'number' && finding.line > 0 ? `:${finding.line}` : ''}`
       const entry = {
-        file: String(f.file || ''),
-        ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
-        dimension: String(f.dimension || ''),
-        reason: String(f.summary || ''),
+        file: String(finding.file || ''),
+        ...(typeof finding.line === 'number' && finding.line > 0 ? { line: finding.line } : {}),
+        dimension: String(finding.dimension || ''),
+        reason: String(finding.summary || ''),
       }
       const knownInstruction = buildApplyInstruction([entry])
-      const fixInstruction = buildObsFixInstruction(f)
+      const fixInstruction = buildObsFixInstruction(finding)
       return React.createElement('div', { key: k, className: 'iterate-obs-block' },
         React.createElement('div', { className: 'iterate-obs-block-head' },
-          React.createElement('span', { className: 'iterate-sev-dot', style: { background: severityColor(f.severity) } }),
-          React.createElement('span', {}, severityLabel(f.severity)),
+          React.createElement('span', { className: 'iterate-sev-dot', style: { background: severityColor(finding.severity) } }),
+          React.createElement('span', {}, severityLabel(finding.severity)),
           React.createElement('span', { className: 'iterate-obs-file' }, loc),
-          React.createElement('span', {}, String(f.dimension || '')),
-          f.acknowledged === true
+          React.createElement('span', {}, String(finding.dimension || '')),
+          finding.acknowledged === true
             ? React.createElement('span', { className: 'iterate-obs-chip' }, '已确认')
             : null,
         ),
         React.createElement('div', { className: 'iterate-obs-block-body' },
-          React.createElement('div', { className: 'iterate-obs-msg' }, String(f.summary || '')),
+          React.createElement('div', { className: 'iterate-obs-msg' }, String(finding.summary || '')),
           React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
             React.createElement('button', {
               className: 'iterate-btn', 'data-copied': copiedKey === `${k}-fix` ? '' : undefined,
-              onClick: () => copyInstruction(`${k}-fix`, String(f.suggested_fix || '')),
+              onClick: () => copyInstruction(`${k}-fix`, String(finding.suggested_fix || '')),
               title: '复制该 finding 的建议修复文本',
             }, copiedKey === `${k}-fix` ? '已复制' : '复制 suggested_fix'),
             React.createElement('button', {
@@ -2033,6 +2149,152 @@ function ObservatoryPanel(props: SlotProps) {
     return React.createElement('div', {}, filterBar, ...rows)
   }
 
+  // ── F8: Quality Gate ──────────────────────────────────────────────────────
+  // v3.0: Quality command center - shows dimension convergence, verification pass rate, and overall PASS/FAIL
+  const renderQualityGate = () => {
+    // Quality gate data would come from manifest or be computed on-the-fly
+    // For now, show a placeholder with instructions
+    const qualityGateInstruction = '请调用 `iterate_quality_gate` 查询当前质量门禁状态'
+    return React.createElement('div', {},
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('b', {}, '质量门禁'),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'qgate' ? '' : undefined,
+          onClick: () => copyInstruction('qgate', qualityGateInstruction),
+          title: '复制 iterate_quality_gate 查询指令',
+        }, copiedKey === 'qgate' ? '已复制' : '查询门禁'),
+      ),
+      React.createElement('div', { className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('span', {}, '质量门禁视图'),
+          React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' },
+          React.createElement('div', { className: 'iterate-obs-msg' }, '质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。'),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'qgate-instr' ? '' : undefined,
+              onClick: () => copyInstruction('qgate-instr', qualityGateInstruction),
+              title: '复制查询指令',
+            }, copiedKey === 'qgate-instr' ? '已复制' : '复制查询指令'),
+          ),
+        ),
+      ),
+    )
+  }
+
+  // ── F9: Experience Bank ────────────────────────────────────────────────────
+  // v3.0: Browse/search historical fixes and patterns
+  const renderExperienceBank = () => {
+    const expInstruction = expSearch
+      ? `请调用 \`iterate_experience\` 搜索经验：\n\n\`\`\`json\n${JSON.stringify({ operation: 'search', query: expSearch }, null, 2)}\n\`\`\``
+      : '请调用 `iterate_experience` 列出所有经验'
+
+    const resultRows = expResults.map((entry: unknown, i: number) => {
+      const e = entry as { id?: string; pattern?: string; description?: string; hitCount?: number; dimension?: string }
+      return React.createElement('div', { key: `exp-${i}`, className: 'iterate-obs-row' },
+        React.createElement('span', { className: 'iterate-obs-chip' }, String(e.dimension || '')),
+        React.createElement('span', { className: 'iterate-obs-msg' }, String(e.pattern || '')),
+        React.createElement('span', { className: 'iterate-exp-hit' }, `命中 ${e.hitCount ?? 0} 次`),
+      )
+    })
+
+    return React.createElement('div', {},
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('b', {}, '经验银行'),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'exp-list' ? '' : undefined,
+          onClick: () => copyInstruction('exp-list', '请调用 `iterate_experience` 列出所有经验'),
+          title: '复制列出经验指令',
+        }, copiedKey === 'exp-list' ? '已复制' : '列出经验'),
+      ),
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('input', {
+          className: 'iterate-filter-search',
+          type: 'search',
+          placeholder: '搜索经验模式…',
+          'aria-label': '搜索经验',
+          value: expSearch,
+          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setExpSearch(e.target.value),
+        }),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-copied': copiedKey === 'exp-search' ? '' : undefined,
+          disabled: !expSearch,
+          onClick: () => copyInstruction('exp-search', expInstruction),
+          title: '复制搜索指令',
+        }, copiedKey === 'exp-search' ? '已复制' : '搜索'),
+      ),
+      resultRows.length > 0
+        ? React.createElement('div', {}, ...resultRows)
+        : React.createElement('div', { className: 'iterate-obs-empty' }, '输入关键词搜索历史经验，或点击「列出经验」查看全部'),
+    )
+  }
+
+  // ── F10: Defense Events ────────────────────────────────────────────────────
+  // v3.0: Shows precondition failures, rollbacks, invariant violations, assumption falsifications
+  const renderDefenseEvents = () => {
+    const defenseInstruction = defenseFilter
+      ? `请调用 \`iterate_defense_events\` 查询防御事件：\n\n\`\`\`json\n${JSON.stringify({ operation: 'list', type: defenseFilter || undefined }, null, 2)}\n\`\`\``
+      : '请调用 `iterate_defense_events` 列出所有防御事件'
+
+    const typeOptions = [
+      { value: '', label: '全部类型' },
+      { value: 'precondition_failed', label: '前置校验失败' },
+      { value: 'rollback', label: '回滚' },
+      { value: 'invariant_violated', label: '不变量违反' },
+      { value: 'assumption_falsified', label: '假设被证伪' },
+    ]
+
+    return React.createElement('div', {},
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('b', {}, '防御事件'),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'defense-list' ? '' : undefined,
+          onClick: () => copyInstruction('defense-list', '请调用 `iterate_defense_events` 列出所有防御事件'),
+          title: '复制列出防御事件指令',
+        }, copiedKey === 'defense-list' ? '已复制' : '列出事件'),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-copied': copiedKey === 'defense-counts' ? '' : undefined,
+          onClick: () => copyInstruction('defense-counts', '请调用 `iterate_defense_events` 查询事件统计'),
+          title: '复制统计指令',
+        }, copiedKey === 'defense-counts' ? '已复制' : '统计'),
+      ),
+      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+        React.createElement('select', {
+          className: 'iterate-filter-select',
+          value: defenseFilter,
+          'aria-label': '按事件类型筛选',
+          onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDefenseFilter(e.target.value),
+        },
+          ...typeOptions.map((opt) => React.createElement('option', { key: opt.value, value: opt.value }, opt.label)),
+        ),
+        defenseFilter
+          ? React.createElement('button', {
+              className: 'iterate-filter-clear',
+              onClick: () => setDefenseFilter(''),
+              title: '清除类型筛选',
+            }, '清除')
+          : null,
+      ),
+      React.createElement('div', { className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('span', {}, '防御事件流'),
+          React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' },
+          React.createElement('div', { className: 'iterate-obs-msg' }, '防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。'),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'defense-instr' ? '' : undefined,
+              onClick: () => copyInstruction('defense-instr', defenseInstruction),
+              title: '复制查询指令',
+            }, copiedKey === 'defense-instr' ? '已复制' : '复制查询指令'),
+          ),
+        ),
+      ),
+    )
+  }
+
   // ── Live: real-time secondary-subagent activity stream (newest first) ─────
   const renderLive = () => {
     const liveEntries = manifest.live || []
@@ -2060,7 +2322,7 @@ function ObservatoryPanel(props: SlotProps) {
       const meta = OBS_LIVE_META[type] || { label: String(e.type || '?'), color: OBS_LIVE_FALLBACK_COLOR }
       const tool = String(e.tool || '')
       const target = String(e.target || '')
-      const time = formatObsLiveTime(e.ts)
+      const time = formatObsLiveTime(String(e.ts || ''))
       return React.createElement('div', { key: `live-${i}`, className: 'iterate-obs-row' },
         React.createElement('span', { className: 'iterate-obs-livebadge', style: { color: meta.color } }, meta.label),
         tool
@@ -2109,6 +2371,10 @@ function ObservatoryPanel(props: SlotProps) {
       case 'f5': return renderCheckpoint()
       case 'f6': return renderConsole()
       case 'f7': return renderTimeline()
+      // v3.0: Quality Command Center tabs
+      case 'f8': return renderQualityGate()
+      case 'f9': return renderExperienceBank()
+      case 'f10': return renderDefenseEvents()
       default: return null
     }
   }
