@@ -1,8 +1,7 @@
 /**
  * src/tools/experience-bank.ts — experience bank query tool.
  *
- *   iterate_experience — browse, search, and query project experience entries.
- *                        Read-only; used to find historical fixes and patterns.
+ *   iterate_experience — browse, search, query, and add project experience entries.
  *
  * Experiences are accumulated across sessions and stored in .iterate/experience.json.
  */
@@ -10,7 +9,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
-import { readExperienceBank, searchExperienceEntries } from './experience-store.ts'
+import { readExperienceBank, writeExperienceBank, searchExperienceEntries, upsertExperience } from './experience-store.ts'
+import type { ExperienceEntryInput } from './experience-store.ts'
 import type { ExperienceEntry } from '../types.ts'
 
 const DEFAULT_LIMIT = 50
@@ -24,6 +24,46 @@ function clampLimit(limit: number | undefined): number {
   return Math.min(limit, MAX_LIMIT)
 }
 
+/** Validate a caller-supplied experience entry object. Returns error strings. */
+function validateExperienceInput(raw: unknown): string[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return ['entry must be a JSON object']
+  }
+  const e = raw as Record<string, unknown>
+  const errors: string[] = []
+  if (typeof e.pattern !== 'string' || !e.pattern.trim()) errors.push('.pattern is required')
+  if (typeof e.dimension !== 'string' || !e.dimension.trim()) errors.push('.dimension is required')
+  if (typeof e.description !== 'string' || !e.description.trim()) errors.push('.description is required')
+  if (typeof e.verifiedFix !== 'string' || !e.verifiedFix.trim()) errors.push('.verifiedFix is required')
+  if (typeof e.findingSummary !== 'string' || !e.findingSummary.trim()) errors.push('.findingSummary is required')
+  const severity = e.severity
+  if (severity !== 'critical' && severity !== 'high' && severity !== 'medium' && severity !== 'low') {
+    errors.push('.severity must be one of critical, high, medium, low')
+  }
+  if (!Array.isArray(e.files) || !e.files.every((f) => typeof f === 'string' && f.length > 0)) {
+    errors.push('.files must be an array of non-empty strings')
+  }
+  if (!Array.isArray(e.tags) || !e.tags.every((t) => typeof t === 'string')) {
+    errors.push('.tags must be an array of strings')
+  }
+  return errors
+}
+
+/** Normalize a validated raw entry into the store input shape. */
+function normalizeExperienceInput(raw: Record<string, unknown>): ExperienceEntryInput {
+  return {
+    ...(typeof raw.id === 'string' && raw.id.length > 0 ? { id: raw.id } : {}),
+    pattern: raw.pattern as string,
+    description: raw.description as string,
+    verifiedFix: raw.verifiedFix as string,
+    dimension: raw.dimension as string,
+    findingSummary: raw.findingSummary as string,
+    severity: raw.severity as ExperienceEntryInput['severity'],
+    files: raw.files as string[],
+    tags: raw.tags as string[],
+  }
+}
+
 /**
  * Register the `iterate_experience` tool.
  * Queries the experience bank for historical fixes and patterns.
@@ -33,13 +73,17 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
     defineTool({
       name: 'iterate_experience',
       description:
-        'Query the experience bank: browse/search historical fixes and patterns. ' +
-        'Returns matching entries with hit counts, verified fixes, and related context. ' +
-        'Read-only — use it to find similar issues from the past.',
+        'Query or extend the experience bank: browse/search historical fixes and patterns, ' +
+        'or record a new verified fix (operation:"add"). ' +
+        'List/search/get return matching entries with hit counts, verified fixes, and related context. ' +
+        '"add" upserts an experience entry into .iterate/experience.json — a repeat of the same ' +
+        'pattern+dimension increments its hit count instead of duplicating it. ' +
+        'Use it to remember fixes that worked so future rounds apply them first.',
       parameters: {
         operation: {
           type: 'string',
-          description: 'Operation: list (browse all), search (by query), get (by id). Default: list.',
+          description: 'Operation: list (browse all), search (by query), get (by id), add (add a new experience). Default: list.',
+          enum: ['list', 'search', 'get', 'add'],
         },
         query: {
           type: 'string',
@@ -56,7 +100,13 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
         },
         id: {
           type: 'string',
-          description: 'Experience ID (for get operation).',
+          description: 'Experience ID (for get operation, or to update a specific entry via add).',
+        },
+        entry: {
+          type: 'json',
+          description:
+            'Experience entry object (required for add). Fields: id (optional), pattern, dimension, description, ' +
+            'verifiedFix, findingSummary, severity (critical|high|medium|low), files (string[]), tags (string[]).',
         },
         limit: {
           type: 'integer',
@@ -80,11 +130,27 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
             entries: { type: 'json' },
             entry: { type: 'json' },
             totalHits: { type: 'integer' },
+            added: { type: 'boolean' },
+            errors: { type: 'json' },
             error: { type: 'string' },
           },
         },
         render: (_args, value) => {
           if (!value.ok) return [{ type: 'text', text: `experience query failed: ${value.error}` }]
+          if (value.operation === 'add' && value.entry) {
+            const entry = value.entry as unknown as ExperienceEntry
+            return [{ type: 'text', text: [
+              value.added
+                ? `Recorded new experience: ${entry.id}`
+                : `Experience already known (hit ${entry.hitCount}): ${entry.id}`,
+              `Pattern: ${entry.pattern}`,
+              `Dimension: ${entry.dimension}`,
+              `Description: ${entry.description}`,
+              `Fix: ${entry.verifiedFix}`,
+              `Files: ${entry.files.join(', ')}`,
+              `Tags: ${entry.tags.join(', ')}`,
+            ].join('\n') }]
+          }
           if (value.operation === 'get' && value.entry) {
             const entry = value.entry as unknown as ExperienceEntry
             return [{ type: 'text', text: [
@@ -114,6 +180,33 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
 
         const operation = typeof args.operation === 'string' ? args.operation : 'list'
         const limit = clampLimit(args.limit as number | undefined)
+
+        if (operation === 'add') {
+          const raw = args.entry
+          const errors = validateExperienceInput(raw)
+          if (errors.length > 0) {
+            return {
+              ok: false,
+              kind: 'experience',
+              operation: 'add',
+              errors: errors as unknown as JsonValue,
+              error: `Invalid experience entry: ${errors.join('; ')}`,
+            }
+          }
+          const bank = readExperienceBank(projectRoot)
+          const { bank: next, added, entryId } = upsertExperience(bank, normalizeExperienceInput(raw as Record<string, unknown>))
+          writeExperienceBank(projectRoot, next)
+          const entry = next.entries.find((e) => e.id === entryId)
+          return {
+            ok: true,
+            kind: 'experience',
+            operation: 'add',
+            added,
+            count: next.entries.length,
+            entry: entry as unknown as JsonValue,
+            totalHits: next.totalHits,
+          }
+        }
 
         const bank = readExperienceBank(projectRoot)
 

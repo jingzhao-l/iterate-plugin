@@ -92,37 +92,69 @@ export function searchExperienceEntries(
   })
 }
 
-/** Add or update an experience entry. */
+/** Fields the caller may supply when adding/updating an experience entry. */
+export type ExperienceEntryInput = Omit<
+  ExperienceEntry,
+  'id' | 'timestamp' | 'hitCount' | 'lastHitAt'
+> & { id?: string }
+
+/**
+ * Add or update an experience entry.
+ *
+ * An entry with an `id` that already exists, OR a new entry whose
+ * `pattern`+`dimension` pair matches an existing entry, is treated as a HIT:
+ * the matching entry's hitCount is incremented (lastHitAt refreshed) so
+ * repeated encounters of the same pattern do not create duplicates. Otherwise
+ * a fresh entry is appended with hitCount 1. Never mutates the input bank.
+ *
+ * Returns the resulting bank plus whether a NEW entry was created and the id
+ * of the affected entry.
+ */
 export function upsertExperience(
   bank: ExperienceBank,
-  entry: Omit<ExperienceEntry, 'id' | 'hitCount' | 'lastHitAt'> & { id?: string }
-): ExperienceBank {
-  const id = entry.id || `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const existing = bank.entries.find((e) => e.id === id)
+  entry: ExperienceEntryInput
+): { bank: ExperienceBank; added: boolean; entryId: string } {
+  const lastUpdated = new Date().toISOString()
+  const existing = entry.id
+    ? bank.entries.find((e) => e.id === entry.id)
+    : bank.entries.find((e) => e.pattern === entry.pattern && e.dimension === entry.dimension)
 
   if (existing) {
-    // Update existing entry
-    existing.hitCount++
-    existing.lastHitAt = new Date().toISOString()
+    const updated: ExperienceEntry = {
+      ...existing,
+      hitCount: (existing.hitCount ?? 0) + 1,
+      lastHitAt: lastUpdated,
+    }
     return {
-      ...bank,
-      lastUpdated: new Date().toISOString(),
-      totalHits: bank.totalHits + 1,
+      bank: {
+        ...bank,
+        entries: bank.entries.map((e) => (e.id === existing.id ? updated : e)),
+        lastUpdated,
+        totalHits: (bank.totalHits ?? 0) + 1,
+      },
+      added: false,
+      entryId: existing.id,
     }
   }
 
   // Add new entry
+  const id = entry.id || `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const newEntry: ExperienceEntry = {
     id,
+    timestamp: lastUpdated,
     hitCount: 1,
-    lastHitAt: new Date().toISOString(),
+    lastHitAt: lastUpdated,
     ...entry,
   }
 
   return {
-    ...bank,
-    entries: [...bank.entries, newEntry],
-    lastUpdated: new Date().toISOString(),
-    totalHits: bank.totalHits + 1,
+    bank: {
+      ...bank,
+      entries: [...bank.entries, newEntry],
+      lastUpdated,
+      totalHits: (bank.totalHits ?? 0) + 1,
+    },
+    added: true,
+    entryId: id,
   }
 }

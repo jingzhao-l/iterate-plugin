@@ -63,7 +63,7 @@ export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry
     const line = JSON.stringify(entry) + '\n'
     appendFileSync(filePath, line, 'utf-8')
   } catch (err) {
-    return { count: -1, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` }
+    return { count: 0, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` }
   }
   // Count entries
   let count = 0
@@ -215,6 +215,15 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
           }
 
           const result = appendDecisionEntry(projectRoot, entry)
+          if (result.error) {
+            return {
+              operation: 'append',
+              success: false,
+              entryCount: 0,
+              logPath: result.path,
+              error: result.error,
+            }
+          }
           return {
             operation: 'append',
             success: true,

@@ -61,6 +61,28 @@ export function writeQualityGate(projectRoot: string, snapshot: QualityGateSnaps
   }
 }
 
+/**
+ * Compute the convergence rate for a dimension.
+ *
+ * Convergence measures how much NEW-finding volume shrank across rounds:
+ * `(first - last) / first` from the dimension's per-round findings series,
+ * expressed as a 0-100 percentage, clamped. A series with no fresh findings
+ * (or a dimension never reporting a first-round reading) counts as fully
+ * converged (100). Returns 0 — no measurable improvement — when a reading
+ * exists but the series is empty or malformed.
+ */
+export function convergenceRateFor(series: number[] | undefined, currentCount: number): number {
+  if (Array.isArray(series) && series.length > 0) {
+    const first = series.find((n) => typeof n === 'number' && Number.isFinite(n))
+    const last = [...series].reverse().find((n) => typeof n === 'number' && Number.isFinite(n))
+    if (first === undefined || last === undefined) return currentCount === 0 ? 100 : 0
+    if (first <= 0) return currentCount === 0 ? 100 : 0
+    const raw = ((first - Math.max(0, last)) / first) * 100
+    return Math.max(0, Math.min(100, Math.round(raw)))
+  }
+  return currentCount === 0 ? 100 : 0
+}
+
 /** Compute a quality gate snapshot from review data. */
 export function computeQualityGate(opts: {
   dimensions: string[]
@@ -74,9 +96,12 @@ export function computeQualityGate(opts: {
     command: string
     exitCode: number
   }>
-  fixedCount?: number
+  /** Per-dimension sequence of NEW-finding counts across rounds, newest last. */
+  findingsByRound?: Record<string, number[]>
+  /** Per-dimension count of findings already fixed this iteration. */
+  fixedByDimension?: Record<string, number>
 }): QualityGateSnapshot {
-  const { dimensions, findings, validationResults, fixedCount = 0 } = opts
+  const { dimensions, findings, validationResults, findingsByRound, fixedByDimension } = opts
 
   // Count findings by severity
   const criticalCount = findings.filter((f) => f.severity === 'critical').length
@@ -109,13 +134,14 @@ export function computeQualityGate(opts: {
     const penalty = stats.critical * 30 + stats.high * 15 + stats.medium * 5 + stats.low * 1
     const score = Math.max(0, 100 - penalty)
     const status: 'pass' | 'warn' | 'fail' = score >= 80 ? 'pass' : score >= 50 ? 'warn' : 'fail'
-    const convergenceRate = stats.count === 0 ? 100 : Math.round(((stats.count - stats.count) / Math.max(1, stats.count)) * 100)
+    const series = findingsByRound?.[dim]
+    const convergenceRate = convergenceRateFor(Array.isArray(series) ? series : undefined, stats.count)
 
     return {
       dimension: dim,
       convergenceRate,
       findingsCount: stats.count,
-      fixedCount: 0, // Would need additional context to compute
+      fixedCount: fixedByDimension?.[dim] ?? 0,
       score,
       status,
     }

@@ -11,6 +11,25 @@ import type { DefenseEvent, DefenseEventStream, DefenseEventType } from '../type
 
 const DEFENSE_EVENTS_FILE = 'defense-events.json'
 
+/** Valid defense event types (must stay in sync with DefenseEventType). */
+const VALID_EVENT_TYPES: ReadonlySet<DefenseEventType> = new Set<DefenseEventType>([
+  'precondition_failed',
+  'rollback',
+  'invariant_violated',
+  'assumption_falsified',
+])
+
+/**
+ * Bump the count for an event type. Unknown types (malformed JSON on disk,
+ * or a caller passing an untyped value) are ignored rather than crashing or
+ * creating garbage keys in the counts object.
+ */
+function bumpCount(counts: Record<DefenseEventType, number>, type: unknown): void {
+  if (typeof type === 'string' && VALID_EVENT_TYPES.has(type as DefenseEventType)) {
+    counts[type as DefenseEventType]++
+  }
+}
+
 /** Default empty defense event stream. */
 function emptyStream(): DefenseEventStream {
   return {
@@ -68,7 +87,7 @@ export function addDefenseEvent(
   }
 
   const newCounts = { ...stream.counts }
-  newCounts[event.type]++
+  bumpCount(newCounts, event.type)
 
   return {
     events: [...stream.events, newEvent],
@@ -87,7 +106,7 @@ export function computeCounts(events: DefenseEvent[]): Record<DefenseEventType, 
   }
 
   for (const event of events) {
-    counts[event.type]++
+    bumpCount(counts, event.type)
   }
 
   return counts

@@ -87,16 +87,16 @@ Besides 17 pure-function tools, it ships a **build-free Web UI layer** (converge
 
 - **17 registered tools** (14 original + 3 v3.1 quality command center tools):
   - Original: `iterate_config` / `iterate_validate` / `iterate_decision_log` / `iterate_context` / `iterate_review` / `iterate_triage` / `iterate_fix` / `iterate_diff` / `iterate_rollback` / `iterate_checkpoint` / `iterate_status` / `iterate_history` / `iterate_prune` / `iterate_transcript`
-  - v3.1: `iterate_experience` / `iterate_quality_gate` / `iterate_defense_events`
+  - v3.1/v3.2: `iterate_experience` (list/search/get/**add**) / `iterate_quality_gate` (read/**compute**) / `iterate_defense_events` (list/counts/**record**)
 - **Findings triage loop**: review → UI triage (y/n/a) → `iterate_triage` writes back `known_intentional` → auto-filtered next round
 - **Structured fix system**: each fix backs up first, writes a registry entry, records the diff; a failed validation can be reverted with `iterate_rollback`
 - **Breakpoint resume**: checkpoints saved at the start of each round; interrupted long iterations can resume
 - **History audit**: `iterate_history` reads the decision log (filtered by type / time / count) and the fix registry summary to audit run process and fix details
 - **Runtime cleanup**: `iterate_prune` removes stale decision-log entries, stale checkpoints, orphaned fix backups and empty rounds; dry-run by default (report-only), real cleanup requires `dryRun:false`, and every cleanup is logged
 - **Config read / write**: `iterate_config` supports validated, backed-up, rollback-capable partial writes
-- **v3.1 Experience Bank**: `iterate_experience` queries historical fixes and patterns with search/filter/adopt
-- **v3.1 Quality Gate**: `iterate_quality_gate` queries quality gate status with dimension convergence rates and PASS/FAIL
-- **v3.1 Defense Events**: `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications)
+- **v3.1/v3.2 Experience Bank**: `iterate_experience` queries historical fixes and patterns with search/filter/adopt, and can persist new verified fixes (`add`) — re-adding the same pattern+dimension bumps its hit count instead of duplicating it
+- **v3.1/v3.2 Quality Gate**: `iterate_quality_gate` reads quality gate status with dimension convergence rates and PASS/FAIL, and can recompute + persist a fresh certificate (`compute`) from this round's findings/validation results (real convergence from `findingsByRound`)
+- **v3.1/v3.2 Defense Events**: `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications) and can `record` new ones; readable labels follow the project language (en/zh)
 
 ### UI layer (build-free client slots, v3.1: 10 tabs)
 
@@ -237,9 +237,9 @@ validation:
 | `iterate_history` | Read iteration history (read-only): decision-log entries (filter by `type` / `since` / `limit`, default latest 50, cap 200) + fix-registry summary (per-round fixed/failed counts). For auditing the run, tracing logs, and inventorying fixes |
 | `iterate_prune` | Clean runtime artifacts: stale decision-log entries (by `retainDays`, default 30), stale checkpoints, orphaned fix backups, empty rounds. Dry-run by default (report-only); real cleanup with `dryRun:false`, each cleanup logged |
 | `iterate_transcript` | Runtime observatory: persist review transcripts, threads, fixes, and nudge directions to `.iterate/transcript.json` for the client observatory |
-| `iterate_experience` | **v3.1** Query experience bank: browse/search historical fixes and patterns. Returns matching entries with hit counts, verified fixes, and related context. Read-only |
-| `iterate_quality_gate` | **v3.1** Query quality gate status: dimension convergence rates, verification pass rates, and overall PASS/FAIL. Returns a machine-readable quality certificate. Read-only |
-| `iterate_defense_events` | **v3.1** Query defense events: precondition failures, rollbacks, invariant violations, and assumption falsifications. Returns events with descriptions and outcomes. Read-only |
+| `iterate_experience` | **v3.1/v3.2** Query the experience bank (list/search/get), or `add` a new verified fix: re-adding the same pattern+dimension bumps its hit count instead of duplicating it. Persists to `.iterate/experience.json` |
+| `iterate_quality_gate` | **v3.1/v3.2** Read the quality certificate (`read`), or recompute + persist a fresh one (`compute`) from findings, validation results, `findingsByRound`, and `fixedByDimension`. Real per-dimension convergence rates |
+| `iterate_defense_events` | **v3.1/v3.2** Query defense events (list/counts), or `record` a new one. Human-readable labels follow the project language (en/zh) |
 
 ## Runtime artifact layout
 
