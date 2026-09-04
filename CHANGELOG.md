@@ -27,10 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Updated tool count from 13 to 17 (14 original + 3 v3.0 quality command center tools)
+- Updated tool count from 13 to 17 (14 original + 3 v3.1 quality command center tools)
 - Updated ObservatoryPanel from 7 tabs to 10 tabs (added F8 Quality Gate, F9 Experience Bank, F10 Defense Events)
 - Updated version from 2.12.3 to 3.1.0
-- Updated README.md to reflect v3.0 features
+- Updated README.md to reflect v3.1 features
 
 ### Fixed
 
