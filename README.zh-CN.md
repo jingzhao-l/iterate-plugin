@@ -18,7 +18,7 @@
   <a href="https://github.com/jingzhao-l/iterate-plugin/releases"><img src="https://img.shields.io/github/v/release/jingzhao-l/iterate-plugin" alt="GitHub release"></a>
 </p>
 
-> ⭐ 如果这个插件对你的 dsh 工作流有帮助，欢迎为主仓库点亮 Star，这是对开源维护最大的支持！你的 Star 能让 iterate 被更多开发者看见。
+> ⭐ 如果这个插件对你的 dsh 工作流有帮助，欢迎为主仓库点亮 Star，这是对开源维护最大的支持！
 
 ---
 
@@ -61,11 +61,27 @@ dsh plugin --profile web add iterate-plugin
 
 `iterate-plugin` 是 [iterate](https://github.com/jingzhao-l/iterate-skill) 项目在 [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) 桌面客户端中的落地插件。它把 iterate 的开环审查闭环（review → triage → fix → validate → 收敛）直接带进 dsh 的界面：提供**自治闭环代码迭代**（normal 模式）与 **dry-run 纯多轮审查**（只读）两种能力。
 
-**v3.1/v3.2 质量指挥中心**：插件已从"被动观察面板"升级为"主动指挥中心 + 知识库"。新增质量门禁视图 + 可写计算、经验银行（检索/采纳/写入）、防御事件流（记录 + 中英双语标签）、原生指挥按钮与 task_mode 指示器。
+**v3.1/v3.2 质量指挥中心**：插件已从"被动观察面板"升级为"主动指挥中心 + 知识库"。新增质量门禁读取与可写计算（compute）、经验银行（检索 / 采纳 / 新增 add）、防御事件流（记录 + 中英双语标签）、原生命令按钮与 task_mode 指示器。
 
 除 17 个纯函数工具外，还内置一套**免构建的 Web UI 层**（收敛看板、分诊面板、统计卡片、10 标签页运行时观测台、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（[技能](https://github.com/jingzhao-l/iterate-skill) / [无头引擎](https://github.com/jingzhao-l/iterate-harness)）完全一致，迁移零成本。
 
-## 特性
+---
+
+## 📑 目录
+
+- [✨ 特性](#-特性)
+- [📦 安装](#-安装)
+- [💬 使用](#-使用)
+- [⚙️ 项目配置](#️-项目配置)
+- [🔧 注册工具](#-注册工具)
+- [📁 运行时产物布局](#-运行时产物布局)
+- [🎨 设计](#-设计)
+- [🧪 运行测试](#-运行测试)
+- [⚠️ 免责声明与许可](#️-免责声明与许可)
+
+---
+
+## ✨ 特性
 
 ### 两种运行模式
 
@@ -83,21 +99,6 @@ dsh plugin --profile web add iterate-plugin
 | 只修改 atomic 问题，保留 architectural 留待后续 | ❌ | ✅ |
 | 断点保存 / 恢复（长迭代续跑） | ✅ | ✅ |
 
-### 工具层（v3.1/v3.2：17 个）
-
-- **17 个注册工具**（14 个原始 + 3 个 v3.1/v3.2 质量指挥中心工具）：
-  - 原始：`iterate_config` / `iterate_validate` / `iterate_decision_log` / `iterate_context` / `iterate_review` / `iterate_triage` / `iterate_fix` / `iterate_diff` / `iterate_rollback` / `iterate_checkpoint` / `iterate_status` / `iterate_history` / `iterate_prune` / `iterate_transcript`
-  - v3.1/v3.2：`iterate_experience`（list/search/get/**add**）/ `iterate_quality_gate`（read/**compute**）/ `iterate_defense_events`（list/counts/**record**）
-- **findings 分诊闭环**：审查 → UI 分诊（y/n/a）→ `iterate_triage` 写回 `known_intentional` → 下一轮自动过滤
-- **结构化修复系统**：每次修复先备份、写注册表、记录 diff，验证失败可 `iterate_rollback` 还原
-- **断点续跑**：长迭代在每轮开头保存 checkpoint，中断后可恢复进度
-- **历史审计**：`iterate_history` 读取决策日志（按类型/时间/数量过滤）与修复注册表汇总，审查运行过程与修复明细
-- **运行时清理**：`iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份与空轮次；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
-- **配置读写**：`iterate_config` 支持带校验、备份、回滚的局部写入
-- **v3.1/v3.2 经验银行**：`iterate_experience` 以检索/过滤/采纳查阅历史修复与模式，并可 `add` 持久化新的已验证修复——重复添加同一 pattern + dimension 时累加命中次数而非重复写入
-- **v3.1/v3.2 质量门禁**：`iterate_quality_gate` 读取质量门禁状态（各维度收敛率 + PASS/FAIL），并可基于本轮 findings / 验证结果 `compute` 重新计算并持久化一份新的质量凭证（收敛率来自 `findingsByRound` 的真实收敛序列）
-- **v3.1/v3.2 防御事件流**：`iterate_defense_events` 查询防御事件（前置条件失败、回滚、不变量违反、假设证伪），并可 `record` 记录新事件；可读标签跟随项目语言（en/zh）
-
 ### UI 层（客户端免构建槽位，v3.1/v3.2：10 个标签页）
 
 | UI 组件 | 挂载槽位 | 功能 |
@@ -112,7 +113,23 @@ dsh plugin --profile web add iterate-plugin
 
 UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自动降级，不会崩溃客户端。
 
-## 安装
+### 工具之外的闭环行为
+
+除 17 个注册工具（完整参考见下文）外，插件还端到端打通了几条关键闭环：
+
+- **findings 分诊闭环**：审查 → UI 分诊（y/n/a）→ `iterate_triage` 写回 `known_intentional` → 下一轮自动过滤
+- **结构化修复系统**：每次修复先备份、写注册表、记录 diff，验证失败可 `iterate_rollback` 还原
+- **断点续跑**：长迭代在每轮开头保存 checkpoint，中断后可恢复进度
+- **历史审计**：`iterate_history` 读取决策日志（按类型/时间/数量过滤）与修复注册表汇总，审查运行过程与修复明细
+- **运行时清理**：`iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份与空轮次；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
+- **配置读写**：`iterate_config` 支持带校验、备份、回滚的局部写入
+- **v3.1/v3.2 经验银行**：`iterate_experience` 以检索/过滤/采纳查阅历史修复与模式，并可 `add` 持久化新的已验证修复——重复添加同一 pattern + dimension 时累加命中次数而非重复写入
+- **v3.1/v3.2 质量门禁**：`iterate_quality_gate` 读取质量门禁状态（各维度收敛率 + PASS/FAIL），并可基于本轮 findings / 验证结果 `compute` 重新计算并持久化一份新的质量凭证（收敛率来自 `findingsByRound` 的真实收敛序列）
+- **v3.1/v3.2 防御事件流**：`iterate_defense_events` 查询防御事件（前置条件失败、回滚、不变量违反、假设证伪），并可 `record` 记录新事件；可读标签跟随项目语言（en/zh）
+
+---
+
+## 📦 安装
 
 ### 从 npm 安装
 
@@ -150,7 +167,9 @@ pnpm add /path/to/iterate-skill/harness/iterate-plugin
 
 > 插件包自带 `dsh.bundle.patch`（即 `cordis.patch.yml`），npm 包内 `files` 已白名单化（`src` / `lib` / `dist` / `cordis.patch.yml` / `README.md` / `LICENSE`）。其中 `dist/` 为 TypeScript 服务端逻辑的编译产物，随包分发以兼容 dsh 的 `github:owner/repo#ref` git-clone 安装方式（Node 不擦除 `node_modules` 下的 TS 类型）。
 
-## 使用
+---
+
+## 💬 使用
 
 ### dry-run 模式（纯反复审查，不修改文件）
 
@@ -181,7 +200,9 @@ iterate on this project, fix all atomic issues
 2. `loop` → 并行评审 → 聚合去重 → 原子问题并行修复 → 执行验证命令 → 验证失败则回滚 → 记录日志 → 无新问题则停止
 3. `report` → 输出修复统计
 
-## 项目配置
+---
+
+## ⚙️ 项目配置
 
 在项目根目录放 `iterate.config.yaml`：
 
@@ -219,7 +240,9 @@ validation:
 
 > 配置可通过 `iterate_config` 工具读取与**校验式局部写入**（自动备份，写入失败自动回滚）。
 
-## 注册工具（v3.1/v3.2：17 个）
+---
+
+## 🔧 注册工具（v3.1/v3.2：17 个）
 
 | 工具 | 功能 |
 |------|------|
@@ -241,7 +264,9 @@ validation:
 | `iterate_quality_gate` | **v3.1/v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率 |
 | `iterate_defense_events` | **v3.1/v3.2** 查询防御事件（list/counts），或 `record` 记录一条新事件。可读标签跟随项目语言（en/zh） |
 
-## 运行时产物布局
+---
+
+## 📁 运行时产物布局
 
 所有运行时状态都落在项目根目录的 `.iterate/` 下（可由 `.gitignore` 排除）：
 
@@ -259,7 +284,9 @@ validation:
     <fix-id>_<ts>.bak     # 每次修复前的原文件备份
 ```
 
-## 设计
+---
+
+## 🎨 设计
 
 插件遵循 dsh "everything-is-a-plugin" 架构：
 
@@ -271,7 +298,9 @@ validation:
 - **v3.1/v3.2 质量指挥中心**：把插件从"被动观察面板"升级为"主动指挥中心 + 知识库"——质量门禁（读 + compute）、经验银行（读 + add）、防御事件（读 + record）与原生指挥按钮
 - 遵循 iterate 原技能的设计原则：确定性收敛，可审计，最小权限
 
-## 运行测试
+---
+
+## 🧪 运行测试
 
 ```bash
 cd harness/iterate-plugin
@@ -285,7 +314,11 @@ npm test
 - **466 个单元测试全绿**，类型检查通过
 - 覆盖：去重、过滤、排序、多轮收敛、meta-review 审计、路径安全、超时钳制、配置读写与回滚、triage 合并、diff 计算、checkpoint 校验、修复注册表、历史读取与过滤、prune 清理报告与 dry-run 语义、UI 纯函数（select-all 键、运行时状态指引）、**v3.1/v3.2：经验银行、质量门禁、防御事件、审批门禁 fail-open 路径**等
 
-## ⚠️ 免责声明
+---
+
+## ⚠️ 免责声明与许可
+
+### 免责声明
 
 本项目按「现状」（AS IS）提供，不附带任何明示或暗示的担保，包括但不限于对适销性、特定用途适用性及不侵权性的担保。
 
@@ -298,6 +331,6 @@ npm test
 
 使用者需为本项目使用过程中所产生、修改或提交的代码负全部责任。使用本项目即表示你同意：维护者与贡献者不对因使用本项目而导致的任何损失、损害或法律后果承担责任。
 
-## License
+### License
 
 MIT

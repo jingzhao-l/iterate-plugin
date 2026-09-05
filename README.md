@@ -65,7 +65,23 @@ dsh plugin --profile web add iterate-plugin
 
 Besides 17 pure-function tools, it ships a **build-free Web UI layer** (convergence dashboard, triage panel, stats card, observatory panel with 10 tabs, theme skin, etc.) that plugs straight into dsh's existing UI slots. Configuration (`iterate.config.yaml` and the review dimensions) is identical across the other two components of the iterate ecosystem ([skill](https://github.com/jingzhao-l/iterate-skill) / [headless engine](https://github.com/jingzhao-l/iterate-harness)) — zero migration cost.
 
-## Features
+---
+
+## 📑 Table of Contents
+
+- [✨ Features](#-features)
+- [📦 Installation](#-installation)
+- [💬 Usage](#-usage)
+- [⚙️ Project configuration](#️-project-configuration)
+- [🔧 Registered tools](#-registered-tools)
+- [📁 Runtime artifact layout](#-runtime-artifact-layout)
+- [🎨 Design](#-design)
+- [🧪 Running the tests](#-running-the-tests)
+- [⚠️ Disclaimer & License](#️-disclaimer--license)
+
+---
+
+## ✨ Features
 
 ### Two modes
 
@@ -83,21 +99,6 @@ Besides 17 pure-function tools, it ships a **build-free Web UI layer** (converge
 | Fix atomic findings only, keep architectural for later | ❌ | ✅ |
 | Breakpoint save / resume (long iterations) | ✅ | ✅ |
 
-### Tool layer (v3.1/v3.2: 17 tools)
-
-- **17 registered tools** (14 original + 3 v3.1/v3.2 quality command center tools):
-  - Original: `iterate_config` / `iterate_validate` / `iterate_decision_log` / `iterate_context` / `iterate_review` / `iterate_triage` / `iterate_fix` / `iterate_diff` / `iterate_rollback` / `iterate_checkpoint` / `iterate_status` / `iterate_history` / `iterate_prune` / `iterate_transcript`
-  - v3.1/v3.2: `iterate_experience` (list/search/get/**add**) / `iterate_quality_gate` (read/**compute**) / `iterate_defense_events` (list/counts/**record**)
-- **Findings triage loop**: review → UI triage (y/n/a) → `iterate_triage` writes back `known_intentional` → auto-filtered next round
-- **Structured fix system**: each fix backs up first, writes a registry entry, records the diff; a failed validation can be reverted with `iterate_rollback`
-- **Breakpoint resume**: checkpoints saved at the start of each round; interrupted long iterations can resume
-- **History audit**: `iterate_history` reads the decision log (filtered by type / time / count) and the fix registry summary to audit run process and fix details
-- **Runtime cleanup**: `iterate_prune` removes stale decision-log entries, stale checkpoints, orphaned fix backups and empty rounds; dry-run by default (report-only), real cleanup requires `dryRun:false`, and every cleanup is logged
-- **Config read / write**: `iterate_config` supports validated, backed-up, rollback-capable partial writes
-- **v3.1/v3.2 Experience Bank**: `iterate_experience` queries historical fixes and patterns with search/filter/adopt, and can persist new verified fixes (`add`) — re-adding the same pattern+dimension bumps its hit count instead of duplicating it
-- **v3.1/v3.2 Quality Gate**: `iterate_quality_gate` reads quality gate status with dimension convergence rates and PASS/FAIL, and can recompute + persist a fresh certificate (`compute`) from this round's findings/validation results (real convergence from `findingsByRound`)
-- **v3.1/v3.2 Defense Events**: `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications) and can `record` new ones; readable labels follow the project language (en/zh)
-
 ### UI layer (build-free client slots, v3.1: 10 tabs)
 
 | UI component | Mounted slot | Function |
@@ -112,7 +113,23 @@ Besides 17 pure-function tools, it ships a **build-free Web UI layer** (converge
 
 The UI layer is **defensive by design**: it degrades gracefully if any of `slots` / `theme` / `React` is unavailable — it never crashes the client.
 
-## Installation
+### Behavior beyond the tools
+
+Beyond the 17 registered tools (full reference further down), the plugin closes several loops end to end:
+
+- **Findings triage loop**: review → UI triage (y/n/a) → `iterate_triage` writes back `known_intentional` → auto-filtered next round
+- **Structured fix system**: each fix backs up first, writes a registry entry, records the diff; a failed validation can be reverted with `iterate_rollback`
+- **Breakpoint resume**: checkpoints saved at the start of each round; interrupted long iterations can resume
+- **History audit**: `iterate_history` reads the decision log (filtered by type / time / count) and the fix registry summary to audit run process and fix details
+- **Runtime cleanup**: `iterate_prune` removes stale decision-log entries, stale checkpoints, orphaned fix backups and empty rounds; dry-run by default (report-only), real cleanup requires `dryRun:false`, and every cleanup is logged
+- **Config read / write**: `iterate_config` supports validated, backed-up, rollback-capable partial writes
+- **v3.1/v3.2 Experience Bank**: `iterate_experience` queries historical fixes and patterns with search/filter/adopt, and can persist new verified fixes (`add`) — re-adding the same pattern+dimension bumps its hit count instead of duplicating it
+- **v3.1/v3.2 Quality Gate**: `iterate_quality_gate` reads quality gate status with dimension convergence rates and PASS/FAIL, and can recompute + persist a fresh certificate (`compute`) from this round's findings/validation results (real convergence from `findingsByRound`)
+- **v3.1/v3.2 Defense Events**: `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications) and can `record` new ones; readable labels follow the project language (en/zh)
+
+---
+
+## 📦 Installation
 
 ### From npm
 
@@ -150,7 +167,9 @@ Then add to your profile `cordis.patch.yml`:
 
 > The package carries its own `dsh.bundle.patch` (i.e. `cordis.patch.yml`); the npm package's `files` whitelist is `src` / `lib` / `dist` / `cordis.patch.yml` / `README.md` / `LICENSE`. `dist/` is the compiled output of the TypeScript server-side logic, shipped with the package so it works with dsh's `github:owner/repo#ref` git-clone install (Node does not strip TS types under `node_modules`).
 
-## Usage
+---
+
+## 💬 Usage
 
 ### dry-run mode (read-only review, no file changes)
 
@@ -181,7 +200,9 @@ Workflow:
 2. `loop` → parallel review → aggregate / dedupe → parallel atomic fixes → run validation commands → rollback on failure → log → stop when no new findings
 3. `report` → output fix statistics
 
-## Project configuration
+---
+
+## ⚙️ Project configuration
 
 Put `iterate.config.yaml` at the project root:
 
@@ -219,7 +240,9 @@ validation:
 
 > The config can be read and **validated-partially-written** via `iterate_config` (auto backup, auto rollback on write failure).
 
-## Registered tools (v3.1/v3.2: 17)
+---
+
+## 🔧 Registered tools (v3.1/v3.2: 17)
 
 | Tool | Function |
 | --- | --- |
@@ -241,7 +264,9 @@ validation:
 | `iterate_quality_gate` | **v3.1/v3.2** Read the quality certificate (`read`), or recompute + persist a fresh one (`compute`) from findings, validation results, `findingsByRound`, and `fixedByDimension`. Real per-dimension convergence rates |
 | `iterate_defense_events` | **v3.1/v3.2** Query defense events (list/counts), or `record` a new one. Human-readable labels follow the project language (en/zh) |
 
-## Runtime artifact layout
+---
+
+## 📁 Runtime artifact layout
 
 All runtime state lives under `.iterate/` at the project root (can be excluded via `.gitignore`):
 
@@ -259,7 +284,9 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
     <fix-id>_<ts>.bak     # original file backup before each fix
 ```
 
-## Design
+---
+
+## 🎨 Design
 
 The plugin follows dsh's "everything-is-a-plugin" architecture:
 
@@ -271,7 +298,9 @@ The plugin follows dsh's "everything-is-a-plugin" architecture:
 - **v3.1/v3.2 Quality Command Center**: extends the plugin from "passive observation panel" to "active command center + knowledge base" with quality gates (read + compute), experience bank (read + add), defense events (read + record), and native command buttons
 - Follows the iterate skill's design principles: deterministic convergence, auditable, least privilege
 
-## Running the tests
+---
+
+## 🧪 Running the tests
 
 ```bash
 cd harness/iterate-plugin
@@ -285,7 +314,11 @@ All tests pass:
 - **466 unit tests green**, type-check clean
 - Coverage: dedupe, filter, sort, multi-round convergence, meta-review audit, path safety, timeout clamping, config read/write + rollback, triage merge, diff computation, checkpoint validation, fix registry, history read + filter, prune cleanup report + dry-run semantics, UI pure functions (select-all key, runtime status guide), **v3.1/v3.2: experience bank, quality gate, defense events, approval-gate fail-open path**.
 
-## ⚠️ Disclaimer
+---
+
+## ⚠️ Disclaimer & License
+
+### Disclaimer
 
 This project is provided "AS IS", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose and noninfringement.
 
@@ -298,6 +331,6 @@ This project is provided "AS IS", without warranty of any kind, express or impli
 
 Users are solely responsible for the code that is generated, modified, or committed as a result of using this project. By using it, you acknowledge that neither the maintainers nor contributors are liable for any loss, damage, or legal consequences arising from its use.
 
-## License
+### License
 
 MIT
