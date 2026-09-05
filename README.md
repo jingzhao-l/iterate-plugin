@@ -1,7 +1,7 @@
 # iterate-plugin for DeepSeek Harness (dsh)
 
-> dsh 桌面端的 iterate 质量指挥中心 + 经验银行插件（v3.1）。把 iterate 生态的同一套 review/fix loop 直接搬进 dsh 界面，新增质量门禁、经验银行、防御事件流与原生指挥操作。
-> The iterate ecosystem's quality command center + experience bank plugin for dsh (v3.1). Natively embedded inside the DeepSeek Harness (dsh) desktop client with quality gates, experience bank, defense events stream, and native command buttons.
+> dsh 桌面端的 iterate 质量指挥中心 + 经验银行插件（v3.2）。把 iterate 生态的同一套 review/fix loop 直接搬进 dsh 界面，新增质量门禁、经验银行、防御事件流与原生指挥操作。
+> The iterate ecosystem's quality command center + experience bank plugin for dsh (v3.2). Natively embedded inside the DeepSeek Harness (dsh) desktop client with quality gates, experience bank, defense events stream, and native command buttons.
 
 <p align="center">
   <a href="README.md"><strong>English</strong></a> ·
@@ -61,7 +61,7 @@ dsh plugin --profile web add iterate-plugin
 
 `iterate-plugin` is the [iterate](https://github.com/jingzhao-l/iterate-skill) integration for the [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) desktop client. It brings iterate's review loop (review → triage → fix → validate → converge) directly into the dsh UI, offering **autonomous closed-loop code iteration** (normal mode) and **dry-run read-only multi-round review**.
 
-**v3.1 Quality Command Center**: The plugin has been upgraded from a "passive observation panel" to an "active command center + knowledge base". New features include quality gate view, experience bank, defense events stream, native command buttons, and task_mode indicator.
+**v3.1/v3.2 Quality Command Center**: The plugin has been upgraded from a "passive observation panel" to an "active command center + knowledge base". New features include quality gate view + writable compute, experience bank with search/adopt/add, defense events stream (record + bilingual labels), native command buttons, and task_mode indicator.
 
 Besides 17 pure-function tools, it ships a **build-free Web UI layer** (convergence dashboard, triage panel, stats card, observatory panel with 10 tabs, theme skin, etc.) that plugs straight into dsh's existing UI slots. Configuration (`iterate.config.yaml` and the review dimensions) is identical across the other two components of the iterate ecosystem ([skill](https://github.com/jingzhao-l/iterate-skill) / [headless engine](https://github.com/jingzhao-l/iterate-harness)) — zero migration cost.
 
@@ -83,9 +83,9 @@ Besides 17 pure-function tools, it ships a **build-free Web UI layer** (converge
 | Fix atomic findings only, keep architectural for later | ❌ | ✅ |
 | Breakpoint save / resume (long iterations) | ✅ | ✅ |
 
-### Tool layer (v3.1: 17 tools)
+### Tool layer (v3.1/v3.2: 17 tools)
 
-- **17 registered tools** (14 original + 3 v3.1 quality command center tools):
+- **17 registered tools** (14 original + 3 v3.1/v3.2 quality command center tools):
   - Original: `iterate_config` / `iterate_validate` / `iterate_decision_log` / `iterate_context` / `iterate_review` / `iterate_triage` / `iterate_fix` / `iterate_diff` / `iterate_rollback` / `iterate_checkpoint` / `iterate_status` / `iterate_history` / `iterate_prune` / `iterate_transcript`
   - v3.1/v3.2: `iterate_experience` (list/search/get/**add**) / `iterate_quality_gate` (read/**compute**) / `iterate_defense_events` (list/counts/**record**)
 - **Findings triage loop**: review → UI triage (y/n/a) → `iterate_triage` writes back `known_intentional` → auto-filtered next round
@@ -219,7 +219,7 @@ validation:
 
 > The config can be read and **validated-partially-written** via `iterate_config` (auto backup, auto rollback on write failure).
 
-## Registered tools (v3.1: 17)
+## Registered tools (v3.1/v3.2: 17)
 
 | Tool | Function |
 | --- | --- |
@@ -251,9 +251,9 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   checkpoint.json         # iteration breakpoint (resume)
   transcript.json         # runtime-observatory manifest (per-reviewer threads, trend, fixes, timeline, nudge)
   transcript-live.ndjson  # append-only near-real-time reviewer-activity feed (read/fix/rollback/validate…), byte-capped
-  experience.json         # v3.1: experience bank (historical fixes and patterns, accumulated across sessions)
-  quality-gate.json       # v3.1: quality gate snapshot (dimension convergence, verification pass rates, PASS/FAIL)
-  defense-events.json     # v3.1: defense events stream (precondition failures, rollbacks, invariant violations, assumption falsifications)
+  experience.json         # v3.1/v3.2: experience bank (historical fixes and patterns, accumulated across sessions)
+  quality-gate.json       # v3.1/v3.2: quality gate snapshot (dimension convergence, verification pass rates, PASS/FAIL)
+  defense-events.json     # v3.1/v3.2: defense events stream (precondition failures, rollbacks, invariant violations, assumption falsifications)
   fixes/
     registry.json         # fix registry (list of FixRecords, grouped by round)
     <fix-id>_<ts>.bak     # original file backup before each fix
@@ -268,7 +268,7 @@ The plugin follows dsh's "everything-is-a-plugin" architecture:
 - **Core logic is entirely pure functions** (dedupe / filter / sort / converge / meta-audit / diff computation / history filtering / cleanup reporting) — unit-testable, no I/O
 - **Security model**: file writes confined to the resolved project root (path-traversal protection); always back up before writing, roll back on failure; config writes also back up + roll back; `iterate_prune` is dry-run by default and only clears artifacts under `.iterate/` with every cleanup logged; `iterate_fix` caps content length and `iterate_triage` caps entry count to fend off abnormal oversized payloads
 - **Build-free UI**: `lib/client.js` uses a `React.createElement` tree + injected `<style>` tags, all colors via `--dsw-*` tokens, degrading gracefully when a service is missing
-- **v3.1 Quality Command Center**: extends the plugin from "passive observation panel" to "active command center + knowledge base" with quality gates, experience bank, defense events, and native command buttons
+- **v3.1/v3.2 Quality Command Center**: extends the plugin from "passive observation panel" to "active command center + knowledge base" with quality gates (read + compute), experience bank (read + add), defense events (read + record), and native command buttons
 - Follows the iterate skill's design principles: deterministic convergence, auditable, least privilege
 
 ## Running the tests
@@ -282,8 +282,8 @@ npm test
 
 All tests pass:
 
-- **426 unit tests green**, type-check clean
-- Coverage: dedupe, filter, sort, multi-round convergence, meta-review audit, path safety, timeout clamping, config read/write + rollback, triage merge, diff computation, checkpoint validation, fix registry, history read + filter, prune cleanup report + dry-run semantics, UI pure functions (select-all key, runtime status guide), **v3.1: experience bank, quality gate, defense events**.
+- **466 unit tests green**, type-check clean
+- Coverage: dedupe, filter, sort, multi-round convergence, meta-review audit, path safety, timeout clamping, config read/write + rollback, triage merge, diff computation, checkpoint validation, fix registry, history read + filter, prune cleanup report + dry-run semantics, UI pure functions (select-all key, runtime status guide), **v3.1/v3.2: experience bank, quality gate, defense events, approval-gate fail-open path**.
 
 ## ⚠️ Disclaimer
 
