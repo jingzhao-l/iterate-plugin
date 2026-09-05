@@ -32,17 +32,36 @@ import { decideApproval, isDestructiveIterateTool } from "./approval-gate.js";
  * Returns a dsh `PreToolDecision` so the caller can short-circuit the caller.
  */
 export function gateDecision(exec) {
-    // Importing the decision, and only inspecting our own tools, keeps unrelated
-    // tooling untouched. Anything we cannot classify is allowed by default.
-    if (!isDestructiveIterateTool(exec.name))
+    // Defensively read the tool name: an exec handed to the waterfall is an
+    // ordinary object, but a hostile/proxied exec must degrade to "not our tool"
+    // (allow) instead of throwing before classification. The gate only ever
+    // inspects iterate tools, so an unreadable name also must not alter
+    // unrelated tooling.
+    let name = '';
+    try {
+        name = exec?.name ?? '';
+    }
+    catch {
+        name = '';
+    }
+    if (!isDestructiveIterateTool(name))
         return { kind: 'allow' };
     // Resolve the project root (use the call's own `path` arg, else the agent's
     // session cwd) to read the effective observatory policy.
-    const argPath = typeof exec.arguments === 'object' && exec.arguments && !Array.isArray(exec.arguments)
-        && typeof exec.arguments.path === 'string'
-        ? exec.arguments.path
-        : undefined;
-    const sessionCwd = exec.agent?.session?.header?.cwd;
+    let argPath;
+    let sessionCwd;
+    try {
+        const args = exec?.arguments;
+        if (args && typeof args === 'object' && !Array.isArray(args)) {
+            const p = args.path;
+            if (typeof p === 'string')
+                argPath = p;
+        }
+        sessionCwd = exec?.agent?.session?.header?.cwd;
+    }
+    catch {
+        // hostile/proxied exec — fall through with both undefined (defaults to ask)
+    }
     const resolved = resolveProjectRoot(argPath, sessionCwd);
     let policy = 'ask';
     if (resolved.ok) {
@@ -67,13 +86,19 @@ export function gateDecision(exec) {
  */
 export function registerSessionHooks(ctx) {
     ctx.on('tools/pre-execute', (exec, next) => {
-        // Never let a throwing gate break the pipeline — degrade to allow.
+        // Fail-safe: a throwing gate must never fail OPEN. Degrade to `ask` so a
+        // destructive call still routes through human consent instead of running
+        // via `next()`'s allow default (matches the header's documented contract).
         let decision;
         try {
             decision = gateDecision(exec);
         }
-        catch {
-            return next();
+        catch (err) {
+            console.warn('[iterate] approval gate failed; degrading to ask.', err);
+            return Promise.resolve({
+                kind: 'ask',
+                reason: 'iterate approval gate unavailable — require consent',
+            });
         }
         if (decision.kind === 'ask') {
             // Delegate the actual human-consent prompt + audit to dsh's approval

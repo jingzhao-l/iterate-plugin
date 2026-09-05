@@ -207,6 +207,11 @@ export type ProjectRootResult = { ok: true; root: string } | { ok: false; reason
  */
 export function resolveProjectRoot(input?: string, sessionCwd?: string): ProjectRootResult {
   const raw = (input ?? '').trim()
+  // A NUL byte can never name a real path and makes `resolve()` (and every
+  // downstream fs call) throw — treat it as unsafe input, not a throw path.
+  if (raw.includes('\0')) {
+    return { ok: false, reason: 'Refusing project root containing NUL bytes.' }
+  }
   const root = raw ? resolve(raw) : resolve(effectiveCwd(sessionCwd))
   if (!root || root === sep) {
     return { ok: false, reason: 'Refusing filesystem root as project root.' }

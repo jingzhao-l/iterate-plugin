@@ -65,11 +65,23 @@ export function decideApproval(
   execution: ToolExecutionLike,
   policy: 'ask' | 'deny' | 'allow',
 ): ApprovalDecision {
-  const name = typeof execution?.name === 'string' ? execution.name : ''
+  // Defensive reads: a hostile/proxied execution object must degrade to "not
+  // our tool" (allow) rather than throw inside the gate.
+  let name = ''
+  try {
+    name = typeof execution?.name === 'string' ? execution.name : ''
+  } catch {
+    name = ''
+  }
   if (!name) return { kind: 'allow' }
   if (!DESTRUCTIVE_TOOLS.has(name)) return { kind: 'allow' }
 
-  const rawArgs = execution.arguments
+  let rawArgs: unknown
+  try {
+    rawArgs = execution.arguments
+  } catch {
+    rawArgs = undefined
+  }
   const args: Record<string, unknown> =
     rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)

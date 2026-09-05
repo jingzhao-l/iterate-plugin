@@ -5,6 +5,23 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-09-05
+
+### Fixed
+
+- **Approval-gate fail-open fix**: the `tools/pre-execute` gate now degrades to `ask` (require consent) instead of `allow` when the gate itself throws — a hostile or malformed call (e.g. a NUL-byte project path that makes `resolve()` throw inside the gate) previously fell through `next()` and auto-approved destructive `iterate_fix` calls
+- **Defensive reads**: `gateDecision` / `decideApproval` read `exec.name` and `exec.arguments` through guarded accessors so proxied or unreadable executions classify as `allow`/`ask` instead of throwing
+- **NUL-byte path guard**: `resolveProjectRoot` refuses project roots containing NUL bytes instead of passing them to the filesystem
+- **A11y**: the round-completion capsule is now announced to assistive tech (`role="status"` / `aria-live="polite"`)
+
+### Security
+
+- Removed a fail-open path for destructive iterate tool calls. `registerSessionHooks` now returns an explicit `ask` decision with reason `iterate approval gate unavailable — require consent` when the gate cannot run, rather than delegating to the next hook.
+
+### Tests
+
+- Added 6 regression tests covering the fail-open path (NUL-byte path → ask, unreadable/proxied executions, and the gate's waterfall behavior: `ask`/`deny` short-circuit without calling `next()`, `allow` delegates)
+
 ## [3.2.0] - 2026-09-05
 
 ### Added

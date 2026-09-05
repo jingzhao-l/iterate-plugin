@@ -1386,7 +1386,13 @@ function ProgressCapsule() {
     }
   }, [])
   if (!info) return null
-  return React.createElement('div', { 'data-iterate-root': '', className: 'iterate-capsule', 'data-ok': info.ok ? '' : undefined }, info.text)
+  return React.createElement('div', {
+    'data-iterate-root': '',
+    className: 'iterate-capsule',
+    'data-ok': info.ok ? '' : undefined,
+    role: 'status',
+    'aria-live': 'polite',
+  }, info.text)
 }
 
 /** Settings page section (root scope; reads localStorage + latest known data). */
