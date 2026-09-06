@@ -6,11 +6,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jingzhao-l/iterate-plugin.git"
+    "url": "https://github.com/jingzhao-l/iterate-skill.git",
+    "directory": "harness/iterate-plugin"
   },
-  "homepage": "https://github.com/jingzhao-l/iterate-plugin#readme",
+  "homepage": "https://github.com/jingzhao-l/iterate-skill/tree/main/harness/iterate-plugin",
   "bugs": {
-    "url": "https://github.com/jingzhao-l/iterate-plugin/issues"
+    "url": "https://github.com/jingzhao-l/iterate-skill/issues"
   },
   "keywords": [
     "dsh-plugin",
@@ -25,6 +26,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.1.2-alpha.4": "compatible",
+        "0.1.2-alpha.5": "compatible",
+        "0.1.2-rc.1": "compatible"
+      }
     },
     "client": {
       "platform": "web",

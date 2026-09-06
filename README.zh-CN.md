@@ -285,6 +285,49 @@ validation:
 
 ---
 
+## 🔐 权限、依赖与兼容性
+
+### Node.js / DSH 兼容范围
+
+- **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
+- **DSH**：在 `dsh.compatibility.dshReleases` 中声明官方 `0.1.2-alpha.4`、
+  `0.1.2-alpha.5`、`0.1.2-rc.1` 三个版本为 `compatible`。插件基于
+  `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.1.2-rc.1` 构建，
+  只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。
+
+### 运行时权限（保守披露）
+
+插件与 DSH 宿主共享同一进程能力，涉及以下能力；具备高权限意味着 DSH Profile
+安装仍需 `user-reviewed`/守卫，不会自动放行：
+
+- **文件（files）** — 读写 `<projectRoot>/.iterate/` 下的项目本地状态（决策日志、
+  检查点、transcript、修复备份/注册表、质量门禁、经验银行、防御事件）。
+  `iterate_fix` / `iterate_triage` 还会就地修改用户源码（路径遍历防护限定在解析后
+  的项目根目录内，每次修复前备份、失败回滚）。客户端侧把分诊判定持久化到 `localStorage`。
+- **命令（commands）** — 插件只注册模型可调用工具；模型要执行的任何 shell 操作
+  （build / test / `git`）都由**宿主**执行，不是本插件。客户端"指挥按钮"只复制可粘贴
+  的指令文本，不启动任何进程。
+- **凭据（credentials）** — 本插件运行时**不**读取或传输凭据。同生态的
+  **iterate-skill / iterate-harness** 组件在用户自行执行 Git/API 操作时可能读取
+  git 凭据 / GitHub token；它们是独立包，本插件从不加载它们。
+- **网络（network）** — 运行时无任何网络访问（全部本地）。
+
+### 依赖
+
+运行时依赖：`@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、
+`@deepseek-ai/dsh-util-values`、`js-yaml`——全部精确锁版。无安装期生命周期脚本
+（`preinstall`/`install`/`postinstall`/`prepare`）；仅 `prepublishOnly`（构建）在发布时运行。
+
+### 失败边界
+
+- 所有写入都是原子的（临时文件 + rename），且限定在 `.iterate/` 下；写入中途崩溃
+  不会损坏 checkpoint / transcript。
+- 持久化失败以结构化 `{ ok: false, error }` 返回，而不是静默成功。
+- 修复编辑先备份再应用，验证失败自动回滚。
+- 某个 slot / 服务不可用时 UI 优雅降级。
+
+---
+
 ## 🎨 设计
 
 插件遵循 dsh "everything-is-a-plugin" 架构：

@@ -286,6 +286,56 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
 
 ---
 
+## 🔐 Permissions, dependencies & compatibility
+
+### Node.js / DSH compatibility
+
+- **Node.js**: `>=20` (`package.json` `engines.node`).
+- **DSH**: declares `dsh.compatibility.dshReleases` — `compatible` for the official
+  `0.1.2-alpha.4`, `0.1.2-alpha.5`, and `0.1.2-rc.1` releases. The plugin is built
+  against `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.1.2-rc.1`
+  and uses only public contracts (tool registration, client slots + theme, bundle patch).
+
+### Runtime permissions (conservative disclosure)
+
+The plugin runs with the **same process capabilities as the DSH host** and touches the
+following capabilities; elevated capability means a DSH Profile install stays
+`user-reviewed`/guarded rather than auto-approved:
+
+- **Files** — reads and writes project-local state under `<projectRoot>/.iterate/`
+  (decision log, checkpoint, transcript, fix backups/registry, quality gate,
+  experience bank, defense events). `iterate_fix` / `iterate_triage` also apply
+  in-place edits to the user's source files (path-traversal protected to the
+  resolved project root, backups taken before every fix, rollback on failure).
+  The client half persists triage verdicts to `localStorage`.
+- **Commands** — the plugin registers model-facing tools; any shell execution that
+  the model performs (build / test / `git`) is run by the **host**, not by this
+  plugin. The client "command buttons" only copy paste-able instruction text; they
+  do not spawn processes.
+- **Credentials** — this plugin does **not** read or transmit credentials at
+  runtime. The sibling **iterate-skill / iterate-harness** components may read git
+  credentials / GitHub tokens when the user runs their own Git/API operations; those
+  are separate packages and are never loaded by this plugin.
+- **Network** — no network access at runtime (everything is local to the project).
+
+### Dependencies
+
+Runtime dependencies: `@deepseek-ai/cordis`, `@deepseek-ai/dsh-tools`,
+`@deepseek-ai/dsh-util-values`, `js-yaml` — all pinned exact versions. No
+install-time lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`);
+only `prepublishOnly` (build) runs on publish.
+
+### Failure bounds
+
+- All writes are atomic (temp + rename) and confined under `.iterate/`; a crash
+  mid-write cannot corrupt the checkpoint/transcript.
+- Persistence failures surface as structured `{ ok: false, error }` results instead
+  of silent success.
+- Fix edits are applied to backups first and rolled back on validation failure.
+- The UI degrades gracefully when a slot/service is unavailable.
+
+---
+
 ## 🎨 Design
 
 The plugin follows dsh's "everything-is-a-plugin" architecture:
