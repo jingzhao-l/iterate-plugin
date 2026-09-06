@@ -26,14 +26,56 @@ function emptySnapshot() {
         lowCount: 0,
     };
 }
-/** Read the quality gate snapshot from disk. */
+/**
+ * Read the quality gate snapshot from disk.
+ * Normalizes a hand-edited / partial file so readers and the tool's `render`
+ * never crash on missing arrays or non-numeric fields: `dimensions` is
+ * guaranteed to be an array and every numeric field degrades to 0.
+ */
 export function readQualityGate(projectRoot) {
     const filePath = path.join(projectRoot, '.iterate', QUALITY_GATE_FILE);
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
         const parsed = JSON.parse(content);
         if (parsed && typeof parsed === 'object') {
-            return parsed;
+            const num = (v) => typeof v === 'number' && Number.isFinite(v) ? v : 0;
+            const status = parsed.overallStatus === 'pass' || parsed.overallStatus === 'fail' || parsed.overallStatus === 'pending'
+                ? parsed.overallStatus
+                : 'pending';
+            const dimensions = Array.isArray(parsed.dimensions)
+                ? parsed.dimensions
+                    .filter((d) => !!d && typeof d === 'object' && typeof d.dimension === 'string')
+                    .map((d) => {
+                    const dimStatus = d.status === 'pass' || d.status === 'fail' || d.status === 'warn' ? d.status : 'warn';
+                    return {
+                        dimension: d.dimension,
+                        convergenceRate: num(d.convergenceRate),
+                        findingsCount: num(d.findingsCount),
+                        fixedCount: num(d.fixedCount),
+                        score: num(d.score),
+                        status: dimStatus,
+                    };
+                })
+                : [];
+            return {
+                timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : emptySnapshot().timestamp,
+                overallStatus: status,
+                overallScore: num(parsed.overallScore),
+                dimensions,
+                verificationPassRate: num(parsed.verificationPassRate),
+                totalChecks: num(parsed.totalChecks),
+                passedChecks: num(parsed.passedChecks),
+                failedChecks: num(parsed.failedChecks),
+                totalFindings: num(parsed.totalFindings),
+                criticalCount: num(parsed.criticalCount),
+                highCount: num(parsed.highCount),
+                mediumCount: num(parsed.mediumCount),
+                lowCount: num(parsed.lowCount),
+                // Only carry an own failReason when it is a real string — an absent
+                // persisted reason must not surface as `failReason: undefined` (which
+                // deep-equals differently than the JSON round-trip of computeQualityGate).
+                ...(typeof parsed.failReason === 'string' ? { failReason: parsed.failReason } : {}),
+            };
         }
     }
     catch {
@@ -41,7 +83,12 @@ export function readQualityGate(projectRoot) {
     }
     return emptySnapshot();
 }
-/** Write the quality gate snapshot to disk. */
+/**
+ * Write the quality gate snapshot to disk.
+ * Returns `{ ok: true }` on success or `{ ok: false, error }` when the write
+ * fails — a caller must surface the failure instead of reporting success for
+ * a snapshot that was never persisted.
+ */
 export function writeQualityGate(projectRoot, snapshot) {
     const dirPath = path.join(projectRoot, '.iterate');
     const filePath = path.join(dirPath, QUALITY_GATE_FILE);
@@ -51,9 +98,10 @@ export function writeQualityGate(projectRoot, snapshot) {
         }
         fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
     }
-    catch {
-        // Silently fail - quality gate is not critical
+    catch (err) {
+        return { ok: false, error: `unable to write ${filePath}: ${String(err)}` };
     }
+    return { ok: true };
 }
 /**
  * Compute the convergence rate for a dimension.

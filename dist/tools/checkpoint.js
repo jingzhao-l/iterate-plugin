@@ -11,11 +11,14 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
-import { checkpointPath, iterateDir } from "../paths.js";
+import { checkpointPath, iterateDir, transcriptPath } from "../paths.js";
 import { readRegistry } from "./fix.js";
 import { readDecisionEntries } from "./decision-log.js";
+import { readQualityGate } from "./quality-store.js";
+import { readExperienceBank } from "./experience-store.js";
+import { readDefenseEvents } from "./defense-store.js";
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
-/** Read a checkpoint from disk (missing/corrupt → null). */
+/** Read the current checkpoint from disk (missing/corrupt → null). */
 export function readCheckpoint(projectRoot) {
     const file = checkpointPath(projectRoot);
     if (!existsSync(file))
@@ -29,6 +32,20 @@ export function readCheckpoint(projectRoot) {
         if (typeof parsed.round !== 'number')
             return null;
         return parsed;
+    }
+    catch {
+        return null;
+    }
+}
+/** Read the harness task_mode from the persisted observatory transcript (code|iterate|null). */
+export function readTranscriptTaskMode(projectRoot) {
+    const file = transcriptPath(projectRoot);
+    if (!existsSync(file))
+        return null;
+    try {
+        const parsed = JSON.parse(readFileSync(file, 'utf-8'));
+        const m = parsed && typeof parsed === 'object' ? parsed.taskMode : null;
+        return m === 'code' || m === 'iterate' ? m : null;
     }
     catch {
         return null;
@@ -63,6 +80,7 @@ export function validateCheckpoint(input) {
  */
 export function computeStatus(input) {
     const checkpoint = input.checkpoint;
+    const taskMode = input.taskMode ?? null;
     const entries = input.decisionEntries;
     const registry = input.fixRegistry;
     const lastEntry = entries.length > 0 ? entries[entries.length - 1] : null;
@@ -85,6 +103,7 @@ export function computeStatus(input) {
     const architecturalCount = checkpoint?.architecturalCount ?? 0;
     return {
         mode: checkpoint?.mode ?? null,
+        taskMode,
         currentRound,
         totalRounds,
         fixedCount,
@@ -100,6 +119,12 @@ export function computeStatus(input) {
         resumeCount: checkpoint?.resumeCount ?? 0,
         checkpoint,
         lastUpdated,
+        // v3.0: quality command-center snapshots (present only when the caller
+        // supplied a real snapshot — the status never fabricates one that is not
+        // on disk, and never emits null for an absent optional field).
+        ...(input.qualityGate != null ? { qualityGate: input.qualityGate } : {}),
+        ...(input.experienceBank != null ? { experienceBank: input.experienceBank } : {}),
+        ...(input.defenseEvents != null ? { defenseEvents: input.defenseEvents } : {}),
     };
 }
 // ─── iterate_checkpoint ──────────────────────────────────────────────────────
@@ -110,14 +135,16 @@ export function computeStatus(input) {
 export function registerCheckpointTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_checkpoint',
-        description: 'Save / load / clear the iteration checkpoint. The workflow saves a checkpoint at the start of ' +
-            'each round (so a long run can resume) and clears it when the iteration completes.',
+        description: 'Save / load / resume / clear the iteration checkpoint. The workflow saves a checkpoint at the start of ' +
+            'each round (so a long run can resume) and clears it when the iteration completes. ' +
+            '`resume` loads an existing checkpoint, bumps its resumeCount, and persists it back — ' +
+            'call it when continuing an interrupted run so the resume counter stays accurate.',
         parameters: {
             operation: {
                 type: 'string',
                 required: true,
-                description: '"save" to persist the current progress, "load" to read it back, "clear" to remove it.',
-                enum: ['save', 'load', 'clear'],
+                description: '"save" to persist the current progress, "load" to read it back, "resume" to load + count a resumption, "clear" to remove it.',
+                enum: ['save', 'load', 'resume', 'clear'],
             },
             mode: { type: 'string', description: 'Required for save: "dry-run" or "normal".' },
             round: { type: 'integer', description: 'Required for save: current round number (0 = none started).' },
@@ -152,6 +179,28 @@ export function registerCheckpointTool(ctx) {
             if (args.operation === 'load') {
                 const checkpoint = readCheckpoint(projectRoot);
                 return { operation: 'load', ok: true, checkpoint: checkpoint };
+            }
+            if (args.operation === 'resume') {
+                const current = readCheckpoint(projectRoot);
+                if (!current) {
+                    return { operation: 'resume', ok: false, error: 'no checkpoint to resume — run `save` first' };
+                }
+                const resumed = {
+                    ...current,
+                    resumeCount: (current.resumeCount ?? 0) + 1,
+                    updatedAt: new Date().toISOString(),
+                };
+                try {
+                    mkdirSync(iterateDir(projectRoot), { recursive: true });
+                    const cpPath = checkpointPath(projectRoot);
+                    const tmpPath = `${cpPath}.tmp-${Date.now()}`;
+                    writeFileSync(tmpPath, JSON.stringify(resumed, null, 2), 'utf-8');
+                    renameSync(tmpPath, cpPath);
+                }
+                catch (err) {
+                    return { operation: 'resume', ok: false, error: `failed to persist resumed checkpoint: ${String(err)}` };
+                }
+                return { operation: 'resume', ok: true, checkpoint: resumed };
             }
             if (args.operation === 'clear') {
                 const existed = existsSync(checkpointPath(projectRoot));
@@ -201,7 +250,7 @@ export function registerCheckpointTool(ctx) {
                 }
                 return { operation: 'save', ok: true, checkpoint: checkpoint };
             }
-            return { operation: args.operation, ok: false, error: 'unknown operation. Use "save", "load", or "clear".' };
+            return { operation: args.operation, ok: false, error: 'unknown operation. Use "save", "load", "resume", or "clear".' };
         },
     }));
 }
@@ -225,6 +274,7 @@ export function registerStatusTool(ctx) {
                 properties: {
                     ok: { type: 'boolean', required: true },
                     mode: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                    taskMode: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Harness execution mode from the observatory transcript ("code" | "iterate").' },
                     currentRound: { type: 'integer' },
                     totalRounds: { type: 'integer' },
                     fixedCount: { type: 'integer' },
@@ -235,6 +285,9 @@ export function registerStatusTool(ctx) {
                     interrupted: { type: 'boolean', description: 'True when a checkpoint exists, meaning the previous run was interrupted before finishing.' },
                     resumeCount: { type: 'integer', description: 'How many times the current checkpoint has already been resumed.' },
                     lastUpdated: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                    qualityGate: { type: 'json', description: 'v3.0: persisted quality-gate snapshot (.iterate/quality-gate.json), when present.' },
+                    experienceBank: { type: 'json', description: 'v3.0: experience bank summary (.iterate/experience.json), when present.' },
+                    defenseEvents: { type: 'json', description: 'v3.0: defense events summary (.iterate/defense-events.json), when present.' },
                     error: { type: 'string' },
                 },
             },
@@ -242,7 +295,7 @@ export function registerStatusTool(ctx) {
                 if (!value.ok)
                     return [{ type: 'text', text: `status failed: ${value.error}` }];
                 const lines = [
-                    `Mode: ${value.mode ?? 'none'}`,
+                    `Mode: ${value.mode ?? 'none'}${value.taskMode ? ` (${value.taskMode})` : ''}`,
                     `Round: ${value.currentRound} / ${value.totalRounds}`,
                     `Fixed: ${value.fixedCount} · Architectural remaining: ${value.architecturalCount}`,
                     `Findings in checkpoint: ${value.findingsCount}`,
@@ -258,14 +311,35 @@ export function registerStatusTool(ctx) {
             if (!resolved.ok)
                 return { ok: false, error: resolved.reason };
             const projectRoot = resolved.root;
+            // v3.0: surface the persisted quality command-center snapshots so a
+            // single `iterate_status` call reports the whole run state — the gate,
+            // the experience bank, and the defense event stream. Each read is
+            // defensive (missing/malformed files yield an empty snapshot), so the
+            // status never crashes on absent artifacts.
+            const qualityGate = readQualityGate(projectRoot);
+            const experienceBank = readExperienceBank(projectRoot);
+            const defenseEvents = readDefenseEvents(projectRoot);
             const status = computeStatus({
                 checkpoint: readCheckpoint(projectRoot),
+                taskMode: readTranscriptTaskMode(projectRoot),
                 decisionEntries: readDecisionEntries(projectRoot),
                 fixRegistry: readRegistry(projectRoot),
+                qualityGate: qualityGate.dimensions.length > 0 || qualityGate.overallStatus === 'pass' || qualityGate.overallStatus === 'fail'
+                    ? qualityGate
+                    : null,
+                experienceBank: {
+                    totalEntries: experienceBank.entries.length,
+                    totalHits: experienceBank.totalHits ?? 0,
+                },
+                defenseEvents: {
+                    totalEvents: defenseEvents.events.length,
+                    counts: defenseEvents.counts,
+                },
             });
             return {
                 ok: true,
                 mode: status.mode ?? null,
+                taskMode: status.taskMode ?? null,
                 currentRound: status.currentRound,
                 totalRounds: status.totalRounds,
                 fixedCount: status.fixedCount,
@@ -276,6 +350,9 @@ export function registerStatusTool(ctx) {
                 interrupted: status.interrupted,
                 resumeCount: status.resumeCount,
                 lastUpdated: status.lastUpdated ?? null,
+                qualityGate: status.qualityGate ? status.qualityGate : null,
+                experienceBank: status.experienceBank ? status.experienceBank : null,
+                defenseEvents: status.defenseEvents ? status.defenseEvents : null,
             };
         },
     }));

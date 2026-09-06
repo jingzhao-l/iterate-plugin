@@ -186,7 +186,10 @@ export function registerExperienceBankTool(ctx) {
                 }
                 const bank = readExperienceBank(projectRoot);
                 const { bank: next, added, entryId } = upsertExperience(bank, normalizeExperienceInput(raw));
-                writeExperienceBank(projectRoot, next);
+                const write = writeExperienceBank(projectRoot, next);
+                if (!write.ok) {
+                    return { ok: false, kind: 'experience', operation: 'add', error: write.error };
+                }
                 const entry = next.entries.find((e) => e.id === entryId);
                 return {
                     ok: true,

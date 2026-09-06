@@ -37,14 +37,25 @@ function emptyStream() {
         },
     };
 }
-/** Read the defense events stream from disk. */
+/**
+ * Read the defense events stream from disk.
+ * Normalizes the persisted stream so a hand-edited / partial file can never
+ * produce NaN counts: `counts` is recomputed from the events when missing or
+ * malformed, and every type key is guaranteed present.
+ */
 export function readDefenseEvents(projectRoot) {
     const filePath = path.join(projectRoot, '.iterate', DEFENSE_EVENTS_FILE);
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
         const parsed = JSON.parse(content);
         if (parsed && Array.isArray(parsed.events)) {
-            return parsed;
+            const events = parsed.events.filter((e) => !!e && typeof e === 'object' && typeof e.type === 'string');
+            const counts = computeCounts(events);
+            return {
+                events,
+                lastUpdated: typeof parsed.lastUpdated === 'string' ? parsed.lastUpdated : emptyStream().lastUpdated,
+                counts,
+            };
         }
     }
     catch {
@@ -52,7 +63,12 @@ export function readDefenseEvents(projectRoot) {
     }
     return emptyStream();
 }
-/** Write the defense events stream to disk. */
+/**
+ * Write the defense events stream to disk.
+ * Returns `{ ok: true }` on success or `{ ok: false, error }` when the write
+ * fails — a caller must surface the failure instead of reporting success for
+ * an event that was never persisted.
+ */
 export function writeDefenseEvents(projectRoot, stream) {
     const dirPath = path.join(projectRoot, '.iterate');
     const filePath = path.join(dirPath, DEFENSE_EVENTS_FILE);
@@ -62,9 +78,10 @@ export function writeDefenseEvents(projectRoot, stream) {
         }
         fs.writeFileSync(filePath, JSON.stringify(stream, null, 2), 'utf-8');
     }
-    catch {
-        // Silently fail - defense events are not critical
+    catch (err) {
+        return { ok: false, error: `unable to write ${filePath}: ${String(err)}` };
     }
+    return { ok: true };
 }
 /** Add a defense event to the stream. */
 export function addDefenseEvent(stream, event) {
@@ -74,7 +91,10 @@ export function addDefenseEvent(stream, event) {
         timestamp: new Date().toISOString(),
         ...event,
     };
-    const newCounts = { ...stream.counts };
+    // Always recompute from the events array instead of mutating a possibly
+    // stale/malformed persisted `counts` object — guarantees the stream counts
+    // can never drift from (or NaN out against) its events.
+    const newCounts = computeCounts(stream.events);
     bumpCount(newCounts, event.type);
     return {
         events: [...stream.events, newEvent],

@@ -107,6 +107,26 @@ describe('validateConfigUpdates', () => {
       [],
     )
   })
+
+  it('accepts observatory updates that do not touch the approval policy', () => {
+    assert.deepEqual(
+      validateConfigUpdates({ observatory: { capture: true } }),
+      [],
+    )
+  })
+
+  it('rejects an observatory approval change fail-closed', () => {
+    // The model must not be able to flip the human-consent gate to `allow`.
+    const errors = validateConfigUpdates({ observatory: { approval: 'allow' } })
+    assert.ok(errors.some((e) => e.includes('observatory.approval')))
+    assert.match(errors.join('; '), /human-controlled/)
+  })
+
+  it('rejects a malformed observatory block', () => {
+    assert.ok(validateConfigUpdates({ observatory: 'x' }).some((e) => e.includes('observatory')))
+    assert.ok(validateConfigUpdates({ observatory: { capture: 'yes' } }).some((e) => e.includes('observatory.capture')))
+    assert.ok(validateConfigUpdates({ observatory: { approval: 'ask', capture: false } }).some((e) => e.includes('observatory.approval')))
+  })
 })
 
 // ─── applyConfigUpdates ──────────────────────────────────────────────────────
@@ -130,6 +150,23 @@ describe('applyConfigUpdates', () => {
     assert.equal(next.goal, 'g')
     assert.equal(next.max_rounds, 3)
     assert.equal(JSON.stringify(base), snapshot)
+  })
+
+  it('refuses prototype-pollution keys', () => {
+    // A JSON-parsed update can carry `__proto__` / `constructor` / `prototype`
+    // as own keys; they must never be plain-assigned onto the merged config.
+    const base = { goal: 'g', safe: true }
+    const poison = JSON.parse('{"__proto__": {"polluted": true}, "constructor": {"x": 1}, "prototype": {"y": 2}, "goal": "h"}')
+    const next = applyConfigUpdates(base, poison as Record<string, unknown>)
+    assert.equal(next.goal, 'h')
+    // The merged config's prototype is untouched (not polluted).
+    assert.equal((Object.getPrototypeOf(next) as Record<string, unknown>).polluted, undefined)
+    // None of the pollution keys landed as own enumerable properties.
+    assert.equal(Object.prototype.hasOwnProperty.call(next, '__proto__'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(next, 'constructor'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(next, 'prototype'), false)
+    // base is untouched.
+    assert.equal(base.goal, 'g')
   })
 })
 

@@ -103,6 +103,53 @@ describe('iterate_defense_events record', () => {
     }
   })
 
+  it('rejects a negative/non-integer line on record', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // A negative integer passes the argument schema (it IS an integer), so
+      // the tool's own validation must reject it and never write.
+      const neg = (await tool.execute({
+        operation: 'record',
+        path: dir,
+        ...recordArgs,
+        line: -1,
+      })) as Record<string, unknown>
+      assert.equal(neg.ok, false)
+      assert.ok((neg.errors as string[]).some((e) => e.includes('line')))
+
+      // Non-integer / non-numeric values are rejected by the argument schema
+      // before execute runs (INVALID_ARGS).
+      for (const line of [1.5, '42']) {
+        await assert.rejects(
+          () => tool.execute({ operation: 'record', path: dir, ...recordArgs, line }),
+          /must be an integer/,
+        )
+      }
+      assert.equal(existsSync(join(dir, '.iterate')), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('accepts a valid line (0 = whole-file) on record', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const ok = (await tool.execute({
+        operation: 'record',
+        path: dir,
+        ...recordArgs,
+        file: 'src/a.ts',
+        line: 0,
+      })) as Record<string, unknown>
+      assert.equal(ok.ok, true)
+      assert.equal((ok.event as { file: string }).file, 'src/a.ts')
+    } finally {
+      cleanup()
+    }
+  })
+
   it('counts/record renders use the requested label language', async () => {
     const tool = captureTool()
     const zh = tool.render({ operation: 'record' }, {

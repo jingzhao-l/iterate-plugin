@@ -247,14 +247,20 @@ export function buildReviewReport(input: {
   fixedCount?: number
 }): ReviewReport {
   // 1. Filter known-intentional per round (before cross-round dedupe).
-  const filteredRounds = input.rounds.map((r) => ({
-    round: typeof r?.round === 'number' ? r.round : 0,
-    findings: filterKnownIntentional(
-      Array.isArray(r?.findings) ? r.findings : [],
-      input.knownIntentional,
-    ),
-    readFiles: Array.isArray(r?.readFiles) ? r.readFiles : [],
-  }))
+  const filteredRounds = input.rounds
+    .map((r) => ({
+      round: typeof r?.round === 'number' ? r.round : 0,
+      findings: filterKnownIntentional(
+        Array.isArray(r?.findings) ? r.findings : [],
+        input.knownIntentional,
+      ),
+      readFiles: Array.isArray(r?.readFiles) ? r.readFiles : [],
+    }))
+    // Sort by round number so convergence math below (and the meta-review
+    // audit, which reads the LAST element as the highest round) never depends
+    // on the caller's array order. A resumed run that only passes [round 5]
+    // must be audited as round 5, not as "one round with no number".
+    .sort((a, b) => a.round - b.round)
 
   // 2. Cross-round dedupe + per-round "first seen" tracking.
   const { findings, findingsByRound } = aggregateRounds(
@@ -271,8 +277,10 @@ export function buildReviewReport(input: {
   //    using its reported round number — NOT `filteredRounds.length - 1`, which
   //    is only valid for contiguous 1..N round numbers (resumed iterations and
   //    non-contiguous round sets would otherwise read the wrong count).
-  const lastRound =
-    filteredRounds.length > 0 ? filteredRounds[filteredRounds.length - 1]!.round : 0
+  let lastRound = 0
+  for (const r of filteredRounds) {
+    if (typeof r.round === 'number' && r.round > lastRound) lastRound = r.round
+  }
   const lastRoundCount =
     lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0
   const converged = filteredRounds.length > 0 && lastRoundCount === 0

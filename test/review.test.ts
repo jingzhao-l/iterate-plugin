@@ -295,6 +295,45 @@ describe('buildReviewReport', () => {
     assert.equal(converged.convergence.stoppedReason, 'converged')
   })
 
+  it('is order-independent when rounds arrive unsorted', () => {
+    // The orchestrator may hand rounds back out of order (e.g. parallel
+    // reviewers or a resumed run). Convergence must read the HIGHEST round
+    // number, and the report's round list must be stable regardless of input
+    // order so the meta-review audit sees the last element as the top round.
+    const unsorted = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 5,
+      rounds: [
+        { round: 3, findings: [f({ summary: 'round 3 issue' })] },
+        { round: 1, findings: [f({ summary: 'round 1 issue' })] },
+      ],
+    })
+    // Round 1 has 1 new finding, round 3 has 1 new finding → NOT converged.
+    assert.deepEqual(unsorted.convergence.findingsByRound, [1, 0, 1])
+    assert.equal(unsorted.convergence.converged, false)
+    // Rounds are reported in ascending order.
+    assert.deepEqual(unsorted.rounds.map((r) => r.round), [1, 3])
+
+    // The mirror: highest round adds nothing new → converged regardless of order.
+    // Round 2 introduces "dup" as a NEW finding, round 3 duplicates it → 0 new.
+    const conv = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 5,
+      rounds: [
+        { round: 3, findings: [f({ summary: 'dup' })] },
+        { round: 1, findings: [f({ summary: 'original' })] },
+        { round: 2, findings: [f({ summary: 'dup' })] }, // new in round 2, dup in round 3
+      ],
+    })
+    assert.deepEqual(conv.convergence.findingsByRound, [1, 1, 0])
+    assert.equal(conv.convergence.converged, true)
+    assert.equal(conv.convergence.stoppedReason, 'converged')
+  })
+
   it('threads fixedCount into the summary for normal mode only', () => {
     const rounds = [{ round: 1, findings: [f({ summary: 'issue' })] }]
     const dryRun = buildReviewReport({

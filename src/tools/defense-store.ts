@@ -44,14 +44,28 @@ function emptyStream(): DefenseEventStream {
   }
 }
 
-/** Read the defense events stream from disk. */
+/**
+ * Read the defense events stream from disk.
+ * Normalizes the persisted stream so a hand-edited / partial file can never
+ * produce NaN counts: `counts` is recomputed from the events when missing or
+ * malformed, and every type key is guaranteed present.
+ */
 export function readDefenseEvents(projectRoot: string): DefenseEventStream {
   const filePath = path.join(projectRoot, '.iterate', DEFENSE_EVENTS_FILE)
   try {
     const content = fs.readFileSync(filePath, 'utf-8')
-    const parsed = JSON.parse(content) as DefenseEventStream
+    const parsed = JSON.parse(content) as Partial<DefenseEventStream>
     if (parsed && Array.isArray(parsed.events)) {
-      return parsed
+      const events = parsed.events.filter(
+        (e): e is DefenseEvent =>
+          !!e && typeof e === 'object' && typeof (e as DefenseEvent).type === 'string',
+      )
+      const counts = computeCounts(events)
+      return {
+        events,
+        lastUpdated: typeof parsed.lastUpdated === 'string' ? parsed.lastUpdated : emptyStream().lastUpdated,
+        counts,
+      }
     }
   } catch {
     // File not found or invalid JSON
@@ -95,7 +109,10 @@ export function addDefenseEvent(
     ...event,
   }
 
-  const newCounts = { ...stream.counts }
+  // Always recompute from the events array instead of mutating a possibly
+  // stale/malformed persisted `counts` object — guarantees the stream counts
+  // can never drift from (or NaN out against) its events.
+  const newCounts = computeCounts(stream.events)
   bumpCount(newCounts, event.type)
 
   return {

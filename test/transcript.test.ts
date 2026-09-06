@@ -140,6 +140,19 @@ describe('ReviewTranscriptBuilder', () => {
     assert.doesNotThrow(() => b.markFixRolledBack('missing'))
   })
 
+  it('fix() bounds the fixes list so a long run cannot grow it unboundedly', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    // Drive past the internal cap; the newest records must win.
+    for (let i = 0; i < 500; i += 1) {
+      b.fix({ id: `f${i}`, file: 'src/a.ts', round: 1, summary: `fix ${i}` })
+    }
+    const fixes = b.serialize().fixes
+    assert.equal(fixes.length, 200)
+    // The OLDEST records were dropped, the newest retained.
+    assert.equal(fixes[0]!.id, 'f300')
+    assert.equal(fixes[fixes.length - 1]!.id, 'f499')
+  })
+
   it('recordCheckpoint(null) clears the checkpoint', () => {
     const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
     b.recordCheckpoint({ mode: 'normal', round: 2, maxRounds: 5, fixedCount: 1, resumeCount: 0, updatedAt: 'c' })

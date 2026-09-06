@@ -130,7 +130,7 @@ export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<t
               ? `Fixes: ${fixes.totalFixed} applied · ${fixes.totalFailed} failed · across ${fixes.roundCount} round(s)`
               : 'Fixes: none',
             '',
-            ...log.map((e) => `[${e.timestamp}] r${e.round} ${e.type}: ${JSON.stringify(e.data ?? {})}`),
+            ...log.map((e) => `[${e.timestamp}] r${e.round ?? '?'} ${e.type}: ${JSON.stringify(e.data ?? {})}`),
           ]
           return [{ type: 'text', text: lines.join('\n') }]
         },

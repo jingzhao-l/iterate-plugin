@@ -22,7 +22,7 @@
  */
 
 import { readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 export interface CoverageResult {
   assigned: string[]
@@ -135,8 +135,15 @@ function collectFull(root: string): string[] {
       }
       if (!entry.isFile()) continue
       if (!sourceExt(entry.name)) continue
-      const rel = abs.startsWith(root + SEP) ? abs.slice(root.length + 1) : abs
-      out.push(rel.split(SEP).join(SEP))
+      // Derive the inventory path relative to the root via path.relative (then
+      // canonicalize separators). The old `abs.slice(root.length + 1)` string
+      // prefix was only correct on POSIX: on Windows path.join emits '\\' while
+      // this module's SEP is '/', so the prefix never matched and the ABSOLUTE
+      // path leaked into the inventory. path.relative is separator-agnostic and
+      // always yields a path strictly inside `root`.
+      const rel = normalizePath(relative(root, abs))
+      if (rel === '' || rel === '.' || rel.startsWith('../') || rel === '..') continue
+      out.push(rel)
     }
   }
   return out.sort()

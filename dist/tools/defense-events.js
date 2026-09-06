@@ -56,6 +56,9 @@ function validateRecordInput(args) {
     if (typeof args.outcome !== 'string' || !args.outcome.trim()) {
         errors.push('outcome is required');
     }
+    if (args.line !== undefined && (typeof args.line !== 'number' || !Number.isInteger(args.line) || args.line < 0)) {
+        errors.push('line must be a non-negative integer when present');
+    }
     const severity = args.severity;
     if (severity !== 'critical' && severity !== 'high' && severity !== 'medium' && severity !== 'low') {
         errors.push('severity must be one of critical, high, medium, low');
@@ -213,7 +216,10 @@ export function registerDefenseEventsTool(ctx) {
                     ...(typeof args.file === 'string' && args.file.length > 0 ? { file: args.file } : {}),
                     ...(typeof args.line === 'number' ? { line: args.line } : {}),
                 });
-                writeDefenseEvents(projectRoot, next);
+                const write = writeDefenseEvents(projectRoot, next);
+                if (!write.ok) {
+                    return { ok: false, kind: 'defense_events', operation: 'record', error: write.error };
+                }
                 const event = next.events[next.events.length - 1];
                 return {
                     ok: true,

@@ -160,7 +160,10 @@ export function registerQualityGateTool(ctx) {
                     findingsByRound,
                     fixedByDimension,
                 });
-                writeQualityGate(projectRoot, snapshot);
+                const write = writeQualityGate(projectRoot, snapshot);
+                if (!write.ok) {
+                    return { ok: false, kind: 'quality_gate', operation: 'compute', error: write.error };
+                }
                 return {
                     ok: true,
                     kind: 'quality_gate',

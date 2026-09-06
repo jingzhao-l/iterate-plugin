@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { convergenceRateFor, computeQualityGate, writeQualityGate } from '../src/tools/quality-store.ts'
+import { convergenceRateFor, computeQualityGate, readQualityGate, writeQualityGate } from '../src/tools/quality-store.ts'
 
 describe('convergenceRateFor', () => {
   it('is 100 for a dimension with no findings at all', () => {
@@ -132,6 +132,82 @@ describe('writeQualityGate', () => {
       const result = writeQualityGate(dir, computeQualityGate({ dimensions: [], findings: [] }))
       assert.equal(result.ok, false)
       assert.match((result as { error: string }).error, /quality-gate\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('readQualityGate', () => {
+  it('returns an empty snapshot when the file is missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-read-'))
+    try {
+      const snap = readQualityGate(dir)
+      assert.equal(snap.overallStatus, 'pending')
+      assert.deepEqual(snap.dimensions, [])
+      assert.equal(snap.overallScore, 0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes a hand-edited file so the tool render never crashes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      // `dimensions` absent + non-numeric fields must degrade, not throw.
+      writeFileSync(join(dir, '.iterate', 'quality-gate.json'), JSON.stringify({
+        overallStatus: 'pass',
+        overallScore: 'nope',
+        dimensions: undefined,
+      }), 'utf-8')
+      const snap = readQualityGate(dir)
+      assert.equal(snap.overallStatus, 'pass')
+      assert.equal(snap.overallScore, 0)
+      assert.deepEqual(snap.dimensions, [])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps only well-formed dimension entries', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'quality-gate.json'), JSON.stringify({
+        overallStatus: 'fail',
+        dimensions: [
+          { dimension: 'security', score: 30, status: 'fail' },
+          { score: 99 },        // no dimension string → dropped
+          null,                  // → dropped
+        ],
+        totalFindings: 'oops',
+      }), 'utf-8')
+      const snap = readQualityGate(dir)
+      assert.equal(snap.dimensions.length, 1)
+      assert.equal(snap.dimensions[0]!.dimension, 'security')
+      assert.equal(snap.totalFindings, 0)
+      assert.equal(snap.overallStatus, 'fail')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes per-dimension numeric/status fields', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'quality-gate.json'), JSON.stringify({
+        dimensions: [
+          { dimension: 'security', score: 'oops', convergenceRate: null, findingsCount: 3, fixedCount: 1, status: 'warp' },
+        ],
+      }), 'utf-8')
+      const snap = readQualityGate(dir)
+      const dim = snap.dimensions[0]!
+      assert.equal(dim.score, 0)
+      assert.equal(dim.convergenceRate, 0)
+      assert.equal(dim.findingsCount, 3)
+      assert.equal(dim.status, 'warn') // unknown status degrades to warn
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

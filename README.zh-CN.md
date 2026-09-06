@@ -254,8 +254,8 @@ validation:
 - `iterate_fix` — 应用**一个原子修复**：校验相对路径、备份原文件、按 `atomic.max_lines` 强制原子性（可 `force` 跳过）、写入新内容、记录 FixRecord 与 `atomic_fix` 日志。normal 模式唯一合法的改文件入口
 - `iterate_diff` — 查看修复累积变更：指定 `file` 返回相对首个备份的 unified diff；省略则返回每个已修复文件的汇总
 - `iterate_rollback` — 回滚一个已应用的修复：从备份还原文件、从注册表移除该 FixRecord、追加 `revert` 日志。用于某轮验证失败后
-- `iterate_checkpoint` — 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`clear` 清除。长迭代可中断续跑
-- `iterate_status` — 汇总当前迭代状态：模式、当前轮/总轮、已修复数、剩余 architectural、决策日志条数、是否存在 checkpoint
+- `iterate_checkpoint` — 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`resume` 加载并累加恢复计数（中断恢复），`clear` 清除。长迭代可中断续跑
+- `iterate_status` — 汇总当前迭代状态：模式、当前轮/总轮、已修复数、剩余 architectural、决策日志条数、是否存在 checkpoint；**v3.4：同时返回持久化的质量门禁快照、经验银行摘要与防御事件摘要**（`qualityGate` / `experienceBank` / `defenseEvents`）
 - `iterate_history` — 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数）。用于审查运行过程、审计日志、盘点修复
 - `iterate_prune` — 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志
 - `iterate_transcript` — 运行时观测台：把审查转录、线程、修复与 nudge 指令持久化到 `.iterate/transcript.json`，供客户端观测台读取

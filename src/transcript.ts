@@ -49,6 +49,10 @@ const MAX_FINDINGS_TOTAL = 2000
 /** Max timeline entries kept (newest wins). */
 const MAX_TIMELINE = 500
 
+/** Max applied-fix records kept (newest wins; bounded so a long run cannot
+ *  grow the manifest payload without limit). */
+const MAX_FIXES = 200
+
 /** Thresholds applied when reducing a string list under a cap. */
 function clampStringList(source: string[], cap: number): string[] {
   const out: string[] = []
@@ -317,6 +321,9 @@ export class ReviewTranscriptBuilder {
         typeof record.linesRemoved === 'number' ? Math.floor(record.linesRemoved) : 0,
       success: record.success !== false,
     })
+    if (this.fixes.length > MAX_FIXES) {
+      this.fixes.splice(0, this.fixes.length - MAX_FIXES)
+    }
     this.touch()
   }
 

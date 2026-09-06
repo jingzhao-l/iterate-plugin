@@ -21,7 +21,7 @@
  * cleanly; collectScopeFiles walks the filesystem.
  */
 import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 /** Relative-scope sentinel for whole-module findings. */
 export const WHOLE_FILE_LINE = 0;
 /** Source extensions a full-scope walk includes. */
@@ -124,8 +124,16 @@ function collectFull(root) {
                 continue;
             if (!sourceExt(entry.name))
                 continue;
-            const rel = abs.startsWith(root + SEP) ? abs.slice(root.length + 1) : abs;
-            out.push(rel.split(SEP).join(SEP));
+            // Derive the inventory path relative to the root via path.relative (then
+            // canonicalize separators). The old `abs.slice(root.length + 1)` string
+            // prefix was only correct on POSIX: on Windows path.join emits '\\' while
+            // this module's SEP is '/', so the prefix never matched and the ABSOLUTE
+            // path leaked into the inventory. path.relative is separator-agnostic and
+            // always yields a path strictly inside `root`.
+            const rel = normalizePath(relative(root, abs));
+            if (rel === '' || rel === '.' || rel.startsWith('../') || rel === '..')
+                continue;
+            out.push(rel);
         }
     }
     return out.sort();

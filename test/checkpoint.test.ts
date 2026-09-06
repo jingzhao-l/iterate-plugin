@@ -184,6 +184,36 @@ describe('computeStatus', () => {
     const none = computeStatus({ checkpoint: null, decisionEntries: [], fixRegistry: { rounds: [] } })
     assert.equal(none.taskMode, null)
   })
+
+  it('surfaces the quality command-center snapshots when supplied', () => {
+    const status = computeStatus({
+      checkpoint: null,
+      decisionEntries: [],
+      fixRegistry: { rounds: [] },
+      qualityGate: {
+        timestamp: 't', overallStatus: 'pass', overallScore: 90, dimensions: [],
+        verificationPassRate: 100, totalChecks: 1, passedChecks: 1, failedChecks: 0,
+        totalFindings: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+      },
+      experienceBank: { totalEntries: 3, totalHits: 7 },
+      defenseEvents: {
+        totalEvents: 2,
+        counts: { precondition_failed: 1, rollback: 1, invariant_violated: 0, assumption_falsified: 0 },
+      },
+    })
+    assert.equal(status.qualityGate?.overallStatus, 'pass')
+    assert.equal(status.qualityGate?.overallScore, 90)
+    assert.deepEqual(status.experienceBank, { totalEntries: 3, totalHits: 7 })
+    assert.equal(status.defenseEvents?.totalEvents, 2)
+    assert.equal(status.defenseEvents?.counts.rollback, 1)
+  })
+
+  it('omits the snapshots when not supplied (never fabricates)', () => {
+    const status = computeStatus({ checkpoint: null, decisionEntries: [], fixRegistry: { rounds: [] } })
+    assert.equal(status.qualityGate, undefined)
+    assert.equal(status.experienceBank, undefined)
+    assert.equal(status.defenseEvents, undefined)
+  })
 })
 
 // ─── readTranscriptTaskMode ──────────────────────────────────────────────────
@@ -307,6 +337,91 @@ describe('iterate_checkpoint / iterate_status execute', () => {
       const res = (await checkpointTool({ operation: 'load', path: dir })) as Record<string, unknown>
       assert.equal(res.ok, true)
       assert.equal(res.checkpoint, null)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('resume bumps resumeCount and persists it back', async () => {
+    const [checkpointTool] = captureTools([registerCheckpointTool]) as [Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      const saved = (await checkpointTool({
+        operation: 'save',
+        mode: 'normal',
+        round: 2,
+        maxRounds: 5,
+        fixedCount: 4,
+        architecturalCount: 1,
+        resumeCount: 0,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(saved.ok, true)
+
+      const resumed = (await checkpointTool({ operation: 'resume', path: dir })) as Record<string, unknown>
+      assert.equal(resumed.ok, true)
+      const ck = resumed.checkpoint as IterationCheckpoint
+      assert.equal(ck.resumeCount, 1)
+      assert.equal(ck.round, 2)
+      assert.equal(ck.fixedCount, 4)
+
+      // A second resume keeps counting.
+      const resumed2 = (await checkpointTool({ operation: 'resume', path: dir })) as Record<string, unknown>
+      assert.equal((resumed2.checkpoint as IterationCheckpoint).resumeCount, 2)
+
+      // The on-disk copy matches.
+      const loaded = (await checkpointTool({ operation: 'load', path: dir })) as Record<string, unknown>
+      assert.equal((loaded.checkpoint as IterationCheckpoint).resumeCount, 2)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('resume errors when no checkpoint exists', async () => {
+    const [checkpointTool] = captureTools([registerCheckpointTool]) as [Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      const res = (await checkpointTool({ operation: 'resume', path: dir })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /no checkpoint to resume/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('status surfaces the persisted quality command-center snapshots', async () => {
+    const [checkpointTool, statusTool] = captureTools([registerCheckpointTool, registerStatusTool]) as [Tool, Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      // Seed a quality gate + experience bank + defense events on disk.
+      writeFileSync(join(dir, '.iterate', 'quality-gate.json'), JSON.stringify({
+        timestamp: 't', overallStatus: 'pass', overallScore: 95, dimensions: [
+          { dimension: 'security', convergenceRate: 100, findingsCount: 1, fixedCount: 1, score: 95, status: 'pass' },
+        ],
+        verificationPassRate: 100, totalChecks: 2, passedChecks: 2, failedChecks: 0,
+        totalFindings: 1, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 1,
+      }), 'utf-8')
+      writeFileSync(join(dir, '.iterate', 'experience.json'), JSON.stringify({
+        lastUpdated: 't', totalHits: 4,
+        entries: [{ id: 'e1', timestamp: 't', dimension: 'security', pattern: 'p', description: 'd', verifiedFix: 'f', files: ['a.ts'], hitCount: 4, tags: [], findingSummary: 's', severity: 'high' }],
+      }), 'utf-8')
+      writeFileSync(join(dir, '.iterate', 'defense-events.json'), JSON.stringify({
+        lastUpdated: 't',
+        counts: { precondition_failed: 1, rollback: 0, invariant_violated: 0, assumption_falsified: 0 },
+        events: [{ id: 'd1', timestamp: 't', round: 1, type: 'precondition_failed', description: 'x', defense: 'y', outcome: 'z', severity: 'medium' }],
+      }), 'utf-8')
+
+      const res = (await statusTool({ path: dir })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      const gate = res.qualityGate as Record<string, unknown>
+      assert.equal(gate.overallStatus, 'pass')
+      assert.equal((gate.dimensions as unknown[]).length, 1)
+      const exp = res.experienceBank as Record<string, unknown>
+      assert.equal(exp.totalEntries, 1)
+      assert.equal(exp.totalHits, 4)
+      const def = res.defenseEvents as Record<string, unknown>
+      assert.equal(def.totalEvents, 1)
+      assert.equal((def.counts as Record<string, number>).precondition_failed, 1)
     } finally {
       cleanup()
     }

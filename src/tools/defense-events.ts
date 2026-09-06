@@ -55,6 +55,7 @@ function validateRecordInput(args: {
   defense?: unknown
   outcome?: unknown
   severity?: unknown
+  line?: unknown
 }): string[] {
   const errors: string[] = []
   if (typeof args.type !== 'string' || !EVENT_TYPES.includes(args.type as DefenseEventType)) {
@@ -71,6 +72,9 @@ function validateRecordInput(args: {
   }
   if (typeof args.outcome !== 'string' || !args.outcome.trim()) {
     errors.push('outcome is required')
+  }
+  if (args.line !== undefined && (typeof args.line !== 'number' || !Number.isInteger(args.line) || args.line < 0)) {
+    errors.push('line must be a non-negative integer when present')
   }
   const severity = args.severity
   if (severity !== 'critical' && severity !== 'high' && severity !== 'medium' && severity !== 'low') {

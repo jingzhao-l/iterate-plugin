@@ -91,6 +91,27 @@ export function validateConfigUpdates(updates) {
             errors.push('updates.validation.commands must be an object of command arrays');
         }
     }
+    if ('observatory' in updates) {
+        const o = updates.observatory;
+        if (!o || typeof o !== 'object') {
+            errors.push('updates.observatory must be an object');
+        }
+        else {
+            if (o.capture !== undefined && typeof o.capture !== 'boolean') {
+                errors.push('updates.observatory.capture must be a boolean');
+            }
+            // The approval policy is the AUTHORITATIVE human-consent seam for
+            // destructive iterate tools (session-hooks.ts reads it at call time).
+            // Letting the model flip it to `allow` via a config write would bypass
+            // the gate entirely, so model-driven approval changes are refused
+            // fail-closed — the value can only be set by editing the config file
+            // directly (a human action the approval seam can trust).
+            if ('approval' in o) {
+                errors.push('updates.observatory.approval cannot be changed through iterate_config — ' +
+                    'edit iterate.config.yaml directly (the approval gate is human-controlled)');
+            }
+        }
+    }
     if ('personalization' in updates && (!updates.personalization || typeof updates.personalization !== 'object')) {
         errors.push('updates.personalization must be an object');
     }
@@ -104,6 +125,12 @@ export function applyConfigUpdates(base, updates) {
     const out = { ...base };
     for (const [key, value] of Object.entries(updates)) {
         if (value === undefined)
+            continue;
+        // Prototype-pollution guard (mirrors config-loader.mergeConfig): a
+        // caller-supplied `__proto__`/`constructor`/`prototype` key must never be
+        // plain-assigned — on a plain object `out['__proto__'] = value` would set
+        // the object's prototype instead of an own property.
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype')
             continue;
         const baseValue = out[key];
         if (baseValue &&

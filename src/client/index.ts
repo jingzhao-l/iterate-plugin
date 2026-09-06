@@ -567,6 +567,7 @@ const ITERATE_CSS = `
 /* Dashboard empty/onboarding state */
 .iterate-dashboard-empty { opacity: 0.75; }
 .iterate-empty-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.iterate-dashboard-launch { display: inline-flex; align-items: center; gap: 6px; }
 
 /* Convergence-completed progress fill */
 .iterate-progress-fill-done { background: var(--dsw-alias-state-success-primary); }
@@ -834,6 +835,36 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
   }, ...bars)
 }
 
+/** Start-iteration launcher shown on the empty dashboard: copies a runnable
+ *  command (the browser cannot invoke harness tools directly, so every action
+ *  follows the panel's copy-to-command pattern). */
+function StartIterationButton() {
+  const [copied, setCopied] = React.useState<string | null>(null)
+  const copy = (key: string, text: string) => {
+    copyText(text).then((ok) => {
+      if (ok) {
+        setCopied(key)
+        setTimeout(() => setCopied((cur) => (cur === key ? null : cur)), 1600)
+      }
+    })
+  }
+  const btn = (key: string, label: string, command: string, primary: boolean, title: string) =>
+    React.createElement('button', {
+      key,
+      className: 'iterate-cmd',
+      'data-primary': primary ? '' : undefined,
+      'data-copied': copied === key ? '' : undefined,
+      onClick: () => copy(key, command),
+      title,
+    }, copied === key ? '已复制' : label)
+  return React.createElement(
+    'span',
+    { className: 'iterate-dashboard-launch' },
+    btn('start-full', '完整迭代', '/iterate', true, '复制启动命令：完整「审查 → 修复 → 验证」闭环'),
+    btn('start-review', '仅评审', '/iterate review-only', false, '复制启动命令：只审查不修改（dry-run）'),
+  )
+}
+
 /** Dashboard: live convergence strip above the composer.
  *
  * The `conversation.input.dock` slot's owner share is `InputZone`, which
@@ -859,12 +890,15 @@ function ConvergenceDashboard(props: SlotProps) {
 
   if (!report) {
     // Empty/onboarding state: first-time users otherwise see nothing and have
-    // no idea the plugin exists or how to start.
+    // no idea the plugin exists or how to start. Provide a one-click command
+    // that launches the loop (copied for paste — the browser cannot call
+    // harness tools directly).
     return React.createElement(
       'div',
       { 'data-iterate-root': '', 'data-iterate': 'dashboard', className: 'iterate-dashboard iterate-dashboard-empty' },
       React.createElement('span', { className: 'iterate-round-badge' }, 'iterate'),
-      React.createElement('span', { className: 'iterate-empty-hint' }, '运行一次评审后，这里会显示收敛进度与发现统计。试试「review this project」或「/iterate review-only」'),
+      React.createElement('span', { className: 'iterate-empty-hint' }, '运行一次评审后，这里会显示收敛进度与发现统计。'),
+      React.createElement(StartIterationButton, null),
     )
   }
 
@@ -2151,7 +2185,7 @@ function ObservatoryPanel(props: SlotProps) {
         React.createElement('button', {
           className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'cp-resume' ? '' : undefined,
           onClick: () => copyInstruction('cp-resume', resumeText),
-          title: '复制 iterate_checkpoint 综/恢复指令文本',
+          title: '复制 iterate_checkpoint resume 指令文本（加载断点并计数一次恢复）',
         }, copiedKey === 'cp-resume' ? '已复制' : '复制恢复指令'),
       ),
     )

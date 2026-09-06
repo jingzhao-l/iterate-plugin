@@ -5,6 +5,36 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-09-06
+
+### Added
+
+- **`iterate_checkpoint` `resume` operation**: loads an existing checkpoint, bumps `resumeCount`, and persists it back atomically — the observatory F5 panel's resume instruction now works instead of copying an operation the tool rejected (`unknown operation`). The skill's own resume flow (load + manual `resumeCount` bump) is unaffected.
+- **`iterate_status` now surfaces the quality command center**: the output carries the persisted quality-gate snapshot, experience-bank summary, and defense-events summary (`qualityGate` / `experienceBank` / `defenseEvents`) — the fields the `IterationStatus` type always declared but never populated. Absent snapshots degrade to `null`, never fabricated.
+- **Empty-dashboard launcher**: when no report exists yet, the convergence dashboard offers one-click copy buttons for `/iterate` (full loop) and `/iterate review-only` (dry-run), replacing the passive hint text.
+
+### Fixed
+
+- **Config write prototype-pollution guard**: `applyConfigUpdates` now refuses `__proto__` / `constructor` / `prototype` update keys (mirroring `mergeConfig`) — a model-supplied `{"__proto__": …}` JSON update previously plain-assigned onto the merged config object and changed its prototype.
+- **Approval gate no longer bypassable via `iterate_config`**: `validateConfigUpdates` now rejects `updates.observatory.approval` fail-closed (edit the config file directly instead) and validates the `observatory` block's shape (`capture` boolean). The approval policy is the authoritative human-consent seam for destructive tools, so a model-driven flip to `allow` would have disabled the gate.
+- **Defense-event counts can never NaN**: `readDefenseEvents` now normalizes persisted streams — `counts` is always recomputed from the events array (a hand-edited file with a missing/stale counts object previously produced `undefined++` → NaN on the next `record`), malformed event entries are dropped, and `addDefenseEvent` always recomputes counts.
+- **Quality-gate read never crashes the render**: `readQualityGate` normalizes a hand-edited snapshot (missing `dimensions`, non-numeric fields) so the tool's `render` and the client never throw on `snapshot.dimensions.map`.
+- **Review-report convergence is order-independent**: `buildReviewReport` now sorts rounds by round number and computes the last round from the highest reported number — an unsorted round set (parallel/resumed runs) previously read the last ARRAY element, reporting the wrong round's new-finding count and a wrong `converged` flag.
+- **Full-scope inventory is Windows-safe**: `collectScopeFiles` derives relative paths via `path.relative` (separator-agnostic) instead of a `root + '/'` string prefix that failed on Windows and leaked absolute paths into the scope/coverage inventory.
+- **Defense-event `record` line validation**: a negative `line` (which passes the integer argument schema) is now rejected with a structured error instead of being persisted.
+- **Transcript fixes are bounded**: the manifest's `fixes` array is capped (newest 200 win), matching the builder's documented growth-bounding for long runs.
+- **History render guard**: decision-log entries without a `round` no longer print `rundefined`.
+- **F5 resume instruction title typo** fixed.
+
+### Tests
+
+- 20 new cases: config-write pollution guard + observatory approval fail-closed + shape validation; checkpoint `resume` round-trip (persist + double-resume + no-checkpoint error) and `iterate_status` quality snapshots (seed three store files, verify surfaced); defense-store read normalization (missing counts / malformed events, no NaN); quality-store read normalization (incl. per-dimension fields); transcript fixes cap; review-report unsorted-round convergence; full-scope root-level file.
+
+### Notes
+
+- **Upstream dsh check (2026-09-06)**: DeepSeek Harness released tag `dsh-v0.1.3-alpha.1` (2026-09-04). The corresponding npm packages (`@deepseek-ai/dsh-tools` / `dsh-jobs` / `dsh-session` / `dsh-util-values` / `dsh-client-connection`) are **not yet published** (highest published stays `0.1.2-rc.1`), so the dependency declarations are unchanged this release. Compatibility analysis: v0.1.3-alpha.1's breaking change (Session persistence → lifecycle-scoped `SessionHandle`, async `agentLoop.create()`, per-session lock) and Session-format v2 migration do **not** touch any API this plugin uses (the plugin only reads `exec.agent.session.header.cwd` and never calls `agentLoop.create()`/`Session.events`), and the release carries a known performance regression. Declaring `0.1.3-alpha.1` compatible in `dsh.compatibility.dshReleases` is deferred until the npm packages publish and the regression is addressed.
+- `dist/` was rebuilt from source; the committed `dist/` had silently drifted from `src/` since 3.2.2 (dead `toolGate` export and the store write-failure surfacing were in `src/` but not the shipped bundle). The tarball now matches `src/` exactly.
+
 ## [3.3.1] - 2026-09-06
 
 ### Fixed

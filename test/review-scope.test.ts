@@ -128,6 +128,7 @@ describe('collectScopeFiles', () => {
     mkdirSync(join(root, 'node_modules', 'dep'), { recursive: true })
     writeFileSync(join(root, 'node_modules', 'dep', 'index.js'), 'x')
     writeFileSync(join(root, 'README.md'), 'x')
+    writeFileSync(join(root, 'root.ts'), 'x')
     mkdirSync(join(root, 'src', 'nested'))
     writeFileSync(join(root, 'src', 'nested', 'c.go'), 'x')
     return root
@@ -136,7 +137,7 @@ describe('collectScopeFiles', () => {
   it('includes source files and excludes ignored dirs on a full walk', () => {
     const root = makeTree()
     const files = collectScopeFiles(root, { scope: 'full' })
-    assert.deepEqual(files, ['src/a.py', 'src/b.ts', 'src/nested/c.go'])
+    assert.deepEqual(files, ['root.ts', 'src/a.py', 'src/b.ts', 'src/nested/c.go'])
   })
 
   it('normalizes and sorts a changed-only delta', () => {

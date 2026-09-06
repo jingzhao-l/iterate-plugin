@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { addDefenseEvent, computeCounts, writeDefenseEvents } from '../src/tools/defense-store.ts'
+import { addDefenseEvent, computeCounts, readDefenseEvents, writeDefenseEvents } from '../src/tools/defense-store.ts'
 import type { DefenseEvent, DefenseEventStream } from '../src/types.ts'
 
 const emptyStream = (): DefenseEventStream => ({
@@ -123,6 +123,67 @@ describe('writeDefenseEvents', () => {
       const result = writeDefenseEvents(dir, emptyStream())
       assert.equal(result.ok, false)
       assert.match((result as { error: string }).error, /defense-events\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('readDefenseEvents', () => {
+  it('returns an empty stream when the file is missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-read-'))
+    try {
+      const stream = readDefenseEvents(dir)
+      assert.equal(stream.events.length, 0)
+      assert.deepEqual(stream.counts, emptyStream().counts)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes a hand-edited file with a stale/missing counts object', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'defense-events.json'), JSON.stringify({
+        events: [
+          event({ id: '1', type: 'rollback' }),
+          event({ id: '2', type: 'rollback' }),
+          event({ id: '3', type: 'assumption_falsified' }),
+        ],
+        // counts deliberately absent — must be recomputed, never NaN.
+      }), 'utf-8')
+      const stream = readDefenseEvents(dir)
+      assert.equal(stream.counts.rollback, 2)
+      assert.equal(stream.counts.assumption_falsified, 1)
+      assert.equal(Object.values(stream.counts).every((n) => Number.isFinite(n)), true)
+
+      // Adding an event after such a file must keep counts finite/accurate.
+      const next = addDefenseEvent(stream, {
+        round: 4, type: 'rollback', description: 'd', defense: 'def', outcome: 'o', severity: 'low',
+      })
+      assert.equal(next.counts.rollback, 3)
+      assert.equal(Object.values(next.counts).every((n) => Number.isFinite(n)), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('drops malformed events instead of NaN-ing counts', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'defense-events.json'), JSON.stringify({
+        events: [
+          event({ id: '1', type: 'precondition_failed' }),
+          { id: '2' }, // no type → dropped
+          null,
+        ],
+      }), 'utf-8')
+      const stream = readDefenseEvents(dir)
+      assert.equal(stream.events.length, 1)
+      assert.equal(stream.counts.precondition_failed, 1)
+      assert.equal(Object.values(stream.counts).every((n) => Number.isFinite(n)), true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
