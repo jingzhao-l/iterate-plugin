@@ -103,29 +103,3 @@ export function decideApproval(
 export function isDestructiveIterateTool(name: unknown): boolean {
   return typeof name === 'string' && DESTRUCTIVE_TOOLS.has(name)
 }
-
-/** Tool-facing gate result: run, or refuse (with an explicit human-approval signal). */
-export type ToolGateResult =
-  | { ok: true }
-  | { ok: false; requiresApproval: true; reason: string }
-  | { ok: false; error: string }
-
-/**
- * Evaluate an iterate tool's own boundary gate for a destructive call.
- * `approvedArg` is the caller-supplied `approved: true` flag (human consent
- * already obtained). Returns a run / refuse result without any I/O.
- */
-export function toolGate(
-  policy: 'ask' | 'deny' | 'allow',
-  execution: ToolExecutionLike,
-  approvedArg?: unknown,
-): ToolGateResult {
-  const decision = decideApproval(execution, policy)
-  if (decision.kind === 'allow') return { ok: true }
-  if (decision.kind === 'deny') {
-    return { ok: false, error: `Blocked by observatory approval policy: ${decision.reason}` }
-  }
-  // ask
-  if (approvedArg === true) return { ok: true }
-  return { ok: false, requiresApproval: true, reason: decision.reason }
-}

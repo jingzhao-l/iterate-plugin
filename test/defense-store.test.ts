@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { addDefenseEvent, computeCounts } from '../src/tools/defense-store.ts'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { addDefenseEvent, computeCounts, writeDefenseEvents } from '../src/tools/defense-store.ts'
 import type { DefenseEvent, DefenseEventStream } from '../src/types.ts'
 
 const emptyStream = (): DefenseEventStream => ({
@@ -90,5 +93,38 @@ describe('computeCounts', () => {
     const counts = computeCounts(events as unknown as DefenseEvent[])
     assert.equal(counts.precondition_failed, 1)
     assert.equal(Object.values(counts).reduce((a, b) => a + b, 0), 1)
+  })
+})
+
+describe('writeDefenseEvents', () => {
+  it('persists a stream and reports ok', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-store-'))
+    try {
+      const stream = addDefenseEvent(emptyStream(), {
+        round: 1,
+        type: 'rollback',
+        description: 'd',
+        defense: 'def',
+        outcome: 'o',
+        severity: 'high',
+      })
+      assert.deepEqual(writeDefenseEvents(dir, stream), { ok: true })
+      assert.equal(existsSync(join(dir, '.iterate', 'defense-events.json')), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('surfaces a write failure instead of reporting false success', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-store-'))
+    try {
+      // `.iterate` exists as a plain FILE — the write below it must fail.
+      writeFileSync(join(dir, '.iterate'), '', 'utf-8')
+      const result = writeDefenseEvents(dir, emptyStream())
+      assert.equal(result.ok, false)
+      assert.match((result as { error: string }).error, /defense-events\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

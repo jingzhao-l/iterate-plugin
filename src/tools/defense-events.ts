@@ -241,7 +241,10 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
             ...(typeof args.file === 'string' && args.file.length > 0 ? { file: args.file } : {}),
             ...(typeof args.line === 'number' ? { line: args.line } : {}),
           })
-          writeDefenseEvents(projectRoot, next)
+          const write = writeDefenseEvents(projectRoot, next)
+          if (!write.ok) {
+            return { ok: false, kind: 'defense_events', operation: 'record', error: write.error }
+          }
           const event = next.events[next.events.length - 1]
           return {
             ok: true,

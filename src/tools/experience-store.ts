@@ -35,8 +35,16 @@ export function readExperienceBank(projectRoot: string): ExperienceBank {
   return emptyBank()
 }
 
-/** Write the experience bank to disk. */
-export function writeExperienceBank(projectRoot: string, bank: ExperienceBank): void {
+/**
+ * Write the experience bank to disk.
+ * Returns `{ ok: true }` on success or `{ ok: false, error }` when the write
+ * fails — a caller must surface the failure instead of reporting success for
+ * an entry that was never persisted.
+ */
+export function writeExperienceBank(
+  projectRoot: string,
+  bank: ExperienceBank,
+): { ok: true } | { ok: false; error: string } {
   const dirPath = path.join(projectRoot, '.iterate')
   const filePath = path.join(dirPath, EXPERIENCE_FILE)
 
@@ -45,9 +53,10 @@ export function writeExperienceBank(projectRoot: string, bank: ExperienceBank): 
       fs.mkdirSync(dirPath, { recursive: true })
     }
     fs.writeFileSync(filePath, JSON.stringify(bank, null, 2), 'utf-8')
-  } catch {
-    // Silently fail - experience bank is not critical
+  } catch (err) {
+    return { ok: false, error: `unable to write ${filePath}: ${String(err)}` }
   }
+  return { ok: true }
 }
 
 /** Search experience entries by query string. */

@@ -45,6 +45,9 @@ import {
   countSessionImages,
   scanSessionForTranscript,
   normalizeTranscript,
+  scanSessionForQualityGate,
+  scanSessionForExperienceBank,
+  scanSessionForDefenseEvents,
   filterLiveEntries,
   filterTimelineEntries,
   serializeObservatoryExport,
@@ -818,11 +821,200 @@ describe('transcript live bridge', () => {
     // Entries without a usable ts degrade to '' rather than throwing.
     assert.equal(norm.live[0]!.ts, '')
   })
+
+  it('normalizeTranscript passes taskMode through (code/iterate) and tolerates absence/junk', () => {
+    const clean = normalizeTranscript(makeTranscriptManifest()) as unknown as { taskMode: string | null }
+    assert.equal(clean.taskMode, null)
+
+    const iterate = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      taskMode: 'iterate',
+    }) as unknown as { taskMode: string | null }
+    assert.equal(iterate.taskMode, 'iterate')
+
+    const code = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      taskMode: 'code',
+    }) as unknown as { taskMode: string | null }
+    assert.equal(code.taskMode, 'code')
+
+    const junk = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      taskMode: 'review-session',
+    }) as unknown as { taskMode: string | null }
+    assert.equal(junk.taskMode, null)
+  })
+
+  it('scanSessionForQualityGate returns the latest normalized snapshot (reverse chronological)', () => {
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_quality_gate',
+          result: { ok: true, kind: 'quality_gate', operation: 'read', snapshot: snap('pass') },
+        },
+        {
+          tool: 'iterate_quality_gate',
+          result: { ok: true, kind: 'quality_gate', operation: 'compute', snapshot: snap('fail') },
+        },
+      ],
+    }
+    const out = scanSessionForQualityGate(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.overallStatus, 'fail') // latest call wins
+    assert.equal(out.overallScore, 72)
+    assert.equal(out.verificationPassRate, 80)
+    assert.equal(out.failReason, 'correctness 收敛度不足')
+    assert.equal(out.dimensions.length, 2)
+    assert.equal(out.dimensions[0].dimension, 'correctness')
+    assert.equal(out.dimensions[0].score, 55)
+    assert.deepEqual(session.toolCalls[1]!.result.snapshot, snap('fail')) // input untouched
+  })
+
+  it('scanSessionForQualityGate returns null when the session has no gate results', () => {
+    assert.equal(scanSessionForQualityGate({ toolCalls: [] }), null)
+    assert.equal(scanSessionForQualityGate({ toolCalls: [{ tool: 'iterate_experience', result: { entries: [], count: 0 } }] }), null)
+    assert.equal(scanSessionForQualityGate(null), null)
+  })
+
+  it('scanSessionForExperienceBank folds get/add single entries into the entries array', () => {
+    const listSession = { toolCalls: [{ tool: 'iterate_experience', result: listResult }] }
+    const listOut = scanSessionForExperienceBank(listSession) as Record<string, any> | null
+    assert.ok(listOut)
+    assert.equal(listOut.operation, 'list')
+    assert.equal(listOut.count, 2)
+    assert.equal(listOut.totalHits, 4)
+    assert.equal(listOut.entries.length, 2)
+    assert.equal(listOut.entries[0].pattern, '请先解析 JSON')
+    assert.equal(listOut.entries[0].hitCount, 2)
+
+    const addSession = {
+      toolCalls: [{ tool: 'iterate_experience', result: { ok: true, kind: 'experience', operation: 'add', added: true, entry: singleEntry } }],
+    }
+    const addOut = scanSessionForExperienceBank(addSession) as Record<string, any> | null
+    assert.ok(addOut)
+    assert.equal(addOut.added, true)
+    assert.equal(addOut.entries.length, 1)
+    assert.equal(addOut.entries[0].id, 'exp-9')
+  })
+
+  it('scanSessionForExperienceBank deep-finds nested result shapes and tolerates absence', () => {
+    const nested = {
+      toolCalls: [{
+        tool: 'iterate_experience',
+        // Wrapped; the list node lives one level down inside `details`.
+        result: { ok: true, kind: 'experience', operation: 'list', details: listResult },
+      }],
+    }
+    const out = scanSessionForExperienceBank(nested) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.count, 2)
+    assert.equal(out.entries.length, 2)
+    assert.equal(scanSessionForExperienceBank({ toolCalls: [] }), null)
+    assert.equal(scanSessionForExperienceBank(null), null)
+  })
+
+  it('scanSessionForDefenseEvents merges record events and keeps type counts', () => {
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_defense_events',
+          result: { ok: true, kind: 'defense_events', operation: 'record', language: 'zh', counts: eventCounts, event: eventRec },
+        },
+      ],
+    }
+    const out = scanSessionForDefenseEvents(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.operation, 'record')
+    assert.equal(out.events.length, 1)
+    assert.equal(out.events[0].type, 'rollback')
+    assert.equal(out.events[0].description, '修复导致构建失败，回滚')
+    assert.equal(out.counts.rollback, 2)
+    assert.equal(out.counts.invariant_violated, 1)
+    // Unknown/degenerate counts degrade to zero for every KNOWN type.
+    assert.equal(out.counts.precondition_failed, 0)
+    assert.equal(out.counts.assumption_falsified, 0)
+  })
+
+  it('scanSessionForDefenseEvents returns null when the session has none', () => {
+    assert.equal(scanSessionForDefenseEvents({ toolCalls: [] }), null)
+    assert.equal(scanSessionForDefenseEvents(null), null)
+  })
 })
 
 function safeLiveOf(manifest: Record<string, unknown>): unknown[] | undefined {
   const v = manifest.live
   return Array.isArray(v) ? (v as unknown[]) : undefined
+}
+
+// ─── Quality command center fixtures (v3.1+) ────────────────────────────────
+
+/** A realistic QualityGateSnapshot; overallStatus is parameterized externally. */
+function snap(status: string) {
+  return {
+    timestamp: '2026-01-01T00:00:00.000Z',
+    overallStatus: status,
+    overallScore: 72,
+    verificationPassRate: 80,
+    totalChecks: 10,
+    passedChecks: 8,
+    failedChecks: 2,
+    failReason: status === 'fail' ? 'correctness 收敛度不足' : null,
+    totalFindings: 5,
+    criticalCount: 0,
+    highCount: 1,
+    mediumCount: 2,
+    lowCount: 2,
+    dimensions: [
+      { dimension: 'correctness', convergenceRate: 42, findingsCount: 3, fixedCount: 1, score: 55, status: 'fail' },
+      { dimension: 'security', convergenceRate: 90, findingsCount: 2, fixedCount: 2, score: 85, status: 'pass' },
+    ],
+  }
+}
+
+const singleEntry = {
+  id: 'exp-9',
+  dimension: 'correctness',
+  pattern: '解析前先校验输入',
+  description: '反序列化 JSON 前校验字段存在性。',
+  verifiedFix: '用 zod 校验后再使用 payload',
+  findingSummary: '直接 JSON.parse 未校验结构',
+  severity: 'high',
+  hitCount: 1,
+  lastHitAt: '2026-01-02T00:00:00.000Z',
+  files: ['src/x.ts'],
+  tags: ['json', 'robustness'],
+}
+
+const listResult = {
+  ok: true,
+  kind: 'experience',
+  operation: 'list',
+  count: 2,
+  totalHits: 4,
+  entries: [
+    { ...singleEntry, id: 'exp-1', pattern: '请先解析 JSON', hitCount: 2 },
+    { ...singleEntry, id: 'exp-2', pattern: '统一使用 option', hitCount: 2 },
+  ],
+}
+
+const eventCounts = {
+  precondition_failed: 0,
+  rollback: 2,
+  invariant_violated: 1,
+  assumption_falsified: 0,
+}
+
+const eventRec = {
+  id: 'def-42',
+  timestamp: '2026-01-01T00:00:00.000Z',
+  round: 2,
+  type: 'rollback',
+  description: '修复导致构建失败，回滚',
+  defense: '验证守卫：构建必须通过才能进入下一轮',
+  outcome: 'reverted',
+  file: 'src/y.ts',
+  line: 14,
+  severity: 'high',
 }
 
 describe('hashReport (content digest)', () => {

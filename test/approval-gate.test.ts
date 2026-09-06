@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   decideApproval,
-  toolGate,
   isDestructiveIterateTool,
 } from '../src/approval-gate.ts'
 import type { ToolExecutionLike } from '../src/approval-gate.ts'
@@ -60,35 +59,6 @@ describe('decideApproval', () => {
     assert.deepEqual(decideApproval({ name: '' }, 'deny'), { kind: 'allow' })
     assert.deepEqual(decideApproval({ name: undefined as unknown as string }, 'deny'), { kind: 'allow' })
     assert.deepEqual(decideApproval(undefined as unknown as ToolExecutionLike, 'deny'), { kind: 'allow' })
-  })
-})
-
-describe('toolGate', () => {
-  it('ask policy with approved=true runs', () => {
-    assert.deepEqual(toolGate('ask', { name: 'iterate_fix' }, true), { ok: true })
-  })
-
-  it('ask policy without approved=true requires approval', () => {
-    const r = toolGate('ask', { name: 'iterate_fix' }, false) as {
-      ok: false
-      requiresApproval: true
-      reason: string
-    }
-    assert.equal(r.ok, false)
-    assert.equal(r.requiresApproval, true)
-    assert.ok(r.reason.length > 0)
-  })
-
-  it('deny policy returns a blocked error', () => {
-    const r = toolGate('deny', { name: 'iterate_fix' }) as { ok: false; error: string }
-    assert.equal(r.ok, false)
-    assert.ok(r.error.length > 0)
-    assert.match(r.error, /policy/i)
-    assert.equal((r as { requiresApproval?: boolean }).requiresApproval, undefined)
-  })
-
-  it('allow policy runs', () => {
-    assert.deepEqual(toolGate('allow', { name: 'iterate_fix' }), { ok: true })
   })
 })
 

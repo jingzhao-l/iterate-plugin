@@ -127,4 +127,20 @@ describe('iterate_defense_events record', () => {
     const tool = captureTool()
     await assert.rejects(() => tool.execute({ operation: 'bogus' }), /must be one of/)
   })
+
+  it('record surfaces a persistence failure instead of reporting success', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // `.iterate` exists as a plain FILE — the event cannot be persisted.
+      writeFileSync(join(dir, '.iterate'), '', 'utf-8')
+      const result = (await tool.execute({ operation: 'record', path: dir, ...recordArgs })) as Record<string, unknown>
+      assert.equal(result.ok, false)
+      assert.equal(result.operation, 'record')
+      assert.equal(result.event, undefined)
+      assert.match(result.error as string, /defense-events\.json/)
+    } finally {
+      cleanup()
+    }
+  })
 })

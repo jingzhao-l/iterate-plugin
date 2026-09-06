@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { upsertExperience } from '../src/tools/experience-store.ts'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { upsertExperience, writeExperienceBank } from '../src/tools/experience-store.ts'
 import type { ExperienceEntryInput } from '../src/tools/experience-store.ts'
 import type { ExperienceBank } from '../src/types.ts'
 
@@ -95,5 +98,31 @@ describe('upsertExperience', () => {
     assert.equal(added, false)
     assert.equal(next.entries[0]!.hitCount, 1)
     assert.equal(next.totalHits, 1)
+  })
+})
+
+describe('writeExperienceBank', () => {
+  it('persists a bank and reports ok', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-exp-store-'))
+    try {
+      const { bank } = upsertExperience(emptyBank(), input())
+      assert.deepEqual(writeExperienceBank(dir, bank), { ok: true })
+      assert.equal(existsSync(join(dir, '.iterate', 'experience.json')), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('surfaces a write failure instead of reporting false success', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-exp-store-'))
+    try {
+      // `.iterate` exists as a plain FILE — the write below it must fail.
+      writeFileSync(join(dir, '.iterate'), '', 'utf-8')
+      const result = writeExperienceBank(dir, emptyBank())
+      assert.equal(result.ok, false)
+      assert.match((result as { error: string }).error, /experience\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

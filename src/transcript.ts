@@ -126,6 +126,7 @@ function mergeReportIntoThread(
 export class ReviewTranscriptBuilder {
   private readonly project: string
   private readonly mode: 'dry-run' | 'normal' | null
+  private readonly taskMode: 'code' | 'iterate' | null
   private readonly approval: 'ask' | 'deny' | 'allow'
   private goal = ''
   private readonly phases: string[] = []
@@ -144,6 +145,7 @@ export class ReviewTranscriptBuilder {
   constructor(input: {
     project: string
     mode?: 'dry-run' | 'normal' | null
+    taskMode?: 'code' | 'iterate' | null
     approval?: 'ask' | 'deny' | 'allow'
     goal?: string
     maxRounds?: number
@@ -152,6 +154,14 @@ export class ReviewTranscriptBuilder {
     this.project = input.project || ''
     this.mode =
       input.mode === 'dry-run' || input.mode === 'normal' ? input.mode : null
+    // v3.0: task_mode indicator. An explicit valid value wins; otherwise a
+    // run that exercises the review loop (any mode) defaults to "iterate".
+    this.taskMode =
+      input.taskMode === 'code' || input.taskMode === 'iterate'
+        ? input.taskMode
+        : input.mode !== null && input.mode !== undefined
+          ? 'iterate'
+          : null
     this.approval =
       input.approval === 'ask' || input.approval === 'deny' || input.approval === 'allow'
         ? input.approval
@@ -393,6 +403,7 @@ export class ReviewTranscriptBuilder {
       updatedAt: this.updatedAt,
       active: this.active,
       mode: this.mode,
+      taskMode: this.taskMode,
       goal: this.goal,
       phases: this.phases,
       round: this.round,

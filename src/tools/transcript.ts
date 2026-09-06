@@ -136,6 +136,11 @@ export function registerTranscriptTool(ctx: {
           description: 'For `capture`: run mode ("dry-run" | "normal"). Default dry-run.',
           enum: ['dry-run', 'normal'],
         },
+        taskMode: {
+          type: 'string',
+          description: 'For `capture`: harness execution mode ("code" | "iterate"). Default derives from the review loop (iterate).',
+          enum: ['code', 'iterate'],
+        },
         goal: { type: 'string', description: 'For `capture`: run goal.' },
         maxRounds: { type: 'integer', description: 'For `capture`: round cap.' },
         roundsExecuted: { type: 'integer', description: 'For `capture`: number of rounds actually executed.' },
@@ -229,10 +234,11 @@ export function registerTranscriptTool(ctx: {
 
         // capture
         const mode = args.mode === 'normal' ? 'normal' : 'dry-run'
+        const taskMode = args.taskMode === 'code' || args.taskMode === 'iterate' ? args.taskMode : undefined
         const goal = typeof args.goal === 'string' ? args.goal : ''
         const maxRounds =
           typeof args.maxRounds === 'number' ? Math.floor(args.maxRounds) : 0
-        const builder = new ReviewTranscriptBuilder({ project: projectRoot, mode, approval, goal, maxRounds })
+        const builder = new ReviewTranscriptBuilder({ project: projectRoot, mode, taskMode, approval, goal, maxRounds })
         const report = args.report as Record<string, unknown> | null | undefined
         const reportFindings: unknown =
           report && typeof report === 'object' && Array.isArray(report.findings)
@@ -300,6 +306,7 @@ function rehydrateBuilder(manifest: TranscriptManifest, approval: 'ask' | 'deny'
   const builder = new ReviewTranscriptBuilder({
     project: manifest.project,
     mode: manifest.mode ?? null,
+    taskMode: manifest.taskMode ?? null,
     approval,
     goal: manifest.goal,
     maxRounds: manifest.maxRounds,

@@ -13,14 +13,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
-import { checkpointPath, iterateDir } from '../paths.ts'
+import { checkpointPath, iterateDir, transcriptPath } from '../paths.ts'
 import { readRegistry } from './fix.ts'
 import { readDecisionEntries } from './decision-log.ts'
 import type { IterationCheckpoint, IterationStatus } from '../types.ts'
 
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
 
-/** Read a checkpoint from disk (missing/corrupt → null). */
+/** Read the current checkpoint from disk (missing/corrupt → null). */
 export function readCheckpoint(projectRoot: string): IterationCheckpoint | null {
   const file = checkpointPath(projectRoot)
   if (!existsSync(file)) return null
@@ -30,6 +30,19 @@ export function readCheckpoint(projectRoot: string): IterationCheckpoint | null 
     if (parsed.mode !== 'dry-run' && parsed.mode !== 'normal') return null
     if (typeof parsed.round !== 'number') return null
     return parsed
+  } catch {
+    return null
+  }
+}
+
+/** Read the harness task_mode from the persisted observatory transcript (code|iterate|null). */
+export function readTranscriptTaskMode(projectRoot: string): 'code' | 'iterate' | null {
+  const file = transcriptPath(projectRoot)
+  if (!existsSync(file)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf-8')) as { taskMode?: unknown }
+    const m = parsed && typeof parsed === 'object' ? parsed.taskMode : null
+    return m === 'code' || m === 'iterate' ? m : null
   } catch {
     return null
   }
@@ -74,10 +87,12 @@ export function validateCheckpoint(input: {
  */
 export function computeStatus(input: {
   checkpoint: IterationCheckpoint | null
+  taskMode?: 'code' | 'iterate' | null
   decisionEntries: { timestamp: string; type: string; round?: number; data?: Record<string, unknown> }[]
   fixRegistry: { rounds: { round: number; fixedCount: number; failedCount: number }[] }
 }): IterationStatus {
   const checkpoint = input.checkpoint
+  const taskMode = input.taskMode ?? null
   const entries = input.decisionEntries
   const registry = input.fixRegistry
 
@@ -103,6 +118,7 @@ export function computeStatus(input: {
 
   return {
     mode: checkpoint?.mode ?? null,
+    taskMode,
     currentRound,
     totalRounds,
     fixedCount,
@@ -253,6 +269,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
           properties: {
             ok: { type: 'boolean', required: true },
             mode: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+            taskMode: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Harness execution mode from the observatory transcript ("code" | "iterate").' },
             currentRound: { type: 'integer' },
             totalRounds: { type: 'integer' },
             fixedCount: { type: 'integer' },
@@ -269,7 +286,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
         render: (_args, value) => {
           if (!value.ok) return [{ type: 'text', text: `status failed: ${value.error}` }]
           const lines = [
-            `Mode: ${value.mode ?? 'none'}`,
+            `Mode: ${value.mode ?? 'none'}${value.taskMode ? ` (${value.taskMode})` : ''}`,
             `Round: ${value.currentRound} / ${value.totalRounds}`,
             `Fixed: ${value.fixedCount} · Architectural remaining: ${value.architecturalCount}`,
             `Findings in checkpoint: ${value.findingsCount}`,
@@ -287,12 +304,14 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
         const projectRoot = resolved.root
         const status = computeStatus({
           checkpoint: readCheckpoint(projectRoot),
+          taskMode: readTranscriptTaskMode(projectRoot),
           decisionEntries: readDecisionEntries(projectRoot),
           fixRegistry: readRegistry(projectRoot),
         })
         return {
           ok: true,
           mode: status.mode ?? null,
+          taskMode: status.taskMode ?? null,
           currentRound: status.currentRound,
           totalRounds: status.totalRounds,
           fixedCount: status.fixedCount,

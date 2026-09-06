@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { convergenceRateFor, computeQualityGate } from '../src/tools/quality-store.ts'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { convergenceRateFor, computeQualityGate, writeQualityGate } from '../src/tools/quality-store.ts'
 
 describe('convergenceRateFor', () => {
   it('is 100 for a dimension with no findings at all', () => {
@@ -106,5 +109,31 @@ describe('computeQualityGate', () => {
     const poorScore = computeQualityGate({ dimensions: ['x'], findings: manyLow })
     assert.equal(poorScore.overallStatus, 'fail')
     assert.match(poorScore.failReason as string, /below threshold/)
+  })
+})
+
+describe('writeQualityGate', () => {
+  it('persists a snapshot and reports ok', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-store-'))
+    try {
+      const result = writeQualityGate(dir, computeQualityGate({ dimensions: ['correctness'], findings: [] }))
+      assert.deepEqual(result, { ok: true })
+      assert.equal(existsSync(join(dir, '.iterate', 'quality-gate.json')), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('surfaces a write failure instead of reporting false success', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-store-'))
+    try {
+      // `.iterate` exists as a plain FILE — the write below it must fail.
+      writeFileSync(join(dir, '.iterate'), '', 'utf-8')
+      const result = writeQualityGate(dir, computeQualityGate({ dimensions: [], findings: [] }))
+      assert.equal(result.ok, false)
+      assert.match((result as { error: string }).error, /quality-gate\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

@@ -46,8 +46,16 @@ export function readQualityGate(projectRoot: string): QualityGateSnapshot {
   return emptySnapshot()
 }
 
-/** Write the quality gate snapshot to disk. */
-export function writeQualityGate(projectRoot: string, snapshot: QualityGateSnapshot): void {
+/**
+ * Write the quality gate snapshot to disk.
+ * Returns `{ ok: true }` on success or `{ ok: false, error }` when the write
+ * fails — a caller must surface the failure instead of reporting success for
+ * a snapshot that was never persisted.
+ */
+export function writeQualityGate(
+  projectRoot: string,
+  snapshot: QualityGateSnapshot,
+): { ok: true } | { ok: false; error: string } {
   const dirPath = path.join(projectRoot, '.iterate')
   const filePath = path.join(dirPath, QUALITY_GATE_FILE)
 
@@ -56,9 +64,10 @@ export function writeQualityGate(projectRoot: string, snapshot: QualityGateSnaps
       fs.mkdirSync(dirPath, { recursive: true })
     }
     fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8')
-  } catch {
-    // Silently fail - quality gate is not critical
+  } catch (err) {
+    return { ok: false, error: `unable to write ${filePath}: ${String(err)}` }
   }
+  return { ok: true }
 }
 
 /**

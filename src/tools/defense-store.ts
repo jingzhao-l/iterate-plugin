@@ -59,8 +59,16 @@ export function readDefenseEvents(projectRoot: string): DefenseEventStream {
   return emptyStream()
 }
 
-/** Write the defense events stream to disk. */
-export function writeDefenseEvents(projectRoot: string, stream: DefenseEventStream): void {
+/**
+ * Write the defense events stream to disk.
+ * Returns `{ ok: true }` on success or `{ ok: false, error }` when the write
+ * fails — a caller must surface the failure instead of reporting success for
+ * an event that was never persisted.
+ */
+export function writeDefenseEvents(
+  projectRoot: string,
+  stream: DefenseEventStream,
+): { ok: true } | { ok: false; error: string } {
   const dirPath = path.join(projectRoot, '.iterate')
   const filePath = path.join(dirPath, DEFENSE_EVENTS_FILE)
 
@@ -69,9 +77,10 @@ export function writeDefenseEvents(projectRoot: string, stream: DefenseEventStre
       fs.mkdirSync(dirPath, { recursive: true })
     }
     fs.writeFileSync(filePath, JSON.stringify(stream, null, 2), 'utf-8')
-  } catch {
-    // Silently fail - defense events are not critical
+  } catch (err) {
+    return { ok: false, error: `unable to write ${filePath}: ${String(err)}` }
   }
+  return { ok: true }
 }
 
 /** Add a defense event to the stream. */

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import {
   readCheckpoint,
+  readTranscriptTaskMode,
   validateCheckpoint,
   computeStatus,
   registerCheckpointTool,
@@ -162,6 +163,65 @@ describe('computeStatus', () => {
     assert.equal(status.totalRounds, 0)
     assert.equal(status.fixedCount, 0)
     assert.equal(status.lastUpdated, null)
+  })
+
+  it('carries the harness taskMode through to the status (null when absent)', () => {
+    const withMode = computeStatus({
+      checkpoint: checkpoint(),
+      taskMode: 'iterate',
+      decisionEntries: [],
+      fixRegistry: { rounds: [] },
+    })
+    assert.equal(withMode.taskMode, 'iterate')
+    const code = computeStatus({
+      checkpoint: checkpoint(),
+      taskMode: 'code',
+      decisionEntries: [],
+      fixRegistry: { rounds: [] },
+    })
+    assert.equal(code.taskMode, 'code')
+    // Not provided at all -> null (never throws).
+    const none = computeStatus({ checkpoint: null, decisionEntries: [], fixRegistry: { rounds: [] } })
+    assert.equal(none.taskMode, null)
+  })
+})
+
+// ─── readTranscriptTaskMode ──────────────────────────────────────────────────
+
+describe('readTranscriptTaskMode', () => {
+  it('returns null when the transcript is missing or corrupt', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      assert.equal(readTranscriptTaskMode(dir), null)
+      writeFileSync(join(dir, '.iterate', 'transcript.json'), 'not json', 'utf-8')
+      assert.equal(readTranscriptTaskMode(dir), null)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('reads the taskMode from a persisted transcript', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, '.iterate', 'transcript.json'), JSON.stringify({ version: 1, mode: 'normal', taskMode: 'iterate' }), 'utf-8')
+      assert.equal(readTranscriptTaskMode(dir), 'iterate')
+      writeFileSync(join(dir, '.iterate', 'transcript.json'), JSON.stringify({ version: 1, taskMode: 'code' }), 'utf-8')
+      assert.equal(readTranscriptTaskMode(dir), 'code')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('degrades unknown/missing taskMode values to null', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, '.iterate', 'transcript.json'), JSON.stringify({ taskMode: 'review-session' }), 'utf-8')
+      assert.equal(readTranscriptTaskMode(dir), null)
+      writeFileSync(join(dir, '.iterate', 'transcript.json'), JSON.stringify({ mode: 'normal' }), 'utf-8')
+      assert.equal(readTranscriptTaskMode(dir), null)
+    } finally {
+      cleanup()
+    }
   })
 })
 

@@ -73,6 +73,9 @@ import {
   countSessionImages,
   scanSessionForTranscript,
   normalizeTranscript,
+  scanSessionForQualityGate,
+  scanSessionForExperienceBank,
+  scanSessionForDefenseEvents,
   filterLiveEntries,
   filterTimelineEntries,
   serializeObservatoryExport,
@@ -228,6 +231,7 @@ interface ObsManifest {
   updatedAt?: string
   active?: boolean
   mode?: string
+  taskMode?: string | null
   goal?: string
   phases?: string[]
   round?: number
@@ -241,6 +245,80 @@ interface ObsManifest {
   timeline?: ObsEntry[]
   nudge?: ObsNudge | null
   approval?: ObsApproval
+}
+
+// ─── Quality command center data types (v3.1+; mirrors src/types.ts) ────────
+// These mirror the JSON the three command-center tools return so the F8/F9/F10
+// tabs can render session-scanned data with full optional chaining.
+
+interface ObsQualityGateDimension {
+  dimension?: string
+  convergenceRate?: number
+  findingsCount?: number
+  fixedCount?: number
+  score?: number
+  status?: string
+}
+
+interface ObsQualityGate {
+  timestamp?: string
+  overallStatus?: string
+  overallScore?: number
+  verificationPassRate?: number
+  totalChecks?: number
+  passedChecks?: number
+  failedChecks?: number
+  failReason?: string | null
+  totalFindings?: number
+  criticalCount?: number
+  highCount?: number
+  mediumCount?: number
+  lowCount?: number
+  dimensions?: ObsQualityGateDimension[]
+}
+
+interface ObsExperienceEntry {
+  id?: string
+  timestamp?: string
+  dimension?: string
+  pattern?: string
+  description?: string
+  verifiedFix?: string
+  findingSummary?: string
+  severity?: string
+  hitCount?: number
+  lastHitAt?: string | null
+  files?: string[]
+  tags?: string[]
+}
+
+interface ObsExperienceResult {
+  operation?: string
+  count?: number
+  totalHits?: number
+  added?: boolean
+  entries?: ObsExperienceEntry[]
+}
+
+interface ObsDefenseEvent {
+  id?: string
+  timestamp?: string
+  round?: number
+  type?: string
+  description?: string
+  defense?: string
+  outcome?: string
+  file?: string | null
+  line?: number | null
+  severity?: string
+}
+
+interface ObsDefenseResult {
+  operation?: string
+  count?: number
+  language?: string
+  counts?: Record<string, number>
+  events?: ObsDefenseEvent[]
 }
 
 /** Opaque slot props: heterogeneous per-slot payloads. */
@@ -1143,6 +1221,33 @@ function TriagePanel(props: SlotProps) {
     })
   }
 
+  // v3.1+ §8: assign the currently scoped findings to the model for fixing.
+  // Scoping mirrors the batch buttons (visible when selectAll is off, all
+  // otherwise); produces one paste-able iterate_fix instruction carrying each
+  // finding's file/line/dimension/severity/summary.
+  const doAssignFindings = () => {
+    const targetAll = selectAll
+    const scopeIndices = targetAll ? allIndices : indices
+    const scopeFindings = (findings as IterateFinding[])
+      .filter((f, i) => scopeIndices.includes(i))
+      .map((f) => ({
+        file: String(f.file || ''),
+        ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
+        dimension: String(f.dimension || ''),
+        severity: String(f.severity || ''),
+        summary: String(f.summary || ''),
+        ...(f.suggested_fix ? { suggested_fix: String(f.suggested_fix) } : {}),
+      }))
+    if (scopeFindings.length === 0) return
+    const cmd = `请调用 \`iterate_fix\` 指派并修复以下 findings：\n\n\`\`\`json\n${JSON.stringify(scopeFindings, null, 2)}\n\`\`\``
+    copyText(cmd).then((ok) => {
+      if (ok) {
+        setCmdCopied('assign')
+        setTimeout(() => setCmdCopied(null), 1600)
+      }
+    })
+  }
+
   const doCopyYaml = () => {
     const yaml = toKnownIntentionalYaml(ignored)
     if (!yaml) return
@@ -1289,6 +1394,12 @@ function TriagePanel(props: SlotProps) {
           onClick: doTriggerNewRound,
           title: '触发新一轮迭代审查',
         }, cmdCopied === 'new-round' ? '已复制' : '触发新一轮'),
+        React.createElement('button', {
+          className: 'iterate-cmd', 'data-primary': '', 'data-copied': cmdCopied === 'assign' ? '' : undefined,
+          onClick: doAssignFindings,
+          disabled: (selectAll ? allIndices : indices).length === 0,
+          title: selectAll ? `指派全部 ${allIndices.length} 个 findings 修复` : `指派当前可见 ${indices.length} 个 findings 修复`,
+        }, cmdCopied === 'assign' ? '已复制' : '指派修复'),
         React.createElement('button', {
           className: 'iterate-cmd', 'data-danger': '', 'data-copied': cmdCopied === 'rollback' ? '' : undefined,
           onClick: doRollbackToCheckpoint,
@@ -1614,6 +1725,24 @@ function latestTranscript(session: unknown): ObsManifest | null {
   return raw ? normalizeTranscript(raw) as ObsManifest : null
 }
 
+/** Find the latest quality-gate snapshot inside a session snapshot. */
+function latestQualityGate(session: unknown): ObsQualityGate | null {
+  if (!session) return null
+  return scanSessionForQualityGate(session) as ObsQualityGate | null
+}
+
+/** Find the latest experience-bank result inside a session snapshot. */
+function latestExperienceBank(session: unknown): ObsExperienceResult | null {
+  if (!session) return null
+  return scanSessionForExperienceBank(session) as ObsExperienceResult | null
+}
+
+/** Find the latest defense-events result inside a session snapshot. */
+function latestDefenseEvents(session: unknown): ObsDefenseResult | null {
+  if (!session) return null
+  return scanSessionForDefenseEvents(session) as ObsDefenseResult | null
+}
+
 /** Build a human-pasteable `iterate_fix` instruction for one finding. */
 function buildObsFixInstruction(f: ObsFinding): string {
   const payload = JSON.stringify({
@@ -1638,6 +1767,10 @@ function buildObsFixInstruction(f: ObsFinding): string {
 function ObservatoryPanel(props: SlotProps) {
   const session = props && props.session ? props.session : null
   const manifest = latestTranscript(session)
+  // v3.1+: command-center data scanned straight out of the session stream.
+  const qualityGate = latestQualityGate(session)
+  const experienceBank = latestExperienceBank(session)
+  const defenseEvents = latestDefenseEvents(session)
 
   const [open, setOpen] = React.useState(false)
   const [tab, setTab] = React.useState('live')
@@ -1660,7 +1793,9 @@ function ObservatoryPanel(props: SlotProps) {
   )
   // v3.0: Experience bank search state
   const [expSearch, setExpSearch] = React.useState('')
-  const [expResults, setExpResults] = React.useState<unknown[]>([])
+  // v3.1+: session-scanned experience entries seed the list; expSearch filters
+  // them client-side (matching pattern/description/dimension/tags). The "搜索"
+  // button still copies a back-end iterate_experience search instruction.
   // v3.0: Defense events filter
   const [defenseFilter, setDefenseFilter] = React.useState('')
 
@@ -2156,58 +2291,138 @@ function ObservatoryPanel(props: SlotProps) {
   }
 
   // ── F8: Quality Gate ──────────────────────────────────────────────────────
-  // v3.0: Quality command center - shows dimension convergence, verification pass rate, and overall PASS/FAIL
+  // v3.1+ renders the latest iterate_quality_gate snapshot found in the
+  // session (dimension convergence, verification pass rate, overall PASS/FAIL);
+  // falls back to copy-able query instructions when no snapshot exists yet.
   const renderQualityGate = () => {
-    // Quality gate data would come from manifest or be computed on-the-fly
-    // For now, show a placeholder with instructions
-    const qualityGateInstruction = '请调用 `iterate_quality_gate` 查询当前质量门禁状态'
+    const gateInstruction = '请调用 `iterate_quality_gate` 查询当前质量门禁状态'
+    const gate = qualityGate
+    const dims = gate && gate.dimensions ? gate.dimensions : []
+    const hasGate = gate !== null && Boolean(gate.overallStatus || gate.overallScore != null || dims.length > 0)
+    const status = gate && gate.overallStatus ? String(gate.overallStatus) : 'pending'
+    const statusLabel = status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'PENDING'
+    const num = (v: number | undefined) => Number(v != null ? v : 0)
+
+    const headerBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+      React.createElement('b', {}, '质量门禁'),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'qgate' ? '' : undefined,
+        onClick: () => copyInstruction('qgate', gateInstruction),
+        title: '复制 iterate_quality_gate 查询指令',
+      }, copiedKey === 'qgate' ? '已复制' : '查询门禁'),
+    )
+
+    if (!hasGate) {
+      return React.createElement('div', {},
+        headerBar,
+        React.createElement('div', { className: 'iterate-obs-block' },
+          React.createElement('div', { className: 'iterate-obs-block-head' },
+            React.createElement('span', {}, '质量门禁视图'),
+            React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
+          ),
+          React.createElement('div', { className: 'iterate-obs-block-body' },
+            React.createElement('div', { className: 'iterate-obs-msg' }, '质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。'),
+            React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+              React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': copiedKey === 'qgate-instr' ? '' : undefined,
+                onClick: () => copyInstruction('qgate-instr', gateInstruction),
+                title: '复制查询指令',
+              }, copiedKey === 'qgate-instr' ? '已复制' : '复制查询指令'),
+            ),
+          ),
+        ),
+      )
+    }
+
     return React.createElement('div', {},
-      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-        React.createElement('b', {}, '质量门禁'),
-        React.createElement('button', {
-          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'qgate' ? '' : undefined,
-          onClick: () => copyInstruction('qgate', qualityGateInstruction),
-          title: '复制 iterate_quality_gate 查询指令',
-        }, copiedKey === 'qgate' ? '已复制' : '查询门禁'),
-      ),
+      headerBar,
       React.createElement('div', { className: 'iterate-obs-block' },
         React.createElement('div', { className: 'iterate-obs-block-head' },
-          React.createElement('span', {}, '质量门禁视图'),
-          React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
+          React.createElement('span', { className: 'iterate-gate', 'data-status': status }, statusLabel),
+          React.createElement('span', { className: 'iterate-obs-head-meta' },
+            `整体评分 ${num(gate && gate.overallScore)} · 验证 ${num(gate && gate.passedChecks)}/${num(gate && gate.totalChecks)} · 通过率 ${num(gate && gate.verificationPassRate)}%`,
+          ),
         ),
         React.createElement('div', { className: 'iterate-obs-block-body' },
-          React.createElement('div', { className: 'iterate-obs-msg' }, '质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。'),
-          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
-            React.createElement('button', {
-              className: 'iterate-btn', 'data-copied': copiedKey === 'qgate-instr' ? '' : undefined,
-              onClick: () => copyInstruction('qgate-instr', qualityGateInstruction),
-              title: '复制查询指令',
-            }, copiedKey === 'qgate-instr' ? '已复制' : '复制查询指令'),
+          dims.length > 0
+            ? React.createElement('div', { className: 'iterate-obs-bar', style: { flexWrap: 'wrap', gap: 6 } },
+                ...dims.map((d, i) =>
+                  React.createElement('span', { key: `gdim-${i}`, className: 'iterate-obs-chip' },
+                    `${String(d.dimension || '?')} · 收敛 ${num(d.convergenceRate)}% · 评分 ${num(d.score)}`,
+                  ),
+                ),
+              )
+            : null,
+          React.createElement('div', { className: 'iterate-obs-bar', style: { flexWrap: 'wrap' } },
+            ...dims.map((d, i) => {
+              const fill = Math.min(100, Math.max(0, num(d.score)))
+              return React.createElement('div', { key: `gbar-${i}`, className: 'iterate-dim-score' },
+                React.createElement('span', {}, String(d.dimension || '?')),
+                React.createElement('div', { className: 'iterate-dim-score-bar' },
+                  React.createElement('div', {
+                    className: 'iterate-dim-score-fill',
+                    'data-status': String(d.status || 'warn'),
+                    style: { width: `${fill}%` },
+                  }),
+                ),
+                React.createElement('span', {}, `评分 ${num(d.score)} · 发现 ${num(d.findingsCount)} · 已修复 ${num(d.fixedCount)}`),
+              )
+            }),
           ),
+          gate && gate.failReason
+            ? React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } }, `失败原因：${String(gate.failReason)}`)
+            : null,
         ),
       ),
     )
   }
 
   // ── F9: Experience Bank ────────────────────────────────────────────────────
-  // v3.0: Browse/search historical fixes and patterns
+  // v3.1+ renders experience entries scanned from the session plus a
+  // client-side keyword filter; the copy buttons still reach the back end
+  // (list all / search / adopt one entry).
   const renderExperienceBank = () => {
     const expInstruction = expSearch
       ? `请调用 \`iterate_experience\` 搜索经验：\n\n\`\`\`json\n${JSON.stringify({ operation: 'search', query: expSearch }, null, 2)}\n\`\`\``
       : '请调用 `iterate_experience` 列出所有经验'
 
-    const resultRows = expResults.map((entry: unknown, i: number) => {
-      const e = entry as { id?: string; pattern?: string; description?: string; hitCount?: number; dimension?: string }
-      return React.createElement('div', { key: `exp-${i}`, className: 'iterate-obs-row' },
-        React.createElement('span', { className: 'iterate-obs-chip' }, String(e.dimension || '')),
-        React.createElement('span', { className: 'iterate-obs-msg' }, String(e.pattern || '')),
-        React.createElement('span', { className: 'iterate-exp-hit' }, `命中 ${e.hitCount ?? 0} 次`),
+    const expEntries = experienceBank && experienceBank.entries ? experienceBank.entries : []
+    const query = expSearch.trim().toLowerCase()
+    const visible = query
+      ? expEntries.filter((e) =>
+          [e.pattern, e.description, e.id, e.dimension, e.severity, ...(e.tags || [])]
+            .filter(Boolean)
+            .some((t) => String(t).toLowerCase().includes(query)),
+        )
+      : expEntries
+
+    const resultRows = visible.map((e, i) => {
+      const adoptInstruction = `请调用 \`iterate_experience\` 采纳经验并应用已验证修法：\n\n\`\`\`json\n${JSON.stringify({ operation: 'get', id: e.id }, null, 2)}\n\`\`\``
+      return React.createElement('div', { key: `exp-${i}`, className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('span', { className: 'iterate-obs-chip' }, String(e.dimension || '')),
+          React.createElement('span', {}, String(e.pattern || '?')),
+          React.createElement('span', { className: 'iterate-exp-hit' }, `命中 ${e.hitCount ?? 0} 次`),
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' },
+          React.createElement('div', { className: 'iterate-obs-msg' }, String(e.description || '')),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
+            e.verifiedFix
+              ? React.createElement('button', {
+                  className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === `exp-adopt-${i}` ? '' : undefined,
+                  onClick: () => copyInstruction(`exp-adopt-${i}`, adoptInstruction),
+                  title: '复制采纳指令（查询该经验并应用到当前上下文）',
+                }, copiedKey === `exp-adopt-${i}` ? '已复制' : '采纳')
+              : null,
+          ),
+        ),
       )
     })
 
     return React.createElement('div', {},
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
         React.createElement('b', {}, '经验银行'),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, `会话内 ${expEntries.length} 条`),
         React.createElement('button', {
           className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'exp-list' ? '' : undefined,
           onClick: () => copyInstruction('exp-list', '请调用 `iterate_experience` 列出所有经验'),
@@ -2232,12 +2447,16 @@ function ObservatoryPanel(props: SlotProps) {
       ),
       resultRows.length > 0
         ? React.createElement('div', {}, ...resultRows)
-        : React.createElement('div', { className: 'iterate-obs-empty' }, '输入关键词搜索历史经验，或点击「列出经验」查看全部'),
+        : expEntries.length > 0
+          ? React.createElement('div', { className: 'iterate-obs-empty' }, '没有匹配「' + expSearch + '」的经验')
+          : React.createElement('div', { className: 'iterate-obs-empty' }, '本次会话暂无经验记录，可点击「列出经验」查询历史经验'),
     )
   }
 
   // ── F10: Defense Events ────────────────────────────────────────────────────
-  // v3.0: Shows precondition failures, rollbacks, invariant violations, assumption falsifications
+  // v3.1+ renders defense events + type counts scanned from the session
+  // (precondition failures, rollbacks, invariant violations, assumption
+  // falsifications); copy buttons reach the back end for the full history.
   const renderDefenseEvents = () => {
     const defenseInstruction = defenseFilter
       ? `请调用 \`iterate_defense_events\` 查询防御事件：\n\n\`\`\`json\n${JSON.stringify({ operation: 'list', type: defenseFilter || undefined }, null, 2)}\n\`\`\``
@@ -2250,54 +2469,111 @@ function ObservatoryPanel(props: SlotProps) {
       { value: 'invariant_violated', label: '不变量违反' },
       { value: 'assumption_falsified', label: '假设被证伪' },
     ]
+    const TYPE_LABEL: Record<string, string> = {
+      precondition_failed: '前置校验失败',
+      rollback: '回滚',
+      invariant_violated: '不变量违反',
+      assumption_falsified: '假设被证伪',
+    }
+
+    const counts = (defenseEvents && defenseEvents.counts) || {}
+    const allEvents = defenseEvents && defenseEvents.events ? defenseEvents.events : []
+    const totalCount = typeOptions.slice(1).reduce((acc, o) => acc + (counts[o.value] || 0), 0)
+    const visibleEvents = defenseFilter
+      ? allEvents.filter((e) => e.type === defenseFilter)
+      : allEvents
+
+    const headerBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+      React.createElement('b', {}, '防御事件'),
+      React.createElement('span', { className: 'iterate-obs-head-meta' }, `会话内 ${allEvents.length} 条 / 累计 ${totalCount}`),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'defense-list' ? '' : undefined,
+        onClick: () => copyInstruction('defense-list', '请调用 `iterate_defense_events` 列出所有防御事件'),
+        title: '复制列出防御事件指令',
+      }, copiedKey === 'defense-list' ? '已复制' : '列出事件'),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-copied': copiedKey === 'defense-counts' ? '' : undefined,
+        onClick: () => copyInstruction('defense-counts', '请调用 `iterate_defense_events` 查询事件统计'),
+        title: '复制统计指令',
+      }, copiedKey === 'defense-counts' ? '已复制' : '统计'),
+    )
+
+    if (allEvents.length === 0 && totalCount === 0) {
+      return React.createElement('div', {},
+        headerBar,
+        React.createElement('div', { className: 'iterate-obs-block' },
+          React.createElement('div', { className: 'iterate-obs-block-head' },
+            React.createElement('span', {}, '防御事件流'),
+            React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
+          ),
+          React.createElement('div', { className: 'iterate-obs-block-body' },
+            React.createElement('div', { className: 'iterate-obs-msg' }, '防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。'),
+            React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+              React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': copiedKey === 'defense-instr' ? '' : undefined,
+                onClick: () => copyInstruction('defense-instr', defenseInstruction),
+                title: '复制查询指令',
+              }, copiedKey === 'defense-instr' ? '已复制' : '复制查询指令'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+      React.createElement('select', {
+        className: 'iterate-filter-select',
+        value: defenseFilter,
+        'aria-label': '按事件类型筛选',
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDefenseFilter(e.target.value),
+      },
+        ...typeOptions.map((opt) => React.createElement('option', { key: opt.value, value: opt.value }, opt.label)),
+      ),
+      defenseFilter
+        ? React.createElement('button', {
+            className: 'iterate-filter-clear',
+            onClick: () => setDefenseFilter(''),
+            title: '清除类型筛选',
+          }, '清除')
+        : null,
+    )
+
+    let eventRows: React.ReactNode[] = []
+    if (visibleEvents.length > 0) {
+      eventRows = visibleEvents.map((e, i) => {
+        const type = String(e.type || 'unknown')
+        const loc = `${String(e.file || '?')}${typeof e.line === 'number' && e.line > 0 ? `:${e.line}` : ''}`
+        return React.createElement('div', { key: `def-${i}`, className: 'iterate-obs-block' },
+          React.createElement('div', { className: 'iterate-obs-block-head' },
+            React.createElement('span', { className: 'iterate-defense-badge', 'data-type': type }, TYPE_LABEL[type] || type),
+            typeof e.round === 'number'
+              ? React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${e.round}`)
+              : null,
+            React.createElement('span', { className: 'iterate-obs-head-meta' }, loc),
+          ),
+          React.createElement('div', { className: 'iterate-obs-block-body' },
+            React.createElement('div', { className: 'iterate-obs-msg' }, String(e.description || '')),
+            e.defense
+              ? React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 4 } }, `防线：${String(e.defense)}`)
+              : null,
+          ),
+        )
+      })
+    }
 
     return React.createElement('div', {},
-      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-        React.createElement('b', {}, '防御事件'),
-        React.createElement('button', {
-          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'defense-list' ? '' : undefined,
-          onClick: () => copyInstruction('defense-list', '请调用 `iterate_defense_events` 列出所有防御事件'),
-          title: '复制列出防御事件指令',
-        }, copiedKey === 'defense-list' ? '已复制' : '列出事件'),
-        React.createElement('button', {
-          className: 'iterate-btn', 'data-copied': copiedKey === 'defense-counts' ? '' : undefined,
-          onClick: () => copyInstruction('defense-counts', '请调用 `iterate_defense_events` 查询事件统计'),
-          title: '复制统计指令',
-        }, copiedKey === 'defense-counts' ? '已复制' : '统计'),
-      ),
-      React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-        React.createElement('select', {
-          className: 'iterate-filter-select',
-          value: defenseFilter,
-          'aria-label': '按事件类型筛选',
-          onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDefenseFilter(e.target.value),
-        },
-          ...typeOptions.map((opt) => React.createElement('option', { key: opt.value, value: opt.value }, opt.label)),
-        ),
-        defenseFilter
-          ? React.createElement('button', {
-              className: 'iterate-filter-clear',
-              onClick: () => setDefenseFilter(''),
-              title: '清除类型筛选',
-            }, '清除')
-          : null,
-      ),
-      React.createElement('div', { className: 'iterate-obs-block' },
-        React.createElement('div', { className: 'iterate-obs-block-head' },
-          React.createElement('span', {}, '防御事件流'),
-          React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
-        ),
-        React.createElement('div', { className: 'iterate-obs-block-body' },
-          React.createElement('div', { className: 'iterate-obs-msg' }, '防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。'),
-          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
-            React.createElement('button', {
-              className: 'iterate-btn', 'data-copied': copiedKey === 'defense-instr' ? '' : undefined,
-              onClick: () => copyInstruction('defense-instr', defenseInstruction),
-              title: '复制查询指令',
-            }, copiedKey === 'defense-instr' ? '已复制' : '复制查询指令'),
+      headerBar,
+      filterBar,
+      React.createElement('div', { className: 'iterate-obs-bar', style: { flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
+        ...typeOptions.slice(1).map((opt) =>
+          React.createElement('span', { key: `cnt-${opt.value}`, className: 'iterate-defense-badge', 'data-type': opt.value },
+            `${opt.label} ${counts[opt.value] || 0}`,
           ),
         ),
       ),
+      eventRows.length > 0
+        ? React.createElement('div', {}, ...eventRows)
+        : React.createElement('div', { className: 'iterate-obs-empty' }, '没有匹配该类型的防御事件'),
     )
   }
 

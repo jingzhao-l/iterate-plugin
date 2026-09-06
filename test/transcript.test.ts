@@ -179,4 +179,29 @@ describe('ReviewTranscriptBuilder', () => {
     assert.doesNotThrow(() => b.serialize())
     assert.equal(b.serialize().convergence.length >= 1, true)
   })
+
+  it('serializes taskMode: explicit value wins, otherwise derives from mode', () => {
+    const explicitIterate = new ReviewTranscriptBuilder({ project: '/p', mode: 'normal', taskMode: 'iterate', now: fixedClock() }).serialize()
+    assert.equal(explicitIterate.taskMode, 'iterate')
+
+    const explicitCode = new ReviewTranscriptBuilder({ project: '/p', mode: 'dry-run', taskMode: 'code', now: fixedClock() }).serialize()
+    assert.equal(explicitCode.taskMode, 'code')
+
+    // A review-loop run without an explicit taskMode defaults to "iterate".
+    const derived = new ReviewTranscriptBuilder({ project: '/p', mode: 'normal', now: fixedClock() }).serialize()
+    assert.equal(derived.taskMode, 'iterate')
+
+    // No mode and no taskMode -> null (e.g. an empty/pre-capture read).
+    const none = new ReviewTranscriptBuilder({ project: '/p', now: fixedClock() }).serialize()
+    assert.equal(none.taskMode, null)
+
+    // An invalid explicit value is ignored; the mode-derived default applies.
+    const junk = new ReviewTranscriptBuilder({
+      project: '/p',
+      mode: 'normal',
+      taskMode: 'review-session' as 'code',
+      now: fixedClock(),
+    }).serialize()
+    assert.equal(junk.taskMode, 'iterate')
+  })
 })

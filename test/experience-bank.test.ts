@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -114,5 +114,21 @@ describe('iterate_experience add', () => {
     assert.equal(blocks.length, 1)
     assert.match(blocks[0]!.text, /Recorded new experience: exp-1/)
     assert.match(blocks[0]!.text, /Pattern: missing null guard/)
+  })
+
+  it('add surfaces a persistence failure instead of reporting success', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // `.iterate` exists as a plain FILE — the entry cannot be persisted.
+      writeFileSync(join(dir, '.iterate'), '', 'utf-8')
+      const result = (await tool.execute({ operation: 'add', path: dir, entry: entryArgs })) as Record<string, unknown>
+      assert.equal(result.ok, false)
+      assert.equal(result.operation, 'add')
+      assert.equal(result.entry, undefined)
+      assert.match(result.error as string, /experience\.json/)
+    } finally {
+      cleanup()
+    }
   })
 })

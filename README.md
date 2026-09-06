@@ -24,13 +24,11 @@
 
 ## The iterate Ecosystem / iterate 生态一览
 
-**iterate** is not one single binary — it is a **skill ecosystem** that layers a strict multi-round code gate on top of your existing AI assistants, IDEs, and scripts. It never replaces your tools; it adds an audit-and-close-the-loop layer on them. The whole ecosystem ships as **three interchangeable components sharing one `iterate.config.yaml` + one review-dimension system**:
+**iterate** is not one single binary — it is a **skill ecosystem** that layers a strict multi-round code gate on top of your existing AI assistants, IDEs, and scripts. It never replaces your tools; it adds an audit-and-close-the-loop layer on them. The whole ecosystem ships as **three interchangeable components sharing one `iterate.config.yaml` + one 9-dimension review system**:
 
-| Component | Form & Source | Target Scenario |
-|---|---|---|
-| **[Core Skill + CLI](https://github.com/jingzhao-l/iterate-skill)** | Portable AI skill `/iterate` + `iterate` CLI (source: iterate-skill monorepo root) | Conversation-driven multi-round iteration inside Trae / Claude Code / Cursor / Copilot / Codex and 25+ other assistants |
-| **[iterate-harness](https://github.com/jingzhao-l/iterate-harness)** | Standalone headless engine, command `ih` (npm: `iterate-harness`) | Run the EXACT same loop in terminal / CI / git hooks, without any conversational assistant required |
-| **iterate-plugin (this repo)** | dsh desktop-client plugin (npm: `iterate-plugin`) | Plug the harness runtime **into the dsh UI**: convergence dashboard, triage panel, round progress — all surfaced as native dsh widgets |
+- **[Core Skill + CLI](https://github.com/jingzhao-l/iterate-skill)** — a portable AI skill `/iterate` + `iterate` CLI. For conversation-driven multi-round iteration inside Trae / Claude Code / Cursor / Copilot / Codex and 25+ other assistants.
+- **[iterate-harness](https://github.com/jingzhao-l/iterate-harness)** — a standalone headless engine, command `ih` (npm: `iterate-harness`). Runs the **exact same loop** in terminal / CI / git hooks, without any conversational assistant required.
+- **iterate-plugin (this repo)** — a dsh desktop-client plugin (npm: `iterate-plugin`). Plugs the harness runtime **into the dsh UI**: convergence dashboard, triage panel, round progress — all surfaced as native dsh widgets.
 
 How they fit together: **Core Skill** is the canonical, assistant-agnostic review/fix engine (the "brains"). **iterate-harness** is the same engine wrapped as a headless CLI + WebUI for unattended runs. **iterate-plugin** (this repository) wraps that harness runtime as a dsh plugin, rendering the triage UI and convergence dashboard directly inside the dsh desktop client. Configuration (`iterate.config.yaml`) and the 9-dimension review system are **identical across all three** — learn one, use them all.
 
@@ -61,9 +59,9 @@ dsh plugin --profile web add iterate-plugin
 
 `iterate-plugin` is the [iterate](https://github.com/jingzhao-l/iterate-skill) integration for the [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) desktop client. It brings iterate's review loop (review → triage → fix → validate → converge) directly into the dsh UI, offering **autonomous closed-loop code iteration** (normal mode) and **dry-run read-only multi-round review**.
 
-**v3.1/v3.2 Quality Command Center**: The plugin has been upgraded from a "passive observation panel" to an "active command center + knowledge base". New features include quality gate view + writable compute, experience bank with search/adopt/add, defense events stream (record + bilingual labels), native command buttons, and task_mode indicator.
+**v3.2 Quality Command Center**: the plugin has grown from a "passive observation panel" into an "active command center + knowledge base". It now ships quality gate view + writable compute, an experience bank with search / adopt / add, a defense events stream (record + bilingual labels), native command buttons, and a `task_mode` indicator.
 
-Besides 17 pure-function tools, it ships a **build-free Web UI layer** (convergence dashboard, triage panel, stats card, observatory panel with 10 tabs, theme skin, etc.) that plugs straight into dsh's existing UI slots. Configuration (`iterate.config.yaml` and the review dimensions) is identical across the other two components of the iterate ecosystem ([skill](https://github.com/jingzhao-l/iterate-skill) / [headless engine](https://github.com/jingzhao-l/iterate-harness)) — zero migration cost.
+Besides 17 pure-function tools, it carries a **build-free Web UI layer** (convergence dashboard, triage panel, stats card, 10-tab runtime observatory, theme skin, etc.) that plugs straight into dsh's existing UI slots. Configuration (`iterate.config.yaml` and the review dimensions) is identical across the other two components of the iterate ecosystem ([skill](https://github.com/jingzhao-l/iterate-skill) / [headless engine](https://github.com/jingzhao-l/iterate-harness)) — zero migration cost.
 
 ---
 
@@ -85,31 +83,35 @@ Besides 17 pure-function tools, it ships a **build-free Web UI layer** (converge
 
 ### Two modes
 
-| Capability | dry-run | normal |
-| --- | --- | --- |
-| Repeated review until convergence | ✅ | ✅ |
-| Parallel dimension review | ✅ | ✅ |
-| Deterministic aggregation / dedupe / sort | ✅ | ✅ |
-| meta-review report consistency audit | ✅ | ✅ |
-| Zero file modification (read-only) | ✅ | ❌ |
-| Automatic atomic fix | ❌ | ✅ |
-| Validation after each round's fixes | ❌ | ✅ |
-| Rollback on failed fixes | ❌ | ✅ |
-| Self-stop when converged | ✅ | ✅ |
-| Fix atomic findings only, keep architectural for later | ❌ | ✅ |
-| Breakpoint save / resume (long iterations) | ✅ | ✅ |
+The plugin runs the same iterate engine as the rest of the ecosystem, either fully read-only or as an autonomous fix loop:
 
-### UI layer (build-free client slots, v3.1: 10 tabs)
+- **dry-run** — repeats multi-dimension review until convergence; **zero files modified**.
+- **normal** — review → atomic fixes → validation every round → rollback on failure → loop until convergence.
 
-| UI component | Mounted slot | Function |
-| --- | --- | --- |
-| ConvergenceDashboard | `conversation.input.dock` | Live round progress bar, severity stats, dimension badges, trend mini-chart above the input; normal mode also shows fix-count badges; plus a live workflow-phase chip (current phase + running/stopped); **v3.1: task_mode indicator (code/iterate)** |
-| ObservatoryPanel | `conversation.input.dock` | **Ten-tab** runtime observatory below the input: live activity stream (type filter), review threads (expand/collapse all), convergence trend, finding locations (severity/dimension/search filter), fixes + rollback, checkpoint resume, decision timeline (type/round filter + search); **v3.1: Quality Gate (F8)**, **Experience Bank (F9)**, **Defense Events (F10)**; one-click export of all observatory data to JSON (download, copy fallback) |
-| TriagePanel | `conversation.chat.turnTail` | Per-finding y/n/a triage, filtering, batch (incl. select-all), keyboard shortcuts, localStorage persistence, copy-YAML / apply-instruction; **v3.1: Native command buttons (approve architectural fix, trigger new round, rollback to checkpoint)** |
-| StatsCard | `conversation.chat.turnTail` | When no findings remain: convergence stats, round history table, trend chart, completion summary |
-| iterate theme skin | `theme.overrideTokens` | Warm-amber 13-dsw-token override, light/dark modes, togglable in settings |
-| ProgressCapsule | `shell.overlay` | Popup notification on each round completion / convergence (incl. convergence confirm) |
-| SettingsPanel | `settings.section` | Theme toggle, triage-persistence notes, config-management guide, runtime status overview (artifact layout + view/cleanup tool guide), one-click triage data reset |
+Both modes share:
+
+- Repeated review until convergence
+- Parallel dimension review
+- Deterministic aggregation / dedupe / sort
+- meta-review report-consistency audit
+- Self-stop when converged
+- Breakpoint save / resume (long iterations)
+
+`normal` mode additionally:
+
+- Fixes **atomic findings only** (architectural ones are kept for later approval)
+- Validates after each round's fixes
+- Rolls back failed fixes, and can save / resume progress
+
+### UI layer (build-free client slots, v3.2: 10 tabs)
+
+- **ConvergenceDashboard** (`conversation.input.dock`) — live round progress bar, severity stats, dimension badges, trend mini-chart above the input; normal mode also shows fix-count badges; plus a live workflow-phase chip (current phase + running/stopped) and a **v3.2 task_mode indicator (code / iterate)**, now backed by the persisted transcript (`iterate_status` / `iterate_transcript` emit `taskMode`).
+- **ObservatoryPanel** (`conversation.input.dock`) — a **ten-tab** runtime observatory below the input: live activity stream (type filter), review threads (expand / collapse all), convergence trend, finding locations (severity / dimension / search filter), fixes + rollback, checkpoint resume, decision timeline (type / round filter + search). **v3.2 tabs: Quality Gate (F8), Experience Bank (F9), Defense Events (F10)**; one-click JSON export of all observatory data (download, copy fallback). **v3.3: F8/F9/F10 are now live** — they scan the session stream for the latest `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` results and render real data (PASS/FAIL chip + per-dimension score bars, experience entries with adopt buttons + client-side search, defense type-count chips + filtered event stream), degrading to copy-able query instructions only when the session has none.
+- **TriagePanel** (`conversation.chat.turnTail`) — per-finding y/n/a triage, filtering, batch ops (incl. select-all), keyboard shortcuts, localStorage persistence, copy-YAML / apply-instruction. **v3.2: native command buttons** (approve architectural fix, trigger new round, rollback to checkpoint). **v3.3: §8 指派修复 (assign)** — one click copies an `iterate_fix` instruction carrying every in-scope finding (respecting the batch toggle).
+- **StatsCard** (`conversation.chat.turnTail`) — convergence stats, round history, trend chart and completion summary when no findings remain.
+- **iterate theme skin** (`theme.overrideTokens`) — a warm-amber 13-token `--dsw-*` override, light/dark modes, togglable in settings.
+- **ProgressCapsule** (`shell.overlay`) — popup notification on each round completion / convergence (incl. convergence confirm).
+- **SettingsPanel** (`settings.section`) — theme toggle, triage-persistence notes, config-management guide, runtime status overview (artifact layout + view/cleanup tool guide), one-click triage data reset.
 
 The UI layer is **defensive by design**: it degrades gracefully if any of `slots` / `theme` / `React` is unavailable — it never crashes the client.
 
@@ -117,15 +119,15 @@ The UI layer is **defensive by design**: it degrades gracefully if any of `slots
 
 Beyond the 17 registered tools (full reference further down), the plugin closes several loops end to end:
 
-- **Findings triage loop**: review → UI triage (y/n/a) → `iterate_triage` writes back `known_intentional` → auto-filtered next round
-- **Structured fix system**: each fix backs up first, writes a registry entry, records the diff; a failed validation can be reverted with `iterate_rollback`
-- **Breakpoint resume**: checkpoints saved at the start of each round; interrupted long iterations can resume
-- **History audit**: `iterate_history` reads the decision log (filtered by type / time / count) and the fix registry summary to audit run process and fix details
-- **Runtime cleanup**: `iterate_prune` removes stale decision-log entries, stale checkpoints, orphaned fix backups and empty rounds; dry-run by default (report-only), real cleanup requires `dryRun:false`, and every cleanup is logged
-- **Config read / write**: `iterate_config` supports validated, backed-up, rollback-capable partial writes
-- **v3.1/v3.2 Experience Bank**: `iterate_experience` queries historical fixes and patterns with search/filter/adopt, and can persist new verified fixes (`add`) — re-adding the same pattern+dimension bumps its hit count instead of duplicating it
-- **v3.1/v3.2 Quality Gate**: `iterate_quality_gate` reads quality gate status with dimension convergence rates and PASS/FAIL, and can recompute + persist a fresh certificate (`compute`) from this round's findings/validation results (real convergence from `findingsByRound`)
-- **v3.1/v3.2 Defense Events**: `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications) and can `record` new ones; readable labels follow the project language (en/zh)
+- **Findings triage loop** — review → UI triage (y/n/a) → `iterate_triage` writes back `known_intentional` → auto-filtered next round
+- **Structured fix system** — each fix backs up first, writes a registry entry, records the diff; a failed validation can be reverted with `iterate_rollback`
+- **Breakpoint resume** — checkpoints saved at the start of each round; interrupted long iterations can resume
+- **History audit** — `iterate_history` reads the decision log (filtered by type / time / count) and the fix-registry summary to audit run process and fix details
+- **Runtime cleanup** — `iterate_prune` removes stale decision-log entries, stale checkpoints, orphaned fix backups and empty rounds; dry-run by default (report-only), real cleanup requires `dryRun:false`, and every cleanup is logged
+- **Config read / write** — `iterate_config` supports validated, backed-up, rollback-capable partial writes
+- **v3.2 Experience Bank** — `iterate_experience` queries historical fixes and patterns with search / filter / adopt, and can persist new verified fixes (`add`) — re-adding the same pattern+dimension bumps its hit count instead of duplicating it
+- **v3.2 Quality Gate** — `iterate_quality_gate` reads quality gate status with per-dimension convergence rates and PASS/FAIL, and can recompute + persist a fresh certificate (`compute`) from this round's findings / validation results (real convergence from `findingsByRound`)
+- **v3.2 Defense Events** — `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications) and can `record` new ones; readable labels follow the project language (en / zh)
 
 ---
 
@@ -242,27 +244,25 @@ validation:
 
 ---
 
-## 🔧 Registered tools (v3.1/v3.2: 17)
+## 🔧 Registered tools (v3.2: 17)
 
-| Tool | Function |
-| --- | --- |
-| `iterate_config` | Read / write `iterate.config.yaml`. `operation=read` returns the full config or a named section; `operation=write` schema-validates, backs up, then merges and writes — auto rollback on failure |
-| `iterate_validate` | Run a whitelisted validation command, return the result |
-| `iterate_decision_log` | Append a decision log entry (append-only, never edits old ones), stored in `.iterate/decision-log.jsonl` |
-| `iterate_context` | Read the `SKILL.md` / `ITERATE.md` context |
-| `iterate_review` | Deterministic review engine: `plan` builds the plan, `aggregate` dedupes + converges, `meta-review` audits report consistency. Pure computation, no filesystem access |
-| `iterate_triage` | Manage `personalization.known_intentional`: `apply` validates, dedupes (file\|dimension\|line), backs up and writes back to config; `list` reads back the current entries. The only channel for the browser triage panel to write back to config |
-| `iterate_fix` | Apply **one atomic fix**: validates the relative path, backs up the original file, enforces atomicity via `atomic.max_lines` (skippable with `force`), writes new content, records a FixRecord and an `atomic_fix` log. The only legal file-modifying entry in normal mode |
-| `iterate_diff` | View accumulated fix changes: with `file`, returns the unified diff against the first backup; without it, a per-fixed-file summary |
-| `iterate_rollback` | Roll back an applied fix: restore the file from backup, remove that FixRecord from the registry, append a `revert` log. Used after a failed round validation |
-| `iterate_checkpoint` | Iteration breakpoint: `save` persists progress to `.iterate/checkpoint.json`, `load` reads it back, `clear` removes it. Resumable interrupted long iterations |
-| `iterate_status` | Summarize current iteration state: mode, current/last round, fixes applied, remaining architectural, decision-log entry count, whether a checkpoint exists |
-| `iterate_history` | Read iteration history (read-only): decision-log entries (filter by `type` / `since` / `limit`, default latest 50, cap 200) + fix-registry summary (per-round fixed/failed counts). For auditing the run, tracing logs, and inventorying fixes |
-| `iterate_prune` | Clean runtime artifacts: stale decision-log entries (by `retainDays`, default 30), stale checkpoints, orphaned fix backups, empty rounds. Dry-run by default (report-only); real cleanup with `dryRun:false`, each cleanup logged |
-| `iterate_transcript` | Runtime observatory: persist review transcripts, threads, fixes, and nudge directions to `.iterate/transcript.json` for the client observatory |
-| `iterate_experience` | **v3.1/v3.2** Query the experience bank (list/search/get), or `add` a new verified fix: re-adding the same pattern+dimension bumps its hit count instead of duplicating it. Persists to `.iterate/experience.json` |
-| `iterate_quality_gate` | **v3.1/v3.2** Read the quality certificate (`read`), or recompute + persist a fresh one (`compute`) from findings, validation results, `findingsByRound`, and `fixedByDimension`. Real per-dimension convergence rates |
-| `iterate_defense_events` | **v3.1/v3.2** Query defense events (list/counts), or `record` a new one. Human-readable labels follow the project language (en/zh) |
+- `iterate_config` — read / write `iterate.config.yaml`. `operation=read` returns the full config or a named section; `operation=write` schema-validates, backs up, then merges and writes — auto rollback on failure
+- `iterate_validate` — run a whitelisted validation command, return the result
+- `iterate_decision_log` — append a decision log entry (append-only, never edits old ones), stored in `.iterate/decision-log.jsonl`
+- `iterate_context` — read the `SKILL.md` / `ITERATE.md` context
+- `iterate_review` — deterministic review engine: `plan` builds the plan, `aggregate` dedupes + converges, `meta-review` audits report consistency. Pure computation, no filesystem access
+- `iterate_triage` — manage `personalization.known_intentional`: `apply` validates, dedupes (file|dimension|line), backs up and writes back to config; `list` reads back the current entries. The only channel for the browser triage panel to write back to config
+- `iterate_fix` — apply **one atomic fix**: validates the relative path, backs up the original file, enforces atomicity via `atomic.max_lines` (skippable with `force`), writes new content, records a FixRecord and an `atomic_fix` log. The only legal file-modifying entry in normal mode
+- `iterate_diff` — view accumulated fix changes: with `file`, returns the unified diff against the first backup; without it, a per-fixed-file summary
+- `iterate_rollback` — roll back an applied fix: restore the file from backup, remove that FixRecord from the registry, append a `revert` log. Used after a failed round validation
+- `iterate_checkpoint` — iteration breakpoint: `save` persists progress to `.iterate/checkpoint.json`, `load` reads it back, `clear` removes it. Resumable interrupted long iterations
+- `iterate_status` — summarize current iteration state: mode, current/last round, fixes applied, remaining architectural, decision-log entry count, whether a checkpoint exists
+- `iterate_history` — read iteration history (read-only): decision-log entries (filter by `type` / `since` / `limit`, default latest 50, cap 200) + fix-registry summary (per-round fixed/failed counts). For auditing the run, tracing logs, and inventorying fixes
+- `iterate_prune` — clean runtime artifacts: stale decision-log entries (by `retainDays`, default 30), stale checkpoints, orphaned fix backups, empty rounds. Dry-run by default (report-only); real cleanup with `dryRun:false`, each cleanup logged
+- `iterate_transcript` — runtime observatory: persist review transcripts, threads, fixes, and nudge directions to `.iterate/transcript.json` for the client observatory
+- `iterate_experience` — **v3.2** query the experience bank (list / search / get), or `add` a new verified fix: re-adding the same pattern+dimension bumps its hit count instead of duplicating it. Persists to `.iterate/experience.json`
+- `iterate_quality_gate` — **v3.2** read the quality certificate (`read`), or recompute + persist a fresh one (`compute`) from findings, validation results, `findingsByRound`, and `fixedByDimension`. Real per-dimension convergence rates
+- `iterate_defense_events` — **v3.2** query defense events (list / counts), or `record` a new one. Human-readable labels follow the project language (en / zh)
 
 ---
 
@@ -276,9 +276,9 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   checkpoint.json         # iteration breakpoint (resume)
   transcript.json         # runtime-observatory manifest (per-reviewer threads, trend, fixes, timeline, nudge)
   transcript-live.ndjson  # append-only near-real-time reviewer-activity feed (read/fix/rollback/validate…), byte-capped
-  experience.json         # v3.1/v3.2: experience bank (historical fixes and patterns, accumulated across sessions)
-  quality-gate.json       # v3.1/v3.2: quality gate snapshot (dimension convergence, verification pass rates, PASS/FAIL)
-  defense-events.json     # v3.1/v3.2: defense events stream (precondition failures, rollbacks, invariant violations, assumption falsifications)
+  experience.json         # v3.2: experience bank (historical fixes and patterns, accumulated across sessions)
+  quality-gate.json       # v3.2: quality gate snapshot (dimension convergence, verification pass rates, PASS/FAIL)
+  defense-events.json     # v3.2: defense events stream (precondition failures, rollbacks, invariant violations, assumption falsifications)
   fixes/
     registry.json         # fix registry (list of FixRecords, grouped by round)
     <fix-id>_<ts>.bak     # original file backup before each fix
@@ -290,12 +290,12 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
 
 The plugin follows dsh's "everything-is-a-plugin" architecture:
 
-- **Does exactly two things**: injects the system prompt teaching the model the iterate workflow + registers 17 pure-function tools
+- **Does exactly two things** — injects the system prompt teaching the model the iterate workflow + registers 17 pure-function tools
 - **All orchestration runs through dsh native `workflow` + `agent` + `parallel`**
 - **Core logic is entirely pure functions** (dedupe / filter / sort / converge / meta-audit / diff computation / history filtering / cleanup reporting) — unit-testable, no I/O
-- **Security model**: file writes confined to the resolved project root (path-traversal protection); always back up before writing, roll back on failure; config writes also back up + roll back; `iterate_prune` is dry-run by default and only clears artifacts under `.iterate/` with every cleanup logged; `iterate_fix` caps content length and `iterate_triage` caps entry count to fend off abnormal oversized payloads
-- **Build-free UI**: `lib/client.js` uses a `React.createElement` tree + injected `<style>` tags, all colors via `--dsw-*` tokens, degrading gracefully when a service is missing
-- **v3.1/v3.2 Quality Command Center**: extends the plugin from "passive observation panel" to "active command center + knowledge base" with quality gates (read + compute), experience bank (read + add), defense events (read + record), and native command buttons
+- **Security model** — file writes confined to the resolved project root (path-traversal protection); always back up before writing, roll back on failure; config writes also back up + roll back; `iterate_prune` is dry-run by default and only clears artifacts under `.iterate/` with every cleanup logged; `iterate_fix` caps content length and `iterate_triage` caps entry count to fend off abnormal oversized payloads
+- **Build-free UI** — `lib/client.js` uses a `React.createElement` tree + injected `<style>` tags, all colors via `--dsw-*` tokens, degrading gracefully when a service is missing
+- **v3.2 Quality Command Center** — extends the plugin from "passive observation panel" to "active command center + knowledge base" with quality gates (read + compute), experience bank (read + add), defense events (read + record), and native command buttons
 - Follows the iterate skill's design principles: deterministic convergence, auditable, least privilege
 
 ---
@@ -312,7 +312,7 @@ npm test
 All tests pass:
 
 - **466 unit tests green**, type-check clean
-- Coverage: dedupe, filter, sort, multi-round convergence, meta-review audit, path safety, timeout clamping, config read/write + rollback, triage merge, diff computation, checkpoint validation, fix registry, history read + filter, prune cleanup report + dry-run semantics, UI pure functions (select-all key, runtime status guide), **v3.1/v3.2: experience bank, quality gate, defense events, approval-gate fail-open path**.
+- Coverage: dedupe, filter, sort, multi-round convergence, meta-review audit, path safety, timeout clamping, config read/write + rollback, triage merge, diff computation, checkpoint validation, fix registry, history read + filter, prune cleanup report + dry-run semantics, UI pure functions (select-all key, runtime status guide), **v3.2: experience bank, quality gate, defense events, approval-gate fail-open path**.
 
 ---
 

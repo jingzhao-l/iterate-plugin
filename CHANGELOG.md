@@ -5,6 +5,34 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-09-06
+
+### Added
+
+- **Quality command center session scans** (`lib/parse.js`): `scanSessionForQualityGate` / `scanSessionForExperienceBank` / `scanSessionForDefenseEvents` deep-scan the in-memory session stream (reverse-chronological, proxy-safe, depth/circular guarded) for the latest `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` result and normalize it into a JSON-safe shape — `get`/`add` single `entry` collapses into the same list shape the F9 tab renders, and `record`/`counts` fold into the F10 counts+events stream
+- **F8 Quality Gate tab now live**: renders the overall PASS/FAIL chip (score, verification pass rate, failed count), per-dimension convergence chips and score bars from the session-scanned snapshot; falls back to the copy-able query instruction only when the session has none
+- **F9 Experience Bank tab now live**: renders session-scanned entries (dimension, pattern, hit count, description) with a client-side keyword filter over pattern/description/severity/tags, per-entry 采纳 (adopt) copy instruction when a `verifiedFix` exists, and a live count of in-session entries
+- **F10 Defense Events tab now live**: renders type-count chips (前置校验失败 / 回滚 / 不变量违反 / 假设被证伪), the per-type filtered event stream with Round + location + defense narration, and the current filter
+- **§8 指派修复 (assign) button** (findings triage): copies one `iterate_fix` instruction carrying every in-scope finding's `file`/`line`/`dimension`/`severity`/`summary` (`suggested_fix` when present); scope follows the batch toggle (`selectAll` = all findings, otherwise the visible filter set)
+- **task_mode indicator wiring**: `iterate_transcript capture` accepts an explicit `taskMode` (`"code" | "iterate"`) and the `ReviewTranscriptBuilder` persists it into the manifest (deriving `iterate` for review-loop runs when not supplied, `null` otherwise); `rehydrateBuilder` preserves it across nudge writes; `iterate_status` reads the persisted transcript's `taskMode` (`readTranscriptTaskMode`) and reports it in the status output and render; the client chip (`iterate-chip-taskmode`) now has a real data source via `normalizeTranscript`'s `taskMode` passthrough
+
+### Tests
+
+- parse: 7 new cases — taskMode passthrough (code/iterate/absent/junk), latest-wins quality-gate scan (non-mutating), quality-gate/experience/defense null-on-absence, single-entry fold for `get`/`add`, and deep-find of nested result shapes
+- checkpoint: 4 new cases — computeStatus taskMode passthrough/default-null, `readTranscriptTaskMode` missing/corrupt → null, reads `iterate`/`code` from a persisted transcript, and degrades unknown values to null
+- transcript: 1 new case — serialize emits `taskMode` (explicit wins, mode-derived default, null when mode absent, invalid value ignored)
+
+## [3.2.2] - 2026-09-06
+
+### Fixed
+
+- **No more silent persist failures**: `writeQualityGate`, `writeExperienceBank`, and `writeDefenseEvents` previously swallowed every I/O error and reported success even when nothing was written — the tools (`iterate_quality_gate compute`, `iterate_experience add`, `iterate_defense_events record`) now return `ok: false` with the failing path/message, matching the structured-result pattern used by `writeConfigFile`/`appendDecisionEntry`/checkpoint/prune
+- **Removed dead `toolGate`**: the exported but unused tool-facing gate in `approval-gate.ts` contradicted the documented single-gate architecture (`tools/pre-execute` is the only approval seam; a tool-internal second gate would double-ask). The dead export and its tests were removed
+
+### Tests
+
+- Added 6 regression tests: three store-level write-failure tests (`.iterate` occupied by a plain file) and three tool-level tests proving each write operation surfaces the persistence error instead of `ok: true`
+
 ## [3.2.1] - 2026-09-05
 
 ### Fixed
