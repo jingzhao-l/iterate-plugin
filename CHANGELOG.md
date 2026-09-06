@@ -5,6 +5,16 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-09-06
+
+### Fixed
+
+- **DSH STORE manifest compliance**: `package.json` `repository` now points at the canonical monorepo `jingzhao-l/iterate-skill` (with `directory: harness/iterate-plugin`) instead of the independent plugin repo, matching the store's catalog entry; `homepage`/`bugs` updated to match. Declared `dsh.compatibility.dshReleases` (`0.1.2-alpha.4` / `0.1.2-alpha.5` / `0.1.2-rc.1` = `compatible`) so DSH compatibility is explicitly stated. Documented runtime permissions (files / commands / credentials / network), pinned dependencies, the absence of install-time lifecycle scripts, and failure bounds in README (`🔐 权限、依赖与兼容性` section, EN + ZH) per the DSH-Store submission contract.
+
+### Notes
+
+- Metadata- and documentation-only release (no runtime code changed). Fixes the catalog-blocked / update-deferred findings from DSH-Store automation (AI-Scarlett/DSH-Store#504).
+
 ## [3.3.0] - 2026-09-06
 
 ### Added
