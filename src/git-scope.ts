@@ -23,7 +23,7 @@
 
 import { execFile } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 /** A resolved changed-only scope result. */
 export interface GitScopeResult {
@@ -113,10 +113,11 @@ export function parseChangedFiles(stdout: string): string[] {
  */
 export function filterExistingFiles(root: string, files: string[]): string[] {
   const out: string[] = []
+  const rootPrefix = root.endsWith(sep) ? root : root + sep
   for (const rel of files) {
     if (rel.startsWith('/') || rel.includes('\0')) continue
     const candidate = join(root, rel)
-    if (!candidate.startsWith(root + '/') && candidate !== root) continue
+    if (!candidate.startsWith(rootPrefix) && candidate !== root) continue
     try {
       if (existsSync(candidate) && statSync(candidate).isFile()) out.push(rel)
     } catch {

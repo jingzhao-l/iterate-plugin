@@ -49,4 +49,14 @@ describe('ITERATE_SKILL_PROMPT', () => {
     assert.ok(ITERATE_SKILL_PROMPT.includes('Fixers are the ONLY agents allowed to write files'))
     assert.ok(ITERATE_SKILL_PROMPT.includes('iterate_fix'))
   })
+
+  it('reads the config with a plain read, not validate-only (which omits the config key)', () => {
+    assert.ok(ITERATE_SKILL_PROMPT.includes('Call iterate_config({}) '))
+    assert.ok(!ITERATE_SKILL_PROMPT.includes('iterate_config({ validate: true })'))
+  })
+
+  it('never instructs reviewers to report a failed/invalid round as converged', () => {
+    assert.ok(ITERATE_SKILL_PROMPT.includes('schema-invalid findings'))
+    assert.ok(!ITERATE_SKILL_PROMPT.includes('findingsByRound[r-1] === 0'))
+  })
 })

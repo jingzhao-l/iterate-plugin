@@ -61,7 +61,6 @@ import {
   batchSetVerdict,
   setAllVerdicts,
   buildRoundHistory,
-  buildFindingTrend,
   computeTrendMetrics,
   trendMax,
   buildCompletionSummary,
@@ -1226,7 +1225,10 @@ function TriagePanel(props: SlotProps) {
 
   // v3.0: Command handlers for native action buttons
   const doApproveArchitecturalFix = () => {
-    const cmd = '请调用 `iterate_fix` 批准架构修复（设置 is_architectural: true）'
+    // Architectural findings exceed the atomic threshold, so "approving" one
+    // means telling the model to apply it as a deliberate forced change via
+    // iterate_fix with force:true (is_architectural is not a real parameter).
+    const cmd = '请调用 `iterate_fix`，对本项目剩余架构型 finding 生成修复内容并设置 force: true 应用（架构修复允许超过 atomic 阈值）'
     copyText(cmd).then((ok) => {
       if (ok) {
         setCmdCopied('approve-arch')
@@ -1246,7 +1248,10 @@ function TriagePanel(props: SlotProps) {
   }
 
   const doRollbackToCheckpoint = () => {
-    const cmd = '请调用 `iterate_checkpoint` 回滚到上一个检查点'
+    // iterate_checkpoint has NO rollback operation (save/load/resume/clear
+    // only); reverting applied fixes is done via iterate_rollback by fix id,
+    // so the paste-able instruction must point there instead.
+    const cmd = '请回滚上一轮迭代的修复：调用 `iterate_history` 查看本轮 fix id，再用 `iterate_rollback` 逐个撤销这些修复'
     copyText(cmd).then((ok) => {
       if (ok) {
         setCmdCopied('rollback')
@@ -2267,7 +2272,10 @@ function ObservatoryPanel(props: SlotProps) {
     const sorted = filtered.slice()
     const rows = sorted.map((t, i) => {
       const k = `f7-${i}`
-      const dataText = t.data && typeof t.data === 'object' ? JSON.stringify(t.data) : ''
+      let dataText = ''
+      if (t.data && typeof t.data === 'object') {
+        try { dataText = JSON.stringify(t.data) } catch { dataText = String(t.data) }
+      }
       return React.createElement('div', { key: k, className: 'iterate-obs-row', style: { flexDirection: 'column', alignItems: 'flex-start' } },
         React.createElement('div', { className: 'iterate-obs-bar', style: { width: '100%' } },
           React.createElement('span', { className: 'iterate-obs-chip' }, String(t.type || '?')),

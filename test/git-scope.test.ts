@@ -94,6 +94,16 @@ describe('filterExistingFiles', () => {
     const out = filterExistingFiles(root, ['broken-link', 'missing'])
     assert.deepEqual(out, [])
   })
+
+  it('accepts a candidate when the root already ends with the path separator', () => {
+    const root = mkdtempSync(join(tmpdir(), 'git-scope-'))
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src', 'a.ts'), 'export const a = 1\n')
+    // A trailing separator is normalized away by the prefix guard (root.endsWith
+    // (sep) ? root : root + sep), so a real in-root file is still admitted.
+    const out = filterExistingFiles(root + '/', ['src/a.ts', '..'])
+    assert.deepEqual(out, ['src/a.ts'])
+  })
 })
 
 describe('decideScope', () => {

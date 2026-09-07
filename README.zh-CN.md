@@ -290,10 +290,17 @@ validation:
 ### Node.js / DSH 兼容范围
 
 - **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
-- **DSH**：在 `dsh.compatibility.dshReleases` 中声明官方 `0.1.2-alpha.4`、
-  `0.1.2-alpha.5`、`0.1.2-rc.1` 三个版本为 `compatible`。插件基于
-  `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.1.2-rc.1` 构建，
-  只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。
+- **DSH**：在 `dsh.compatibility.dshReleases` 中声明官方 `0.1.1-rc.1`、
+  `0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1` 五个版本为
+  `compatible`。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values`
+  `0.1.2-rc.1` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）；
+  `0.1.3-alpha.1` 为匹配当前 DSH 发布窗口的源码声明，插件不使用该发布变更的任何 API。
+- **一次性 Profile 证据（真实，`dsh` CLI `0.1.1-rc.1`）**：在临时 `$DSH_HOME` 下
+  `dsh plugin --profile <p> add <本仓库>` 约 449ms 完成安装；`dsh --profile <p>
+  --dump-config` 正确合成 `iterate-plugin` bundle patch；`dsh plugin --profile <p>
+  remove iterate-plugin` 约 602ms 卸载完成、合成配置中不存在残留引用。完整运行时
+  启动未在此环境演练（一次性 Profile 无模型提供方），故 `dshOperations` 的
+  start/rollback 证据为 `unknown`/`partial`——确切命令与耗时见 `CHANGELOG.md`。
 
 ### 运行时权限（保守披露）
 
@@ -304,9 +311,12 @@ validation:
   检查点、transcript、修复备份/注册表、质量门禁、经验银行、防御事件）。
   `iterate_fix` / `iterate_triage` 还会就地修改用户源码（路径遍历防护限定在解析后
   的项目根目录内，每次修复前备份、失败回滚）。客户端侧把分诊判定持久化到 `localStorage`。
-- **命令（commands）** — 插件只注册模型可调用工具；模型要执行的任何 shell 操作
-  （build / test / `git`）都由**宿主**执行，不是本插件。客户端"指挥按钮"只复制可粘贴
-  的指令文本，不启动任何进程。
+- **命令（commands）** — 插件的工具本身只执行一个严格受限的命令面、且仅在模型调用时
+  于 dsh 宿主进程内运行：`iterate_validate` 运行 `iterate.config.yaml`
+  `validation.commands` 中**逐条精确匹配白名单**的命令（是的，经由
+  `node:child_process` 执行，超时上限 600 秒）；`iterate_review`（changed-only 范围）
+  在项目根目录运行 `git diff --name-only -z <branch>`。除此之外不启动任何进程。
+  客户端"指挥按钮"只复制可粘贴的指令文本，不启动任何进程。
 - **凭据（credentials）** — 本插件运行时**不**读取或传输凭据。同生态的
   **iterate-skill / iterate-harness** 组件在用户自行执行 Git/API 操作时可能读取
   git 凭据 / GitHub token；它们是独立包，本插件从不加载它们。

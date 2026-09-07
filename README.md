@@ -292,9 +292,20 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
 
 - **Node.js**: `>=20` (`package.json` `engines.node`).
 - **DSH**: declares `dsh.compatibility.dshReleases` — `compatible` for the official
-  `0.1.2-alpha.4`, `0.1.2-alpha.5`, and `0.1.2-rc.1` releases. The plugin is built
-  against `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.1.2-rc.1`
-  and uses only public contracts (tool registration, client slots + theme, bundle patch).
+  `0.1.1-rc.1`, `0.1.2-alpha.4`, `0.1.2-alpha.5`, `0.1.2-rc.1`, and `0.1.3-alpha.1`
+  releases. The plugin is built against `@deepseek-ai/dsh-tools` /
+  `@deepseek-ai/dsh-util-values` `0.1.2-rc.1` and uses only public contracts
+  (tool registration, client slots + theme, bundle patch). `0.1.3-alpha.1` is a
+  source declaration matching the current DSH release window; it does not use any
+  API changed by that release.
+- **Disposable-Profile evidence (real, `dsh` CLI `0.1.1-rc.1`)**: on a temp
+  `$DSH_HOME`, `dsh plugin --profile <p> add <this-repo>` installed the bundle in
+  ~449 ms; `dsh --profile <p> --dump-config` composed the `iterate-plugin` bundle
+  patch into the profile; `dsh plugin --profile <p> remove iterate-plugin`
+  uninstalled in ~602 ms and left zero references in the composed config. A full
+  runtime boot was **not** exercised here (no model provider in the disposable
+  profile), so `dshOperations` start/rollback stay `unknown`/`partial` — see
+  `CHANGELOG.md` for the exact commands and timings.
 
 ### Runtime permissions (conservative disclosure)
 
@@ -308,10 +319,14 @@ following capabilities; elevated capability means a DSH Profile install stays
   in-place edits to the user's source files (path-traversal protected to the
   resolved project root, backups taken before every fix, rollback on failure).
   The client half persists triage verdicts to `localStorage`.
-- **Commands** — the plugin registers model-facing tools; any shell execution that
-  the model performs (build / test / `git`) is run by the **host**, not by this
-  plugin. The client "command buttons" only copy paste-able instruction text; they
-  do not spawn processes.
+- **Commands** — the plugin's own tools execute a small, strictly bounded command
+  surface inside the dsh host process, only when the model calls them: `iterate_validate`
+  runs one of the **exact-match whitelisted** commands configured in
+  `iterate.config.yaml` `validation.commands` (yes, it shells out via
+  `node:child_process`, timeout-capped to ≤600 s); `iterate_review` (changed-only
+  scope) runs `git diff --name-only -z <branch>` in the project root. Nothing else
+  spawns a process. The client "command buttons" only copy paste-able instruction
+  text; they do not spawn processes.
 - **Credentials** — this plugin does **not** read or transmit credentials at
   runtime. The sibling **iterate-skill / iterate-harness** components may read git
   credentials / GitHub tokens when the user runs their own Git/API operations; those

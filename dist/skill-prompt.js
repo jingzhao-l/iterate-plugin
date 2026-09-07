@@ -142,9 +142,20 @@ for (let r = 1; r <= maxRounds; r++) {
   // Feed the DEDUPED + already-filtered set back (not raw findings) so the known
   // list stays bounded and reviewers never see the same issue twice.
   if (agg && agg.report && Array.isArray(agg.report.findings)) known = agg.report.findings
-  if (agg && agg.report && agg.report.convergence && agg.report.convergence.findingsByRound[r-1] === 0) {
-    log('round ' + r + ' found 0 new findings — converged')
-    break
+  // A round counts as "converged" ONLY when the aggregate accepted it
+  // (schema-valid) AND it genuinely found zero NEW findings. If reviewers all
+  // failed or their output stayed schema-invalid after retries, the round is
+  // INCONCLUSIVE — never report an empty-but-broken round as converged (an
+  // invalid/failed round must fail the run, not masquerade as a clean pass).
+  if (!schemaInvalid) {
+    const newCount =
+      agg && agg.report && agg.report.convergence
+        ? agg.report.convergence.findingsByRound[r - 1]
+        : thisRound.findings.length
+    if (newCount === 0) {
+      log('round ' + r + ' found 0 new findings — converged')
+      break
+    }
   }
 }
 
@@ -237,7 +248,7 @@ if (checkpoint) {
 
 phase('plan')
 const configRes = await agent(
-  'Call iterate_config({ validate: true }) and return the config JSON.',
+  'Call iterate_config({}) and return the config JSON.',
   Object.assign({ label: 'config:read' }, backend)
 )
 const cfg = (configRes && configRes.config) ? configRes.config : null
@@ -420,7 +431,7 @@ for (let r = startRound; r <= maxRounds; r++) {
     Object.assign({ label: 'checkpoint:save:r' + r }, backend)
   )
 
-  if (atomic.length === 0 && remaining.length === 0) {
+  if (atomic.length === 0 && remaining.length === 0 && !schemaInvalid) {
     log('round ' + r + ' found nothing to fix — converged')
     converged = true
     break

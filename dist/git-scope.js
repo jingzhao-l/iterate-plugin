@@ -22,7 +22,7 @@
  */
 import { execFile } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 /**
  * Parse `git diff --name-only -z` stdout into a list of relative paths.
  * Pure. NUL-delimited mode is machine-safe (handles any filename); when no
@@ -112,11 +112,12 @@ export function parseChangedFiles(stdout) {
  */
 export function filterExistingFiles(root, files) {
     const out = [];
+    const rootPrefix = root.endsWith(sep) ? root : root + sep;
     for (const rel of files) {
         if (rel.startsWith('/') || rel.includes('\0'))
             continue;
         const candidate = join(root, rel);
-        if (!candidate.startsWith(root + '/') && candidate !== root)
+        if (!candidate.startsWith(rootPrefix) && candidate !== root)
             continue;
         try {
             if (existsSync(candidate) && statSync(candidate).isFile())

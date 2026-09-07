@@ -271,6 +271,20 @@ describe('severityStats / groupByDimension', () => {
     assert.equal(groups.correctness?.length, 1)
     assert.equal(groups.security?.length, 1)
   })
+
+  it('skips null / non-object findings instead of crashing', () => {
+    const report = { findings: [null, 42, 'x', { severity: 'high', dimension: 'correctness' }] }
+    assert.deepEqual(severityStats(report), { critical: 0, high: 1, medium: 0, low: 0 })
+    assert.deepEqual(groupByDimension(report), { correctness: [{ severity: 'high', dimension: 'correctness' }] })
+  })
+
+  it('buildRoundHistory tolerates a null round element', () => {
+    const history = buildRoundHistory({ rounds: [null, { round: 2, findings: [] }] })
+    assert.deepEqual(history, [
+      { round: 0, count: 0, critical: 0, high: 0, medium: 0, low: 0 },
+      { round: 2, count: 0, critical: 0, high: 0, medium: 0, low: 0 },
+    ])
+  })
 })
 
 // ─── buildTriageState / hashReport ───────────────────────────────────────────
@@ -876,6 +890,41 @@ describe('transcript live bridge', () => {
     assert.equal(scanSessionForQualityGate(null), null)
   })
 
+  it('scanSessionForQualityGate surfaces a result embedded in message.tool_calls', () => {
+    // Assistant tool-call variant: the result lives on the call object inside
+    // message.tool_calls, not on session.toolCalls. The scanner must find it
+    // instead of falling back to the (non-JSON) content of the last message.
+    const session = {
+      messages: [
+        { role: 'assistant', tool_calls: [{ name: 'iterate_quality_gate', result: { ok: true, kind: 'quality_gate', operation: 'compute', snapshot: snap('pass') } }] },
+        { role: 'assistant', content: '门禁已刷新，一切正常。' },
+      ],
+    }
+    const out = scanSessionForQualityGate(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.overallStatus, 'pass')
+    assert.equal(out.dimensions.length, 2)
+  })
+
+  it('scanSessionForDefenseEvents reads message.tool_calls results too', () => {
+    const session = {
+      messages: [
+        {
+          role: 'assistant',
+          tool_calls: [
+            { name: 'iterate_defense_events', result: { ok: true, kind: 'defense_events', operation: 'list', language: 'zh', count: 1, events: [eventRec], counts: eventCounts } },
+          ],
+        },
+      ],
+    }
+    const out = scanSessionForDefenseEvents(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.count, 1)
+    assert.equal(out.events.length, 1)
+    assert.equal(out.events[0].id, 'def-42')
+    assert.equal(out.counts.rollback, 2)
+  })
+
   it('scanSessionForExperienceBank folds get/add single entries into the entries array', () => {
     const listSession = { toolCalls: [{ tool: 'iterate_experience', result: listResult }] }
     const listOut = scanSessionForExperienceBank(listSession) as Record<string, any> | null
@@ -945,6 +994,35 @@ function safeLiveOf(manifest: Record<string, unknown>): unknown[] | undefined {
   const v = manifest.live
   return Array.isArray(v) ? (v as unknown[]) : undefined
 }
+
+// ─── Malformed / cyclic input resilience (extractTranscript + countSessionImages) ─
+
+describe('cyclic / malformed session resilience', () => {
+  it('scanSessionForTranscript does not stack-overflow on a cyclic object', () => {
+    const cyclic: Record<string, unknown> = { message: 'hi' }
+    cyclic.self = cyclic
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { message: { inner: cyclic } } }] }
+    const manifest = scanSessionForTranscript(session)
+    // Must terminate (no RangeError) and find nothing meaningful.
+    assert.equal(manifest, null)
+  })
+
+  it('countSessionImages counts a block once even when the attachment also matches the raw ref shape', () => {
+    // An image block whose attachment carries mediaType would previously match
+    // BOTH the block shape and the raw-ref shape, double-counting it to 2.
+    const session = {
+      content: [{ type: 'image', attachment: { mediaType: 'image/png', attachmentId: 'img-1' } }],
+    }
+    assert.equal(countSessionImages(session), 1)
+  })
+
+  it('countSessionImages does not double-count when attachmentId is absent', () => {
+    const session = {
+      content: [{ type: 'image', attachment: { mediaType: 'image/png' } }],
+    }
+    assert.equal(countSessionImages(session), 1)
+  })
+})
 
 // ─── Quality command center fixtures (v3.1+) ────────────────────────────────
 
@@ -1140,6 +1218,22 @@ describe('filterTimelineEntries', () => {
       {},
     )
     assert.equal(out.length, 2)
+  })
+  it('does not crash when a timeline entry data is circular during a search', () => {
+    const cyclic: Record<string, unknown> = { file: 'b.ts' }
+    cyclic.self = cyclic
+    // The search must terminate without a RangeError/TypeError; the circular
+    // data stringifies to "[object Object]" so it cannot match the query.
+    const out = filterTimelineEntries([{ timestamp: 't', type: 'atomic_fix', data: cyclic }], { search: 'b.ts' })
+    assert.deepEqual(out, [])
+  })
+  it('does not crash when data is a non-stringifiable primitive', () => {
+    const out = filterTimelineEntries(
+      [{ timestamp: 't', type: 'x', data: 42 }, { timestamp: 't2', type: 'x', data: 'plain' }],
+      { search: 'plain' },
+    )
+    assert.equal(out.length, 1)
+    assert.equal(out[0]!.data, 'plain')
   })
 })
 
