@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `lib/parse.js` `countSessionImages` no longer double-counts an image whose
     reference node is already counted, and `extractTranscript` gained `seen`/`depth`
     guards so a cyclic session object can never recurse without bound.
+  - `lib/parse.js` `filterTimelineEntries` guards `JSON.stringify` on cyclic/non-
+    primitive timeline `data` (search degrades to `String()` instead of throwing);
+    `computeSummaryFromFindings` / `severityStats` / `groupByDimension` /
+    `buildRoundHistory` / `findingMatches` skip null / non-object elements instead
+    of dereferencing them.
+  - `lib/parse.js` `latestToolResultNode` now scans `message.tool_calls` for a
+    matching tool's `result`/`response`/`message` before falling back to raw content —
+    the F8/F9/F10 quality command-center scanners can read sessions whose tool
+    results live on assistant tool-call objects (not `session.toolCalls`), fixing
+    false-empty panels for that session shape.
+  - `src/client/index.ts` command buttons: "批准架构修复" copies an
+    `iterate_fix` instruction using the real `force:true` param (the previous
+    `is_architectural` param does not exist on the tool), and "回滚检查点" now
+    points to `iterate_history` + `iterate_rollback` instead of the nonexistent
+    `iterate_checkpoint` rollback operation; removed a dead `buildFindingTrend`
+    import and guarded the F7 timeline render against cyclic `data`.
 - **DSH STORE contract alignment (AI-Scarlett/DSH-Store#504)**: the manifest and docs
   now satisfy the store's deterministic checks that CAN pass, so the automation can
   re-pin and re-classify instead of blocking on the previously shown reasons:
@@ -49,11 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- 10 new cases from the robustness batch: `parse.test.ts` covers the image
-  reference node-consumption fix (no double count via a shared ref object) and the
-  transcript `seen`/`depth` cycle guards; `git-scope.test.ts` covers the `sep`-based
-  containment prefix on the changed-file filter; `skill-prompt.test.ts` covers the
-  convergence-vs-schema-invalid distinction. Full suite: **513 pass**.
+- 12 new cases from the robustness batch: `parse.test.ts` covers the image
+  reference node-consumption fix (no double count via a shared ref object), the
+  transcript `seen`/`depth` cycle guards, cyclic/non-primitive timeline `data`
+  (no crash on search), null/non-object finding + round element tolerance, and
+  the `message.tool_calls` variant surfacing for the quality-gate / defense-events
+  scanners; `git-scope.test.ts` covers the `sep`-based containment prefix on the
+  changed-file filter; `skill-prompt.test.ts` covers the convergence-vs-schema-invalid
+  distinction and the plain `iterate_config({})` read. Full suite: **515 pass**.
 
 ### Notes
 
