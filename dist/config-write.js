@@ -9,9 +9,10 @@
  * The security posture mirrors the triage tool: never overwrite a malformed
  * config, always back up before writing, roll back on failure.
  */
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
+import { writeTextAtomic } from "./atomic-fs.js";
 /** Config file name (must match config-loader). */
 export const CONFIG_FILE = 'iterate.config.yaml';
 /** Backup suffix helper (filesystem-safe timestamp). */
@@ -185,7 +186,7 @@ export function writeConfigFile(projectRoot, config) {
         }
     }
     try {
-        writeFileSync(configPath, yaml.dump(config, { noRefs: true }), 'utf-8');
+        writeTextAtomic(configPath, yaml.dump(config, { noRefs: true }));
     }
     catch (err) {
         let rollbackError = '';

@@ -9,10 +9,11 @@
  * Checkpoint layout: `.iterate/checkpoint.json`.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
+import { writeJsonAtomic } from '../atomic-fs.ts'
 import { checkpointPath, iterateDir, transcriptPath } from '../paths.ts'
 import { readRegistry } from './fix.ts'
 import { readDecisionEntries } from './decision-log.ts'
@@ -223,10 +224,7 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
           }
           try {
             mkdirSync(iterateDir(projectRoot), { recursive: true })
-            const cpPath = checkpointPath(projectRoot)
-            const tmpPath = `${cpPath}.tmp-${Date.now()}`
-            writeFileSync(tmpPath, JSON.stringify(resumed, null, 2), 'utf-8')
-            renameSync(tmpPath, cpPath)
+            writeJsonAtomic(checkpointPath(projectRoot), resumed)
           } catch (err) {
             return { operation: 'resume', ok: false, error: `failed to persist resumed checkpoint: ${String(err)}` }
           }
@@ -266,12 +264,10 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
           }
           try {
             mkdirSync(iterateDir(projectRoot), { recursive: true })
-            // Atomic write (temp + rename): a crash mid-write must not corrupt
-            // the checkpoint and silently lose the interruption state.
-            const cpPath = checkpointPath(projectRoot)
-            const tmpPath = `${cpPath}.tmp-${Date.now()}`
-            writeFileSync(tmpPath, JSON.stringify(checkpoint, null, 2), 'utf-8')
-            renameSync(tmpPath, cpPath)
+            // Atomic write (temp + rename, via writeJsonAtomic): a crash
+            // mid-write must not corrupt the checkpoint and silently lose the
+            // interruption state.
+            writeJsonAtomic(checkpointPath(projectRoot), checkpoint)
           } catch (err) {
             return { operation: 'save', ok: false, error: `failed to write checkpoint: ${String(err)}` }
           }
@@ -294,6 +290,9 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
   ctx.tools.register(
     defineTool({
       name: 'iterate_status',
+      // Read-only aggregation of on-disk state → safe to join a parallel
+      // dispatch group alongside other read-only sibling calls.
+      isConcurrencySafe: () => true,
       description:
         'Summarize the current iterate run: mode, current round vs total, fixes applied, architectural ' +
         'findings remaining, decision-log size, and whether a resume checkpoint exists.',

@@ -64,6 +64,9 @@ export function registerQualityGateTool(ctx: { tools: { register: (def: ReturnTy
   ctx.tools.register(
     defineTool({
       name: 'iterate_quality_gate',
+      // `read` never writes; `compute` persists the snapshot → only read
+      // joins a parallel dispatch group.
+      isConcurrencySafe: (args) => (args as { operation?: unknown }).operation === 'read',
       description:
         'Query or write the quality gate status: dimension convergence rates, verification pass rates, ' +
         'and overall PASS/FAIL status. ' +

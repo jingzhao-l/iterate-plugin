@@ -64,6 +64,9 @@ export function summarizeFixRegistry(registry) {
 export function registerHistoryTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_history',
+        // Read-only audit view over on-disk state → safe to join a parallel
+        // dispatch group alongside other read-only sibling calls.
+        isConcurrencySafe: () => true,
         description: 'Read the iteration history: decision-log entries (optionally filtered by entry `type`, `since` ' +
             'timestamp, and a `limit`) plus a summary of the fix registry (per-round fixed/failed counts). ' +
             'Read-only — use it to review what the run did, audit a log, or inspect fixes.',

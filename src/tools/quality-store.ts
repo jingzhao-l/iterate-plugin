@@ -8,6 +8,7 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { writeJsonAtomic } from '../atomic-fs.ts'
 import type { QualityGateSnapshot, QualityGateDimension } from '../types.ts'
 
 const QUALITY_GATE_FILE = 'quality-gate.json'
@@ -108,7 +109,7 @@ export function writeQualityGate(
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true })
     }
-    fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8')
+    writeJsonAtomic(filePath, snapshot)
   } catch (err) {
     return { ok: false, error: `unable to write ${filePath}: ${String(err)}` }
   }

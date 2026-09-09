@@ -8,6 +8,7 @@ import {
   cutoffTimestamp,
   inspectPrune,
   executePrune,
+  isPrunableTemp,
   registerPruneTool,
 } from '../src/tools/prune.ts'
 import { appendDecisionEntry } from '../src/tools/decision-log.ts'
@@ -210,6 +211,7 @@ describe('executePrune', () => {
       oldLogEntries: 0,
       hasCheckpoint: false,
       staleBackups: ['nope/fix-dead_2026-08-17T00-00-00-000Z.bak'],
+      staleTemps: [] as string[],
       emptyRounds: [] as number[],
       totalLogEntries: 0,
       registryRounds: 0,
@@ -218,6 +220,80 @@ describe('executePrune', () => {
     assert.equal(result.deletedBackups.length, 0)
     assert.equal(result.errors.length, 1)
     assert.match(result.errors[0]!, /fix-dead/)
+    cleanup()
+  })
+})
+
+// ─── isPrunableTemp (temp-file naming conventions) ──────────────────────────
+
+describe('isPrunableTemp', () => {
+  it('recognizes every temp convention written by the plugin', () => {
+    // Current atomic-fs convention: .<basename>.tmp-<pid>-<rand>
+    assert.equal(isPrunableTemp('.experience.json.tmp-501-abc'), true)
+    assert.equal(isPrunableTemp('.decision-log.jsonl.tmp-1-x'), true)
+    assert.equal(isPrunableTemp('.registry.json.tmp-12345-zz9'), true)
+    // Legacy dot-prefix convention: .tmp-<pid>-<rand>
+    assert.equal(isPrunableTemp('.tmp-501-abc'), true)
+    // Legacy bare-suffix convention (transcript.ts / live.ts): <name>.tmp
+    assert.equal(isPrunableTemp('transcript.json.tmp'), true)
+    assert.equal(isPrunableTemp('live.json.trim.tmp'), true)
+  })
+
+  it('rejects real state files and non-temp names', () => {
+    assert.equal(isPrunableTemp('decision-log.jsonl'), false)
+    assert.equal(isPrunableTemp('experience.json'), false)
+    assert.equal(isPrunableTemp('checkpoint.json'), false)
+    assert.equal(isPrunableTemp('registry.json'), false)
+    assert.equal(isPrunableTemp('transcript.json'), false)
+    assert.equal(isPrunableTemp('quality-gate.json'), false)
+    assert.equal(isPrunableTemp(''), false)
+    assert.equal(isPrunableTemp('.'), false)
+    assert.equal(isPrunableTemp('..'), false)
+    assert.equal(isPrunableTemp('tmp'), false)
+    assert.equal(isPrunableTemp('.foo.tmpx'), false)
+    assert.equal(isPrunableTemp('backups'), false)
+  })
+})
+
+// ─── stray temp file sweep (inspect + execute) ──────────────────────────────
+
+describe('stray temp file sweep', () => {
+  it('inspectPrune detects every temp convention and ignores state files', () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(iterateDir(dir), { recursive: true })
+    writeFileSync(join(iterateDir(dir), 'decision-log.jsonl'), '', 'utf-8')
+    writeFileSync(join(iterateDir(dir), '.experience.json.tmp-501-abc'), 'partial', 'utf-8')
+    writeFileSync(join(iterateDir(dir), '.tmp-502-xyz'), 'partial', 'utf-8')
+    writeFileSync(join(iterateDir(dir), 'transcript.json.tmp'), 'partial', 'utf-8')
+    writeFileSync(join(iterateDir(dir), 'experience.json'), '{}', 'utf-8')
+
+    const report = inspectPrune(dir, 30)
+    assert.deepEqual(report.staleTemps, [
+      '.experience.json.tmp-501-abc',
+      '.tmp-502-xyz',
+      'transcript.json.tmp',
+    ])
+    cleanup()
+  })
+
+  it('dry-run leaves temps in place; execute deletes them and reports the names', async () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(iterateDir(dir), { recursive: true })
+    const tmp = join(iterateDir(dir), '.experience.json.tmp-501-abc')
+    writeFileSync(tmp, 'partial', 'utf-8')
+    writeFileSync(join(iterateDir(dir), 'experience.json'), '{"entries":[]}', 'utf-8')
+
+    const tool = captureTool()
+    await tool.execute({ path: dir })
+    assert.equal(existsSync(tmp), true, 'dry-run must not delete temp files')
+
+    const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
+    assert.equal(out.ok, true)
+    const result = out.result as { deletedTemps: string[] }
+    assert.deepEqual(result.deletedTemps, ['.experience.json.tmp-501-abc'])
+    assert.equal(existsSync(tmp), false)
+    // Real state files are never swept.
+    assert.equal(existsSync(join(iterateDir(dir), 'experience.json')), true)
     cleanup()
   })
 })

@@ -24,8 +24,9 @@
  *     or crash a tool call.
  */
 
-import { mkdir, readFile, writeFile, stat, appendFile, rename } from 'node:fs/promises'
+import { mkdir, readFile, stat, appendFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { writeTextAtomicAsync } from './atomic-fs.ts'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
@@ -136,9 +137,9 @@ export async function appendLive(projectRoot: string, entry: LiveActivityEntry):
       const raw = await readFile(file, 'utf-8')
       const lines = raw.split('\n').filter(Boolean)
       const tail = lines.slice(-LIVE_MAX_ENTRIES)
-      const tmp = `${file}.trim.tmp`
-      await writeFile(tmp, tail.join('\n') + '\n', 'utf-8')
-      await rename(tmp, file)
+      // Atomic rewrite (unique temp + rename) so a crash mid-trim never
+      // truncates the live feed; the temp file is prunable by iterate_prune.
+      await writeTextAtomicAsync(file, tail.join('\n') + '\n')
     }
     await appendFile(file, line, 'utf-8')
   } catch {

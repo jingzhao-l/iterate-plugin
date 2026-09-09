@@ -59,6 +59,9 @@ function sanitizeRoundSeries(raw) {
 export function registerQualityGateTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_quality_gate',
+        // `read` never writes; `compute` persists the snapshot → only read
+        // joins a parallel dispatch group.
+        isConcurrencySafe: (args) => args.operation === 'read',
         description: 'Query or write the quality gate status: dimension convergence rates, verification pass rates, ' +
             'and overall PASS/FAIL status. ' +
             'Operation "read" (default) returns the persisted machine-readable quality certificate. ' +

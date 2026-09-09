@@ -19,8 +19,9 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { writeTextAtomicAsync } from '../atomic-fs.ts'
 import { dirname } from 'node:path'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import {
@@ -107,6 +108,9 @@ export function registerTranscriptTool(ctx: {
   ctx.tools.register(
     defineTool({
       name: 'iterate_transcript',
+      // `read` never writes; `capture`/`nudge` persist transcript state → only
+      // read joins a parallel dispatch group.
+      isConcurrencySafe: (args) => (args as { operation?: unknown }).operation === 'read',
       description:
         'Runtime-observatory transcript for the iterate workflow. ' +
         '`read` returns the current persisted transcript manifest (per-reviewer threads, ' +
@@ -332,10 +336,8 @@ function rehydrateBuilder(manifest: TranscriptManifest, approval: 'ask' | 'deny'
   return builder
 }
 
-/** Atomically persist a manifest (tmp + rename) under `.iterate/`. */
+/** Atomically persist a manifest (unique temp + rename) under `.iterate/`. */
 async function persist(file: string, manifest: TranscriptManifest): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
-  await writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf-8')
-  await rename(tmp, file)
+  await writeTextAtomicAsync(file, JSON.stringify(manifest, null, 2))
 }

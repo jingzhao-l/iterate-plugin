@@ -7,6 +7,8 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { iterateDir } from '../paths.ts'
+import { writeJsonAtomic } from '../atomic-fs.ts'
 import type { ExperienceBank, ExperienceEntry } from '../types.ts'
 
 const EXPERIENCE_FILE = 'experience.json'
@@ -45,14 +47,16 @@ export function writeExperienceBank(
   projectRoot: string,
   bank: ExperienceBank,
 ): { ok: true } | { ok: false; error: string } {
-  const dirPath = path.join(projectRoot, '.iterate')
+  const dirPath = iterateDir(projectRoot)
   const filePath = path.join(dirPath, EXPERIENCE_FILE)
 
   try {
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true })
     }
-    fs.writeFileSync(filePath, JSON.stringify(bank, null, 2), 'utf-8')
+    // Atomic (temp + rename): a crash mid-write can never leave a truncated
+    // experience bank behind.
+    writeJsonAtomic(filePath, bank)
   } catch (err) {
     return { ok: false, error: `unable to write ${filePath}: ${String(err)}` }
   }

@@ -18,8 +18,9 @@
  * tmp+rename so a crashed writer never leaves a corrupt manifest.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { writeTextAtomicAsync } from "../atomic-fs.js";
 import { dirname } from 'node:path';
 import { loadEffectiveConfig, resolveProjectRootForExec, } from "../config-loader.js";
 import { transcriptPath } from "../paths.js";
@@ -96,6 +97,9 @@ function normalizeFix(input) {
 export function registerTranscriptTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_transcript',
+        // `read` never writes; `capture`/`nudge` persist transcript state → only
+        // read joins a parallel dispatch group.
+        isConcurrencySafe: (args) => args.operation === 'read',
         description: 'Runtime-observatory transcript for the iterate workflow. ' +
             '`read` returns the current persisted transcript manifest (per-reviewer threads, ' +
             'convergence series, findings, fixes, checkpoint, timeline, and any steering nudge ' +
@@ -322,10 +326,8 @@ function rehydrateBuilder(manifest, approval) {
         builder.finish();
     return builder;
 }
-/** Atomically persist a manifest (tmp + rename) under `.iterate/`. */
+/** Atomically persist a manifest (unique temp + rename) under `.iterate/`. */
 async function persist(file, manifest) {
     await mkdir(dirname(file), { recursive: true });
-    const tmp = `${file}.tmp`;
-    await writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf-8');
-    await rename(tmp, file);
+    await writeTextAtomicAsync(file, JSON.stringify(manifest, null, 2));
 }

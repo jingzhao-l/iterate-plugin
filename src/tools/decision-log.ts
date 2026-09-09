@@ -77,30 +77,50 @@ export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry
 }
 
 /**
+ * Detailed log read: valid entries plus the number of corrupt lines that were
+ * skipped, so callers can surface silent audit-trail loss to the model/UI.
+ */
+export interface DecisionLogRead {
+  entries: DecisionLogEntry[]
+  invalidLines: number
+}
+
+/**
+ * Read all entries from the decision log, plus the count of corrupt lines.
+ * A single corrupt line (partial write, hand-edit) is SKIPPED, not fatal —
+ * one bad line must never empty the whole history for every reader — but it
+ * is counted in `invalidLines` so it never disappears silently.
+ */
+export function readDecisionLogDetailed(projectRoot: string): DecisionLogRead {
+  const filePath = join(projectRoot, LOG_DIR, LOG_FILE)
+  if (!existsSync(filePath)) return { entries: [], invalidLines: 0 }
+  let content: string
+  try {
+    content = readFileSync(filePath, 'utf-8')
+  } catch {
+    return { entries: [], invalidLines: 0 }
+  }
+  const entries: DecisionLogEntry[] = []
+  let invalidLines = 0
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    try {
+      entries.push(JSON.parse(trimmed) as DecisionLogEntry)
+    } catch {
+      invalidLines += 1
+    }
+  }
+  return { entries, invalidLines }
+}
+
+/**
  * Read all entries from the decision log.
  * A single corrupt line (partial write, hand-edit) is SKIPPED, not fatal —
  * one bad line must never empty the whole history for every reader.
  */
 export function readDecisionEntries(projectRoot: string): DecisionLogEntry[] {
-  const filePath = join(projectRoot, LOG_DIR, LOG_FILE)
-  if (!existsSync(filePath)) return []
-  let content: string
-  try {
-    content = readFileSync(filePath, 'utf-8')
-  } catch {
-    return []
-  }
-  const out: DecisionLogEntry[] = []
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed.length === 0) continue
-    try {
-      out.push(JSON.parse(trimmed) as DecisionLogEntry)
-    } catch {
-      // skip the corrupt line, keep the rest
-    }
-  }
-  return out
+  return readDecisionLogDetailed(projectRoot).entries
 }
 
 /**
@@ -112,6 +132,9 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
   ctx.tools.register(
     defineTool({
       name: 'iterate_decision_log',
+      // `read` never writes; `append` extends the audit log → only read joins
+      // a parallel dispatch group.
+      isConcurrencySafe: (args) => (args as { operation?: unknown }).operation === 'read',
       description:
         'Append-only decision log for the iterate loop. ' +
         'Use `append` to record a round start, review finding, fix, validation result, or decision. ' +
@@ -164,6 +187,7 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
           properties: {
             operation: { type: 'string', required: true },
             entryCount: { type: 'integer' },
+            invalidLines: { type: 'integer' },
             logPath: { type: 'string' },
             entries: { type: 'json' },
             success: { type: 'boolean' },
@@ -184,10 +208,11 @@ export function registerDecisionLogTool(ctx: { tools: { register: (def: ReturnTy
         const projectRoot = resolved.root
 
         if (args.operation === 'read') {
-          const entries = readDecisionEntries(projectRoot)
+          const { entries, invalidLines } = readDecisionLogDetailed(projectRoot)
           return {
             operation: 'read',
             entryCount: entries.length,
+            invalidLines,
             logPath: join(projectRoot, LOG_DIR, LOG_FILE),
             entries: entries as unknown as JsonValue,
           }

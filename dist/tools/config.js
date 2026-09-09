@@ -11,6 +11,20 @@ import { applyConfigUpdates, readRawConfig, validateConfigUpdates, writeConfigFi
 export function registerConfigTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_config',
+        // `read` never writes; `write` persists a config update → only read
+        // joins a parallel dispatch group.
+        isConcurrencySafe: (args) => args.operation !== 'write',
+        // Pending-call card: a config read vs a validated write.
+        presentCall: (args) => {
+            const a = args;
+            const isWrite = a.operation === 'write';
+            return {
+                card: 'generic',
+                title: isWrite ? 'Update iterate.config.yaml' : 'Read iterate.config.yaml',
+                kind: isWrite ? 'edit' : 'read',
+                ...(typeof a.section === 'string' && a.section ? { rawInput: { section: a.section } } : {}),
+            };
+        },
         description: 'Read or update the iterate.config.yaml configuration from the project root. ' +
             'Returns the full parsed config, a specific section, or validation errors. ' +
             'Use this to discover available dimensions, validation commands, git settings, and personalization rules, ' +

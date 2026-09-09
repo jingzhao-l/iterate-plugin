@@ -161,6 +161,9 @@ export { findSkillMd };
 export function registerContextTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_context',
+        // Read-only (reads SKILL.md / ITERATE.md) → safe to join a parallel
+        // dispatch group alongside other read-only sibling calls.
+        isConcurrencySafe: () => true,
         description: 'Read project context files (SKILL.md and/or ITERATE.md). ' +
             'SKILL.md contains the original iterate skill instructions; it is searched in ' +
             'the skill directory (auto-detected), the project root, or an explicit `skillDir`. ' +

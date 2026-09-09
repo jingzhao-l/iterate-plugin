@@ -5,6 +5,76 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-09-09
+
+### Added
+
+- **Shared atomic-write layer (`src/atomic-fs.ts`)**: `writeTextAtomic` /
+  `writeJsonAtomic` / `writeTextAtomicAsync` — every write goes to a unique
+  temp file (`.<name>.tmp-<pid>-<rand>`, same directory as the target) that is
+  renamed into place, with a single self-cleanup. A crash mid-write can never
+  again leave a truncated state file. Migrated onto it: `quality-gate.json`,
+  `defense-events.json`, `experience.json`, `fix-registry.json`,
+  `checkpoint.json`, the `decision-log.jsonl` rewrite in `iterate_prune`,
+  `iterate.config.yaml`, the live activity-feed trim (`live.ts`), and
+  `transcript.json` (async path).
+- **`iterate_prune` temp-file sweep**: crashed atomic writes left orphan
+  temp files behind forever. `inspectPrune` now reports `staleTemps`
+  (recognized by `isPrunableTemp`: current `.<name>.tmp-<pid>-<rand>` plus the
+  legacy `.tmp-<pid>-<rand>` / `<name>.tmp` conventions) and `executePrune`
+  deletes them; dry-run render shows the count. Tool description and the
+  README tool tables (EN + ZH) updated accordingly.
+- **Silent audit-trail loss is now visible**: `iterate_decision_log` read
+  returns `invalidLines` — corrupt JSONL lines were always skipped, but the
+  count was invisible; `readDecisionLogDetailed` exposes it so callers can
+  surface a degrading decision log instead of silently reading a shorter one.
+- **Cancellation semantics for `iterate_validate`** (`canceled` field on
+  `ValidationResult`): `runCommand` now observes the harness signal
+  (`exec.signal`). An aborted validation kills the child and reports
+  `canceled: true` (exit code 1, duration preserved) instead of the old
+  misreported `timedOut: true`; the deadline path still reports `timedOut`
+  and never conflates the two. Render shows a "Cancelled" warning line.
+- **DSH presentation contract (`presentCall`)** — pending-call cards so the
+  client shows what a running call will do before its result exists:
+  `iterate_fix` renders a diff card (`+added/-removed · round N · file`,
+  `force` marker, forbidden/protected veto reasons), `iterate_validate`
+  renders a terminal card titled with the exact whitelisted command, and
+  `iterate_config` renders a read/edit card. All presenters are pure
+  (args-only, per DSH: no IO, no `cwd`), return `undefined` for malformed
+  args, and are unit-tested.
+- **DSH concurrency contract (`isConcurrencySafe`)** — per-args metadata on
+  every tool: read-only shapes (`iterate_history`, `iterate_context`,
+  `iterate_status`, `iterate_diff`, experience list/search/get,
+  decision-log `read`, defense-events list/counts, transcript `read`,
+  config read) join parallel dispatch groups; mutating shapes (fix, rollback,
+  validate, prune, config write, experience `add`, decision-log `append`,
+  defense-events `record`, transcript `capture`/`nudge`, quality-gate
+  `compute`, triage `apply`) remain exclusive.
+
+### Changed
+
+- Store modules (`quality-store` / `defense-store` / `experience-store`)
+  resolve `.iterate/` through the shared `iterateDir()` helper instead of
+  hand-rolled path joins (one source of truth for the runtime directory).
+
+### Verified
+
+- Upstream harness review (2026-09-09): latest published `@deepseek-ai/dsh-*`
+  on npm remains `0.1.2-rc.1` (the GitHub `v0.1.3-alpha.1` tag has no npm
+  release); forward-compatibility was proven by installing the later
+  `0.1.5-alpha.1` packages in a sandbox — `npm run typecheck` and the full
+  test suite pass against them unchanged, and the release's plugin-visible
+  breaking changes (removal of `ctx.agent`, typed Inbox, Session format v3)
+  touch no API this plugin uses. Dependency pins therefore stay at
+  `0.1.2-rc.1`.
+
+### Tests
+
+- 8 new tests (523 total): temp-file sweep (matcher table, dry-run report,
+  execute deletes legacy + current conventions), `runCommand` cancellation
+  semantics (caller-signal kill → `canceled` not `timedOut`; deadline →
+  `timedOut` not `canceled`), atomic-write temp naming.
+
 ## [3.4.1] - 2026-09-07
 
 ### Fixed

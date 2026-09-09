@@ -28,11 +28,18 @@ export function clampTimeout(ms: number | undefined): number {
 /**
  * Run a single shell command with timeout and return structured results.
  * Pure function (no side effects beyond the exec call).
+ *
+ * `signal` (the caller's `exec.signal` per the dsh tools contract) is forwarded
+ * to the child process so a cancelled tool call kills the running command
+ * instead of pinning the dispatch open until the timeout elapses. The result
+ * distinguishes "cancelled by the caller" (`canceled: true`) from "ran past
+ * `timeoutMs`" (`timedOut: true`).
  */
-async function runCommand(
+export async function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<ValidationResult> {
   const start = performance.now()
   return new Promise<ValidationResult>((resolve) => {
@@ -43,6 +50,7 @@ async function runCommand(
         timeout: timeoutMs,
         maxBuffer: 10 * 1024 * 1024, // 10 MB
         env: { ...process.env, PAGER: 'cat' },
+        signal,
       },
       (error, stdout, stderr) => {
         const durationMs = Math.round(performance.now() - start)
@@ -50,12 +58,16 @@ async function runCommand(
         // cannot be spawned Node sets error.code to a STRING ('ENOENT' etc).
         // Coerce to a number so the integer output schema is never violated.
         const exitCode = typeof error?.code === 'number' ? error.code : (error ? 1 : 0)
+        const canceled = signal?.aborted === true
         resolve({
           command,
           exitCode,
           stdout: stdout ?? '',
           stderr: stderr ?? '',
-          timedOut: error?.killed === true,
+          // A caller cancellation also kills the child (killed === true), but
+          // that is not a timeout — only report timedOut for the deadline path.
+          timedOut: error?.killed === true && !canceled,
+          canceled,
           durationMs,
         })
       },
@@ -72,6 +84,18 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
   ctx.tools.register(
     defineTool({
       name: 'iterate_validate',
+      // Pending-call card: render the pending validation as a terminal card.
+      // Pure — derived from args only; no `cwd` (the UI bridge resolves the
+      // relative command against the session workspace).
+      presentCall: (args) => {
+        const a = args as { command?: unknown }
+        if (typeof a.command !== 'string' || a.command.length === 0) return undefined
+        return {
+          card: 'terminal',
+          title: a.command,
+          description: 'Run a preconfigured iterate validation command (exact match on validation.commands).',
+        }
+      },
       description:
         'Run a validation command that is PRECONFIGURED in iterate.config.yaml `validation.commands`. ' +
         'The command must exactly match one of the configured commands (they are the only ones the user trusts). ' +
@@ -105,6 +129,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
             stdout: { type: 'string', required: true },
             stderr: { type: 'string', required: true },
             timedOut: { type: 'boolean', required: true },
+            canceled: { type: 'boolean', required: true },
             durationMs: { type: 'integer', required: true },
             rejectReason: { type: 'string' },
           },
@@ -118,6 +143,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
                   `Exit code: ${value.exitCode}`,
                   `Duration: ${value.durationMs}ms`,
                   value.timedOut ? '⚠ Timed out' : '',
+                  value.canceled ? '⚠ Cancelled before completion' : '',
                   '',
                   value.stdout ? `[stdout]\n${value.stdout}` : '',
                   value.stderr ? `[stderr]\n${value.stderr}` : '',
@@ -139,6 +165,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
             stdout: '',
             stderr: '',
             timedOut: false,
+            canceled: false,
             durationMs: 0,
             rejectReason: resolved.reason,
           }
@@ -161,6 +188,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
             stdout: '',
             stderr: '',
             timedOut: false,
+            canceled: false,
             durationMs: 0,
             rejectReason:
               (source === 'defaults'
@@ -177,6 +205,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
             stdout: '',
             stderr: '',
             timedOut: false,
+            canceled: false,
             durationMs: 0,
             rejectReason:
               `Command must exactly match a command predefined in iterate.config.yaml validation.commands. ` +
@@ -184,7 +213,7 @@ export function registerValidateTool(ctx: { tools: { register: (def: ReturnType<
           }
         }
 
-        const result = await runCommand(args.command, projectRoot, timeout)
+        const result = await runCommand(args.command, projectRoot, timeout, exec.signal)
         return {
           allowed: true,
           ...result,

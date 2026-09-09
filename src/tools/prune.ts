@@ -11,6 +11,8 @@
  *   - Fix backups left over from old rounds (backups whose fix-id no longer
  *     appears in the registry).
  *   - Empty fix rounds (rounds with 0 records).
+ *   - Stray temp files left behind by a crashed atomic write (see
+ *     `isPrunableTemp` for the recognized naming conventions).
  *
  * Security model:
  *   - Only operates under the resolved project `.iterate/` directory.
@@ -18,11 +20,12 @@
  *   - Each deletion is logged to the decision log (when not dry-run).
  */
 
-import { existsSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
+import { writeTextAtomic, writeJsonAtomic } from '../atomic-fs.ts'
 import { readDecisionEntries, appendDecisionEntry } from './decision-log.ts'
 import { readRegistry, removeRecord, recomputeRoundCounts } from './fix.ts'
 import { iterateDir, fixesDir, checkpointPath, fixRegistryPath } from '../paths.ts'
@@ -49,6 +52,26 @@ export function cutoffTimestamp(retainDays: number): string {
 }
 
 /**
+ * Whether a file name inside `.iterate/` is a prunable leftover temp file.
+ *
+ * Recognized conventions (all written to the SAME directory as their target,
+ * so they can never be confused with real state files):
+ *   - `.<name>.tmp-<pid>-<rand>` — current atomic-fs.ts temp prefix;
+ *   - `.tmp-<pid>-<rand>`        — legacy temp prefix (older plugin builds);
+ *   - `<name>.tmp`               — legacy transcript.ts / live.ts temp suffix.
+ *
+ * Pure and exported for unit tests. A live writer's temp file is only visible
+ * to it (unique name), so deleting any match is always safe.
+ */
+export function isPrunableTemp(name: string): boolean {
+  if (typeof name !== 'string' || name.length === 0 || name === '.' || name === '..') return false
+  if (name.startsWith('.tmp-')) return true
+  if (name.endsWith('.tmp')) return true
+  // .<basename>.tmp-<pid>-<rand>: starts with a dot and contains ".tmp-" after it.
+  return name.startsWith('.') && name.includes('.tmp-')
+}
+
+/**
  * Inspect the runtime state and report what would be pruned.
  * Pure (no deletions). Returns a structured report.
  */
@@ -59,6 +82,7 @@ export function inspectPrune(
   oldLogEntries: number
   hasCheckpoint: boolean
   staleBackups: string[]
+  staleTemps: string[]
   emptyRounds: number[]
   totalLogEntries: number
   registryRounds: number
@@ -100,10 +124,18 @@ export function inspectPrune(
     .filter((r) => r.records.length === 0)
     .map((r) => r.round)
 
+  // 5. Stray atomic-write temp files left behind by a crashed writer. The
+  // unique prefix makes them recognizable and safe to delete — no live writer
+  // ever reads another writer's temp file.
+  const staleTemps = existsSync(iterateDir(projectRoot))
+    ? readdirSync(iterateDir(projectRoot)).filter((f) => isPrunableTemp(f)).sort()
+    : []
+
   return {
     oldLogEntries,
     hasCheckpoint,
     staleBackups,
+    staleTemps,
     emptyRounds,
     totalLogEntries: entries.length,
     registryRounds: registry.rounds.length,
@@ -122,6 +154,7 @@ export function executePrune(
   deletedLogEntries: number
   deletedCheckpoint: boolean
   deletedBackups: string[]
+  deletedTemps: string[]
   trimmedEmptyRounds: number
   errors: string[]
 } {
@@ -130,6 +163,7 @@ export function executePrune(
     deletedLogEntries: 0,
     deletedCheckpoint: false,
     deletedBackups: [] as string[],
+    deletedTemps: [] as string[],
     trimmedEmptyRounds: 0,
     errors: [] as string[],
   }
@@ -142,9 +176,7 @@ export function executePrune(
     result.deletedLogEntries = entries.length - kept.length
     if (result.deletedLogEntries > 0) {
       const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl')
-      const tmpPath = `${logPath}.tmp-${Date.now()}`
-      writeFileSync(tmpPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf-8')
-      renameSync(tmpPath, logPath)
+      writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n')
     }
   } catch (err) {
     result.errors.push(`failed to rewrite decision log: ${String(err)}`)
@@ -184,10 +216,20 @@ export function executePrune(
         rounds: registry.rounds.filter((r) => !emptyRoundNos.has(r.round) || (r.records?.length ?? 0) > 0),
       }
       registry = recomputeRoundCounts(registry)
-      writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(registry, null, 2), 'utf-8')
+      writeJsonAtomic(fixRegistryPath(projectRoot), registry)
       result.trimmedEmptyRounds = report.emptyRounds.length
     } catch (err) {
       result.errors.push(`failed to trim empty rounds: ${String(err)}`)
+    }
+  }
+
+  // 5. Remove stray atomic-write temp files.
+  for (const tmp of report.staleTemps) {
+    try {
+      rmSync(join(iterateDir(projectRoot), tmp), { force: true })
+      result.deletedTemps.push(tmp)
+    } catch (err) {
+      result.errors.push(`failed to delete temp file ${tmp}: ${String(err)}`)
     }
   }
 
@@ -206,7 +248,8 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
       description:
         'Inspect or clean up old iterate runtime artifacts (.iterate/). ' +
         'Defaults to dry-run (report-only, no deletion). Pass `dryRun: false` to actually prune. ' +
-        'Manages: old decision-log entries, stale checkpoints, orphaned fix backups, empty fix rounds. ' +
+        'Manages: old decision-log entries, stale checkpoints, orphaned fix backups, empty fix rounds, ' +
+        'and stray temp files left by crashed atomic writes. ' +
         'Each deletion is logged to the decision log.',
       parameters: {
         dryRun: {
@@ -246,6 +289,7 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
               `  Decision-log entries to remove: ${report?.oldLogEntries ?? '?'} (of ${report?.totalLogEntries ?? '?'})`,
               `  Checkpoint to delete: ${report?.hasCheckpoint ? 'yes' : 'none'}`,
               `  Stale backups to delete: ${(report?.staleBackups as string[] | undefined)?.length ?? 0}`,
+              `  Stray temp files to delete: ${(report?.staleTemps as string[] | undefined)?.length ?? 0}`,
               `  Empty rounds to trim: ${(report?.emptyRounds as number[] | undefined)?.length ?? 0}`,
               '',
               'Pass dryRun:false to execute the prune.',
@@ -257,6 +301,7 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
             `  Deleted ${result?.deletedLogEntries ?? 0} old log entries.`,
             `  Checkpoint deleted: ${result?.deletedCheckpoint ? 'yes' : 'no'}`,
             `  Deleted ${(result?.deletedBackups as string[] | undefined)?.length ?? 0} stale backups.`,
+            `  Deleted ${(result?.deletedTemps as string[] | undefined)?.length ?? 0} stray temp files.`,
             `  Trimmed ${result?.trimmedEmptyRounds ?? 0} empty rounds.`,
           ]
           const errs = (result?.errors as string[] | undefined) ?? []

@@ -74,6 +74,8 @@ export interface ValidationResult {
   stdout: string
   stderr: string
   timedOut: boolean
+  /** True when the caller's AbortSignal fired before the command finished. */
+  canceled: boolean
   durationMs: number
 }
 

@@ -17,7 +17,8 @@
  *   - Atomicity is enforced against `config.atomic.max_lines` unless `force`.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { writeJsonAtomic, writeTextAtomic } from '../atomic-fs.ts'
 import { join, sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -277,6 +278,19 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
   ctx.tools.register(
     defineTool({
       name: 'iterate_fix',
+      // Pending-call card: surface the file about to change as an inline diff.
+      // oldText is null — a call-time presenter has no access to the file's
+      // prior content (an overwrite, per the presentation contract).
+      presentCall: (args) => {
+        const a = args as { file?: unknown; content?: unknown }
+        if (typeof a.file !== 'string' || typeof a.content !== 'string') return undefined
+        return {
+          card: 'diff',
+          title: `Fix ${a.file}`,
+          diffs: [{ path: a.file, oldText: null, newText: a.content }],
+          locations: [{ path: a.file }],
+        }
+      },
       description:
         'Apply ONE atomic fix to a file. Pass the target relative `file`, the finding that motivated ' +
         'the fix, the NEW full `content` of that file (after your edit), and the current `round`. ' +
@@ -454,7 +468,7 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         }
 
         try {
-          writeFileSync(target.resolved, args.content, 'utf-8')
+          writeTextAtomic(target.resolved, args.content)
         } catch (err) {
           return { ok: false, error: `failed to write file: ${String(err)}` }
         }
@@ -472,7 +486,7 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
         }
         const nextRegistry = upsertRecord(registry, record)
         try {
-          writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(nextRegistry, null, 2), 'utf-8')
+          writeJsonAtomic(fixRegistryPath(projectRoot), nextRegistry)
         } catch (err) {
           // Registry write failed → the file was already modified but no record
           // exists, so a later rollback/diff could never see it and a retry would
@@ -524,6 +538,9 @@ export function registerDiffTool(ctx: { tools: { register: (def: ReturnType<type
   ctx.tools.register(
     defineTool({
       name: 'iterate_diff',
+      // Read-only (never writes project files or plugin state) → safe to join
+      // a parallel dispatch group alongside other read-only sibling calls.
+      isConcurrencySafe: () => true,
       description:
         'Show the changes made by iterate fixes. With `file`, returns the unified diff of the current ' +
         'file content vs its original (first backup). Without `file`, returns a summary of every fixed file.',
@@ -627,6 +644,17 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
   ctx.tools.register(
     defineTool({
       name: 'iterate_rollback',
+      // Pending-call card: which fix is about to be reverted.
+      presentCall: (args) => {
+        const a = args as { id?: unknown }
+        if (typeof a.id !== 'string' || a.id.length === 0) return undefined
+        return {
+          card: 'generic',
+          title: `Rollback fix ${a.id}`,
+          kind: 'edit',
+          rawInput: { id: a.id },
+        }
+      },
       description:
         'Revert a previously applied fix. Pass the fix `id` (returned by iterate_fix). ' +
         'The file is restored from the fix backup, the fix is removed from the registry, ' +
@@ -683,7 +711,7 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
 
         const nextRegistry = removeRecord(registry, id)
         try {
-          writeFileSync(fixRegistryPath(projectRoot), JSON.stringify(nextRegistry, null, 2), 'utf-8')
+          writeJsonAtomic(fixRegistryPath(projectRoot), nextRegistry)
         } catch (err) {
           return { ok: false, error: `failed to update fix registry: ${String(err)}` }
         }

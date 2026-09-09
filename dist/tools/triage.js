@@ -1,8 +1,9 @@
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import yaml from 'js-yaml';
 import { resolveProjectRootForExec } from "../config-loader.js";
+import { writeTextAtomic } from "../atomic-fs.js";
 const CONFIG_FILE = 'iterate.config.yaml';
 /** Personalization key that holds the known-intentional list. */
 const PERSONALIZATION_KEY = 'personalization';
@@ -191,7 +192,7 @@ function applyEntries(projectRoot, incoming) {
     }
     const yamlText = yaml.dump(nextConfig, { noRefs: true });
     try {
-        writeFileSync(configPath, yamlText, 'utf-8');
+        writeTextAtomic(configPath, yamlText);
     }
     catch (err) {
         // Rollback: restore the backup, or REMOVE the file we just created when
@@ -231,6 +232,9 @@ function applyEntries(projectRoot, incoming) {
 export function registerTriageTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_triage',
+        // `list` is a pure config read; `apply` rewrites iterate.config.yaml →
+        // only list joins a parallel dispatch group.
+        isConcurrencySafe: (args) => args.operation === 'list',
         description: 'Manage `personalization.known_intentional` entries in iterate.config.yaml. ' +
             'Use `apply` to write back triage verdicts (entries where the reviewer said "known intentional") so ' +
             'future review rounds filter them out. Entries are deduped by file|dimension|line and the config is ' +

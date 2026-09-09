@@ -122,7 +122,7 @@ UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自
 - **结构化修复系统** — 每次修复先备份、写注册表、记录 diff，验证失败可 `iterate_rollback` 还原
 - **断点续跑** — 长迭代在每轮开头保存 checkpoint，中断后可恢复进度
 - **历史审计** — `iterate_history` 读取决策日志（按类型/时间/数量过滤）与修复注册表汇总，审查运行过程与修复明细
-- **运行时清理** — `iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份与空轮次；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
+- **运行时清理** — `iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份、空轮次与原子写入崩溃残留的临时文件；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
 - **配置读写** — `iterate_config` 支持带校验、备份、回滚的局部写入
 - **v3.2 经验银行** — `iterate_experience` 以检索 / 过滤 / 采纳查阅历史修复与模式，并可 `add` 持久化新的已验证修复——重复添加同一 pattern + dimension 时累加命中次数而非重复写入
 - **v3.2 质量门禁** — `iterate_quality_gate` 读取质量门禁状态（各维度收敛率 + PASS/FAIL），并可基于本轮 findings / 验证结果 `compute` 重新计算并持久化一份新的质量凭证（收敛率来自 `findingsByRound` 的真实收敛序列）
@@ -257,7 +257,7 @@ validation:
 - `iterate_checkpoint` — 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`resume` 加载并累加恢复计数（中断恢复），`clear` 清除。长迭代可中断续跑
 - `iterate_status` — 汇总当前迭代状态：模式、当前轮/总轮、已修复数、剩余 architectural、决策日志条数、是否存在 checkpoint；**v3.4：同时返回持久化的质量门禁快照、经验银行摘要与防御事件摘要**（`qualityGate` / `experienceBank` / `defenseEvents`）
 - `iterate_history` — 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数）。用于审查运行过程、审计日志、盘点修复
-- `iterate_prune` — 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志
+- `iterate_prune` — 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次、崩溃原子写入残留的临时文件。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志
 - `iterate_transcript` — 运行时观测台：把审查转录、线程、修复与 nudge 指令持久化到 `.iterate/transcript.json`，供客户端观测台读取
 - `iterate_experience` — **v3.2** 查询经验银行（list / search / get），或 `add` 一条新的已验证修复：重复添加同一 pattern + dimension 累加命中次数而非重复写入。持久化到 `.iterate/experience.json`
 - `iterate_quality_gate` — **v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率
