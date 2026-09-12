@@ -302,6 +302,27 @@ export function registerStatusTool(ctx) {
                     `Checkpoint: ${value.hasCheckpoint ? 'yes' : 'no'}${value.interrupted ? ' (interrupted — resumable)' : ''}${value.resumeCount ? ` · resumed ${value.resumeCount}x` : ''}`,
                     value.lastUpdated ? `Last updated: ${value.lastUpdated}` : '',
                 ];
+                // v3.0 quality command-center summaries (surfaced here so a single
+                // status read reports the whole run state in text too).
+                const gate = value.qualityGate;
+                if (gate) {
+                    lines.push(`Quality gate: ${gate.overallStatus.toUpperCase()} · score ${gate.overallScore} · ` +
+                        `verification ${gate.passedChecks}/${gate.totalChecks} passed` +
+                        (gate.failReason ? ` · ${gate.failReason}` : ''));
+                }
+                const exp = value.experienceBank;
+                if (exp) {
+                    lines.push(`Experience bank: ${exp.totalEntries ?? 0} entries · ${exp.totalHits ?? 0} cumulative hits`);
+                }
+                const def = value.defenseEvents;
+                if (def) {
+                    const counts = def.counts ?? {};
+                    const total = Object.values(counts).reduce((s, n) => s + (n || 0), 0);
+                    lines.push(`Defense events: ${def.totalEvents ?? total} recorded` +
+                        (total > 0
+                            ? ` (precondition_failed:${counts.precondition_failed ?? 0}, rollback:${counts.rollback ?? 0}, invariant_violated:${counts.invariant_violated ?? 0}, assumption_falsified:${counts.assumption_falsified ?? 0})`
+                            : ''));
+                }
                 return [{ type: 'text', text: lines.filter(Boolean).join('\n') }];
             },
         },

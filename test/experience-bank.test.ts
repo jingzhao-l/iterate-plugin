@@ -131,4 +131,66 @@ describe('iterate_experience add', () => {
       cleanup()
     }
   })
+
+  it('remove deletes a recorded entry and persists the smaller bank', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const added = (await tool.execute({ operation: 'add', path: dir, entry: entryArgs })) as Record<string, unknown>
+      const id = (added.entry as { id: string }).id
+
+      const removed = (await tool.execute({ operation: 'remove', path: dir, id })) as Record<string, unknown>
+      assert.equal(removed.ok, true)
+      assert.equal(removed.operation, 'remove')
+      assert.equal(removed.count, 0)
+      assert.equal(removed.totalHits, 1)
+
+      const bankPath = join(dir, '.iterate', 'experience.json')
+      const persisted = JSON.parse(readFileSync(bankPath, 'utf-8'))
+      assert.equal(persisted.entries.length, 0)
+
+      const got = (await tool.execute({ operation: 'get', path: dir, id })) as Record<string, unknown>
+      assert.equal(got.ok, false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('remove reports an unknown id without modifying the bank', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const result = (await tool.execute({ operation: 'remove', path: dir, id: 'nope' })) as Record<string, unknown>
+      assert.equal(result.ok, false)
+      assert.match(result.error as string, /not found/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('remove requires an id argument', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const result = (await tool.execute({ operation: 'remove', path: dir })) as Record<string, unknown>
+      assert.equal(result.ok, false)
+      assert.match(result.error as string, /id is required/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('renders the remove result as readable text', async () => {
+    const tool = captureTool()
+    const blocks = tool.render({ operation: 'remove' }, {
+      ok: true,
+      kind: 'experience',
+      operation: 'remove',
+      count: 3,
+      totalHits: 9,
+    })
+    assert.equal(blocks.length, 1)
+    assert.match(blocks[0]!.text, /Removed experience entry/)
+    assert.match(blocks[0]!.text, /3 entries/)
+  })
 })

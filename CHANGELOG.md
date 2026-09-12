@@ -5,6 +5,53 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-09-12
+
+### Added
+
+- **`iterate_experience` `remove` operation** — delete a stale or incorrect
+  entry by `id` so a corrupted experience never keeps resurfacing. The store
+  helper `removeExperience` returns `{ removed }` and never mutates its input;
+  the tool reports `ok:false` for an unknown id (nothing touched) or a missing
+  `id` argument, and surfaces persist failures like the other write ops.
+- **`iterate_quality_gate` `clear` operation** — `clearQualityGate` removes the
+  persisted `.iterate/quality-gate.json` certificate so a stale FAIL gate can be
+  reset before a fresh iteration. Reads after clearing fall back to the empty
+  `pending` snapshot; fail-safe in tool render.
+- **Live activity feed now classifies the v3.0 command-center tools**
+  (`iterate_experience` / `iterate_quality_gate` / `iterate_defense_events`) —
+  previously their activity never produced a live-feed entry; they now surface
+  as `info` activities so the F1 activity stream tells the full story.
+
+### Changed
+
+- **`iterate_rollback` now mirrors the reversal into the persisted observatory
+  transcript**: the removed dead code `markFixRolledBack` (only reachable in
+  tests) is now wired end-to-end via a fail-safe
+  `markFixRolledBackInTranscript` helper — rolling back a fix flags its
+  `success:false` in `.iterate/transcript.json` so the client F4 fix/rollback
+  panel no longer shows a rolled-back fix as "成功". Best-effort: a missing or
+  corrupt transcript is ignored and never breaks the rollback flow.
+- **`iterate_status` text render now includes the quality command-center
+  summaries** it already returned as JSON: quality-gate status/score/verification
+  pass-rate, experience-bank entry/hit totals, and defense-event type counts —
+  a single status read reports the whole run state in text too.
+- **DSH STORE compatibility widened to the 0.1.5 window**: `dsh.compatibility.
+  dshReleases` now also declares `0.1.5-alpha.1`, `0.1.5-alpha.2`, and
+  `0.1.5-rc.1` as `compatible` (verified in a disposable profile against the
+  0.1.5-rc.1 npm packages; typecheck + full suite green). Build-time dependency
+  pins stay at `0.1.2-rc.1` because a clean `npm install` of the 0.1.5 pins
+  fails with ERESOLVE (peer `dsh-agent`), and the harness dedupes the
+  `@deepseek-ai/dsh-*` packages at install time anyway.
+
+### Tests
+
+- 11 new unit tests covering `removeExperience` (remove/unknown-id/mutate-free),
+  `clearQualityGate` (existing + missing certificate), the three new live
+  classifier cases, `markFixRolledBackInTranscript` (toggle, missing file,
+  corrupt manifest), and tool-level `remove`/`clear` end-to-end flows (persist +
+  render).
+
 ## [3.5.0] - 2026-09-09
 
 ### Added

@@ -162,4 +162,55 @@ describe('iterate_quality_gate', () => {
       cleanup()
     }
   })
+
+  it('clear removes the persisted certificate; read then falls back to pending', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      await tool.execute({
+        operation: 'compute',
+        path: dir,
+        dimensions: ['correctness'],
+        findings: [{ dimension: 'correctness', severity: 'high', file: 'a.ts' }],
+      })
+      const gatePath = join(dir, '.iterate', 'quality-gate.json')
+      assert.equal(existsSync(gatePath), true)
+
+      const cleared = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(cleared.ok, true)
+      assert.equal(cleared.operation, 'clear')
+      assert.equal(existsSync(gatePath), false)
+      const snapshot = cleared.snapshot as { overallStatus: string }
+      assert.equal(snapshot.overallStatus, 'pending')
+
+      const readBack = (await tool.execute({ operation: 'read', path: dir })) as Record<string, unknown>
+      assert.equal((readBack.snapshot as { overallStatus: string }).overallStatus, 'pending')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clear renders a notice that the certificate was reset', async () => {
+    const tool = captureTool()
+    const blocks = tool.render({ operation: 'clear' }, {
+      ok: true,
+      kind: 'quality_gate',
+      operation: 'clear',
+      snapshot: { overallStatus: 'pending', dimensions: [], overallScore: 0 },
+    })
+    assert.equal(blocks.length, 1)
+    assert.match(blocks[0]!.text, /cleared/)
+  })
+
+  it('clear is fail-safe when a certificate is missing', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const result = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(result.ok, true)
+      assert.equal(result.operation, 'clear')
+    } finally {
+      cleanup()
+    }
+  })
 })

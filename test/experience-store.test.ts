@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { upsertExperience, writeExperienceBank } from '../src/tools/experience-store.ts'
+import { upsertExperience, removeExperience, writeExperienceBank } from '../src/tools/experience-store.ts'
 import type { ExperienceEntryInput } from '../src/tools/experience-store.ts'
 import type { ExperienceBank } from '../src/types.ts'
 
@@ -98,6 +98,52 @@ describe('upsertExperience', () => {
     assert.equal(added, false)
     assert.equal(next.entries[0]!.hitCount, 1)
     assert.equal(next.totalHits, 1)
+  })
+})
+
+describe('removeExperience', () => {
+  it('removes a matching entry by id and updates lastUpdated', () => {
+    const { bank } = upsertExperience(emptyBank(), input())
+    const id = bank.entries[0]!.id
+    const stale = { ...bank, lastUpdated: '2026-01-01T00:00:00.000Z' }
+    const result = removeExperience(stale, id)
+    assert.equal(result.removed, true)
+    assert.equal(result.bank.entries.length, 0)
+    assert.equal(result.bank.totalHits, 1) // hit count is retained history
+    assert.notEqual(result.bank.lastUpdated, stale.lastUpdated)
+  })
+
+  it('is a no-op for an unknown id, keeping the bank untouched', () => {
+    const { bank } = upsertExperience(emptyBank(), input())
+    const before = JSON.stringify(bank)
+    const result = removeExperience(bank, 'does-not-exist')
+    assert.equal(result.removed, false)
+    assert.equal(JSON.stringify(result.bank), before)
+  })
+
+  it('removes only the targeted entry, leaving siblings intact', () => {
+    const { bank } = upsertExperience(emptyBank(), input({ dimension: 'correctness' }))
+    const second = upsertExperience(bank, input({ dimension: 'security' }))
+    const keep = second.bank.entries[1]!
+    const result = removeExperience(second.bank, second.bank.entries[0]!.id)
+    assert.equal(result.removed, true)
+    assert.equal(result.bank.entries.length, 1)
+    assert.equal(result.bank.entries[0]!.id, keep.id)
+  })
+
+  it('never mutates the input bank', () => {
+    const { bank } = upsertExperience(emptyBank(), input())
+    const before = JSON.stringify(bank)
+    removeExperience(bank, bank.entries[0]!.id)
+    assert.equal(JSON.stringify(bank), before)
+  })
+
+  it('rejects empty or non-string ids as a no-op', () => {
+    const { bank } = upsertExperience(emptyBank(), input())
+    const before = JSON.stringify(bank)
+    assert.equal(removeExperience(bank, '').removed, false)
+    assert.equal(removeExperience(bank, (undefined as unknown) as string).removed, false)
+    assert.equal(JSON.stringify(bank), before)
   })
 })
 

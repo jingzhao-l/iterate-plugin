@@ -7,7 +7,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
-import { readExperienceBank, writeExperienceBank, searchExperienceEntries, upsertExperience } from "./experience-store.js";
+import { readExperienceBank, writeExperienceBank, searchExperienceEntries, upsertExperience, removeExperience } from "./experience-store.js";
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 /** Clamp a caller-supplied limit to a sane range. */
@@ -75,12 +75,13 @@ export function registerExperienceBankTool(ctx) {
             'List/search/get return matching entries with hit counts, verified fixes, and related context. ' +
             '"add" upserts an experience entry into .iterate/experience.json — a repeat of the same ' +
             'pattern+dimension increments its hit count instead of duplicating it. ' +
+            '"remove" deletes an entry by id (useful for pruning stale or incorrect experiences). ' +
             'Use it to remember fixes that worked so future rounds apply them first.',
         parameters: {
             operation: {
                 type: 'string',
-                description: 'Operation: list (browse all), search (by query), get (by id), add (add a new experience). Default: list.',
-                enum: ['list', 'search', 'get', 'add'],
+                description: 'Operation: list (browse all), search (by query), get (by id), add (add a new experience), remove (delete by id). Default: list.',
+                enum: ['list', 'search', 'get', 'add', 'remove'],
             },
             query: {
                 type: 'string',
@@ -147,6 +148,9 @@ export function registerExperienceBankTool(ctx) {
                                 `Tags: ${entry.tags.join(', ')}`,
                             ].join('\n') }];
                 }
+                if (value.operation === 'remove') {
+                    return [{ type: 'text', text: `Removed experience entry. Bank now holds ${value.count ?? 0} entries (${value.totalHits ?? 0} cumulative hits).` }];
+                }
                 if (value.operation === 'get' && value.entry) {
                     const entry = value.entry;
                     return [{ type: 'text', text: [
@@ -201,6 +205,38 @@ export function registerExperienceBankTool(ctx) {
                     added,
                     count: next.entries.length,
                     entry: entry,
+                    totalHits: next.totalHits,
+                };
+            }
+            if (operation === 'remove') {
+                const id = typeof args.id === 'string' && args.id ? args.id : '';
+                if (!id) {
+                    return {
+                        ok: false,
+                        kind: 'experience',
+                        operation: 'remove',
+                        error: 'id is required for remove',
+                    };
+                }
+                const bank = readExperienceBank(projectRoot);
+                const { bank: next, removed } = removeExperience(bank, id);
+                if (!removed) {
+                    return {
+                        ok: false,
+                        kind: 'experience',
+                        operation: 'remove',
+                        error: `Experience not found: ${id}`,
+                    };
+                }
+                const write = writeExperienceBank(projectRoot, next);
+                if (!write.ok) {
+                    return { ok: false, kind: 'experience', operation: 'remove', error: write.error };
+                }
+                return {
+                    ok: true,
+                    kind: 'experience',
+                    operation: 'remove',
+                    count: next.entries.length,
                     totalHits: next.totalHits,
                 };
             }

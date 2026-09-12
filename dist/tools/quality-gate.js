@@ -8,7 +8,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
-import { readQualityGate, writeQualityGate, computeQualityGate } from "./quality-store.js";
+import { readQualityGate, writeQualityGate, computeQualityGate, clearQualityGate } from "./quality-store.js";
 /** Validate a single finding object; returns true when well-formed. */
 function isValidFinding(raw) {
     if (!raw || typeof raw !== 'object')
@@ -66,12 +66,14 @@ export function registerQualityGateTool(ctx) {
             'and overall PASS/FAIL status. ' +
             'Operation "read" (default) returns the persisted machine-readable quality certificate. ' +
             'Operation "compute" computes a fresh snapshot from this round\'s findings/validation results, ' +
-            'persists it to .iterate/quality-gate.json, and returns it.',
+            'persists it to .iterate/quality-gate.json, and returns it. ' +
+            'Operation "clear" removes the persisted certificate (use it to reset a stale gate before ' +
+            'starting a fresh iteration).',
         parameters: {
             operation: {
                 type: 'string',
-                description: 'Operation: read (load persisted certificate) or compute (recompute + persist). Default: read.',
-                enum: ['read', 'compute'],
+                description: 'Operation: read (load persisted certificate), compute (recompute + persist), or clear (remove the persisted certificate). Default: read.',
+                enum: ['read', 'compute', 'clear'],
             },
             dimensions: {
                 type: 'array',
@@ -137,6 +139,9 @@ export function registerQualityGateTool(ctx) {
                 if (operation === 'compute') {
                     lines.push('', 'Quality gate snapshot computed and persisted.');
                 }
+                if (operation === 'clear') {
+                    lines.push('', 'Quality gate certificate cleared — the gate will be recomputed on the next iteration.');
+                }
                 return [{ type: 'text', text: lines.join('\n') }];
             },
         },
@@ -146,6 +151,18 @@ export function registerQualityGateTool(ctx) {
                 return { ok: false, kind: 'quality_gate', error: resolved.reason };
             const projectRoot = resolved.root;
             const operation = typeof args.operation === 'string' ? args.operation : 'read';
+            if (operation === 'clear') {
+                const result = clearQualityGate(projectRoot);
+                if (!result.ok) {
+                    return { ok: false, kind: 'quality_gate', operation: 'clear', error: result.error };
+                }
+                return {
+                    ok: true,
+                    kind: 'quality_gate',
+                    operation: 'clear',
+                    snapshot: readQualityGate(projectRoot),
+                };
+            }
             if (operation === 'compute') {
                 const dimensions = Array.isArray(args.dimensions)
                     ? args.dimensions.filter((d) => typeof d === 'string' && d.length > 0)

@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { convergenceRateFor, computeQualityGate, readQualityGate, writeQualityGate } from '../src/tools/quality-store.ts'
+import { convergenceRateFor, computeQualityGate, readQualityGate, writeQualityGate, clearQualityGate } from '../src/tools/quality-store.ts'
 
 describe('convergenceRateFor', () => {
   it('is 100 for a dimension with no findings at all', () => {
@@ -132,6 +132,35 @@ describe('writeQualityGate', () => {
       const result = writeQualityGate(dir, computeQualityGate({ dimensions: [], findings: [] }))
       assert.equal(result.ok, false)
       assert.match((result as { error: string }).error, /quality-gate\.json/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('clearQualityGate', () => {
+  it('removes a persisted certificate and reports it existed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-clear-'))
+    try {
+      const write = writeQualityGate(dir, computeQualityGate({ dimensions: ['correctness'], findings: [] }))
+      assert.deepEqual(write, { ok: true })
+      assert.equal(existsSync(join(dir, '.iterate', 'quality-gate.json')), true)
+
+      const result = clearQualityGate(dir)
+      assert.deepEqual(result, { ok: true, existed: true })
+      assert.equal(existsSync(join(dir, '.iterate', 'quality-gate.json')), false)
+      // After clearing, reads fall back to the empty pending snapshot.
+      assert.equal(readQualityGate(dir).overallStatus, 'pending')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is a no-op success when no certificate exists', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-quality-clear-'))
+    try {
+      const result = clearQualityGate(dir)
+      assert.deepEqual(result, { ok: true, existed: false })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

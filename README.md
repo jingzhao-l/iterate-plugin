@@ -260,8 +260,8 @@ validation:
 - `iterate_history` — read iteration history (read-only): decision-log entries (filter by `type` / `since` / `limit`, default latest 50, cap 200) + fix-registry summary (per-round fixed/failed counts). For auditing the run, tracing logs, and inventorying fixes
 - `iterate_prune` — clean runtime artifacts: stale decision-log entries (by `retainDays`, default 30), stale checkpoints, orphaned fix backups, empty rounds, stray temp files (crashed atomic writes). Dry-run by default (report-only); real cleanup with `dryRun:false`, each cleanup logged
 - `iterate_transcript` — runtime observatory: persist review transcripts, threads, fixes, and nudge directions to `.iterate/transcript.json` for the client observatory
-- `iterate_experience` — **v3.2** query the experience bank (list / search / get), or `add` a new verified fix: re-adding the same pattern+dimension bumps its hit count instead of duplicating it. Persists to `.iterate/experience.json`
-- `iterate_quality_gate` — **v3.2** read the quality certificate (`read`), or recompute + persist a fresh one (`compute`) from findings, validation results, `findingsByRound`, and `fixedByDimension`. Real per-dimension convergence rates
+- `iterate_experience` — **v3.2** query the experience bank (list / search / get), `add` a new verified fix (re-adding the same pattern+dimension bumps its hit count instead of duplicating it), or **v3.5 remove a stale/incorrect entry by `id`** so bad experiences never resurface. Persists to `.iterate/experience.json`
+- `iterate_quality_gate` — **v3.2** read the quality certificate (`read`), or recompute + persist a fresh one (`compute`) from findings, validation results, `findingsByRound`, and `fixedByDimension`. Real per-dimension convergence rates. **v3.5: `clear` removes the persisted certificate to reset a stale gate before a fresh iteration**
 - `iterate_defense_events` — **v3.2** query defense events (list / counts), or `record` a new one. Human-readable labels follow the project language (en / zh)
 
 ---

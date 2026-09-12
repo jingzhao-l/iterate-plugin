@@ -25,6 +25,7 @@ import { runWithJob } from "../jobs.js";
 import { countTouchedMethods } from "../method-scope.js";
 import { fixBackupPath, fixRegistryPath, fixesDir } from "../paths.js";
 import { appendDecisionEntry } from "./decision-log.js";
+import { markFixRolledBackInTranscript } from "./transcript.js";
 // ─── Constants ───────────────────────────────────────────────────────────────
 /** Upper bound for a single fix `content` payload (characters). */
 export const MAX_FIX_CONTENT_CHARS = 1_000_000;
@@ -708,6 +709,11 @@ export function registerRollbackTool(ctx) {
                 type: 'revert',
                 data: { id, file: record.finding.file, revertedDiff: record.diffSummary },
             });
+            // Mirror the reversal into the persisted observatory transcript (F4) so
+            // the client no longer shows a rolled-back fix as "成功". Best-effort:
+            // a missing/corrupt transcript is left untouched and never breaks the
+            // rollback flow.
+            await markFixRolledBackInTranscript(projectRoot, id);
             return { ok: true, id, file: record.finding.file };
         },
     }));

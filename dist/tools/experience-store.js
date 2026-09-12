@@ -140,3 +140,27 @@ export function upsertExperience(bank, entry) {
         entryId: id,
     };
 }
+/**
+ * Remove an experience entry by id.
+ * Returns the resulting bank plus whether an entry was actually removed. An
+ * unknown id is a no-op (the caller decides how to surface it). Never mutates
+ * the input bank.
+ */
+export function removeExperience(bank, id) {
+    const target = typeof id === 'string' && id ? id : '';
+    if (!target)
+        return { bank, removed: false };
+    const entries = bank.entries.filter((e) => e.id !== target);
+    if (entries.length === bank.entries.length)
+        return { bank, removed: false };
+    const lastUpdated = new Date().toISOString();
+    return {
+        bank: {
+            ...bank,
+            entries,
+            lastUpdated,
+            totalHits: bank.totalHits ?? 0,
+        },
+        removed: true,
+    };
+}

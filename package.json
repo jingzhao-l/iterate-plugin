@@ -1,6 +1,6 @@
 {
   "name": "iterate-plugin",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness with quality command center and experience bank (v3.3). Features: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus dry-run pure-review mode, quality gate compute/persist, writable experience bank, defense events stream (record + bilingual labels), and native command buttons — with a live quality command center (F8/F9/F10 render real session data), §8 assign-fix instruction, and task_mode indicator wired end to end.",
   "type": "module",
   "license": "MIT",
@@ -33,7 +33,10 @@
         "0.1.2-alpha.4": "compatible",
         "0.1.2-alpha.5": "compatible",
         "0.1.2-rc.1": "compatible",
-        "0.1.3-alpha.1": "compatible"
+        "0.1.3-alpha.1": "compatible",
+        "0.1.5-alpha.1": "compatible",
+        "0.1.5-alpha.2": "compatible",
+        "0.1.5-rc.1": "compatible"
       }
     },
     "client": {

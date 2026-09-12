@@ -117,6 +117,25 @@ export function writeQualityGate(
 }
 
 /**
+ * Clear the persisted quality gate certificate (`.iterate/quality-gate.json`).
+ * Returns whether a file existed and was removed, or a structured error when
+ * the removal fails — a stale FAIL certificate must never silently persist.
+ */
+export function clearQualityGate(
+  projectRoot: string,
+): { ok: true; existed: boolean } | { ok: false; error: string } {
+  const filePath = path.join(projectRoot, '.iterate', QUALITY_GATE_FILE)
+  const existed = fs.existsSync(filePath)
+  if (!existed) return { ok: true, existed: false }
+  try {
+    fs.rmSync(filePath, { force: true })
+  } catch (err) {
+    return { ok: false, error: `unable to remove ${filePath}: ${String(err)}` }
+  }
+  return { ok: true, existed: true }
+}
+
+/**
  * Compute the convergence rate for a dimension.
  *
  * Convergence measures how much NEW-finding volume shrank across rounds:

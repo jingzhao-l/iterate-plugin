@@ -69,6 +69,11 @@ export function classifyTool(name, args, projectRoot) {
         iterate_status: 'info',
         iterate_config: 'info',
         iterate_context: 'info',
+        // v3.0 quality command-center tools — surface their activity in the live
+        // feed too (previously these three never produced a live entry).
+        iterate_experience: 'info',
+        iterate_quality_gate: 'info',
+        iterate_defense_events: 'info',
     };
     const type = records[name];
     if (!type)

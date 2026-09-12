@@ -27,6 +27,7 @@ import { runWithJob } from '../jobs.ts'
 import { countTouchedMethods } from '../method-scope.ts'
 import { fixBackupPath, fixRegistryPath, fixesDir } from '../paths.ts'
 import { appendDecisionEntry } from './decision-log.ts'
+import { markFixRolledBackInTranscript } from './transcript.ts'
 import type { FileDiffHunk, FixRecord, FixRegistry, ReviewFinding } from '../types.ts'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -722,6 +723,12 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
           type: 'revert',
           data: { id, file: record.finding.file, revertedDiff: record.diffSummary },
         })
+
+        // Mirror the reversal into the persisted observatory transcript (F4) so
+        // the client no longer shows a rolled-back fix as "成功". Best-effort:
+        // a missing/corrupt transcript is left untouched and never breaks the
+        // rollback flow.
+        await markFixRolledBackInTranscript(projectRoot, id)
 
         return { ok: true, id, file: record.finding.file }
       },

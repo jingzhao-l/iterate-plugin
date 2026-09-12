@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   ReviewTranscriptBuilder,
   TRANSCRIPT_VERSION,
 } from '../src/transcript.ts'
+import { markFixRolledBackInTranscript } from '../src/tools/transcript.ts'
 import type { TranscriptEntry } from '../src/types.ts'
 
 /** Monotonic clock so serialize() timestamps are deterministic and ordered. */
@@ -216,5 +220,57 @@ describe('ReviewTranscriptBuilder', () => {
       now: fixedClock(),
     }).serialize()
     assert.equal(junk.taskMode, 'iterate')
+  })
+})
+
+describe('markFixRolledBackInTranscript', () => {
+  function persistManifest(root: string, manifest: unknown): void {
+    mkdirSync(join(root, '.iterate'), { recursive: true })
+    writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify(manifest), 'utf-8')
+  }
+
+  it('flags a fix as rolled back in the persisted transcript', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-mark-'))
+    try {
+      const b = new ReviewTranscriptBuilder({ project: root, now: fixedClock() })
+      b.fix({ id: 'f1', file: 'src/a.ts', round: 1, summary: 'add guard' })
+      b.fix({ id: 'f2', file: 'src/b.ts', round: 1, summary: 'other fix' })
+      persistManifest(root, b.serialize())
+
+      const updated = await markFixRolledBackInTranscript(root, 'f1')
+      assert.equal(updated, true)
+
+      const after = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      )
+      const f1 = after.fixes.find((f: { id: string }) => f.id === 'f1')
+      const f2 = after.fixes.find((f: { id: string }) => f.id === 'f2')
+      assert.equal(f1.success, false)
+      assert.equal(f2.success, true) // siblings keep their success flag
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('returns false (no-op) when no transcript exists', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-mark-'))
+    try {
+      const updated = await markFixRolledBackInTranscript(root, 'f1')
+      assert.equal(updated, false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('is fail-safe against a corrupt transcript', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-mark-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(join(root, '.iterate', 'transcript.json'), '{not json', 'utf-8')
+      const updated = await markFixRolledBackInTranscript(root, 'f1')
+      assert.equal(updated, false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

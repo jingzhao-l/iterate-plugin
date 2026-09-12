@@ -341,3 +341,35 @@ async function persist(file: string, manifest: TranscriptManifest): Promise<void
   await mkdir(dirname(file), { recursive: true })
   await writeTextAtomicAsync(file, JSON.stringify(manifest, null, 2))
 }
+
+/**
+ * Mark one applied fix as rolled back in the PERSISTED transcript, so the
+ * client observatory (F4 fix/rollback tab) reflects the reversal instead of
+ * showing the fix as still "成功" after a rollback.
+ *
+ * Best-effort and fail-safe: a missing/corrupt transcript is ignored, and a
+ * persistence failure never throws into the caller (rollback itself is the
+ * primary operation; the transcript is a secondary UI projection).
+ *
+ * @returns true when a transcript existed and was updated.
+ */
+export async function markFixRolledBackInTranscript(
+  projectRoot: string,
+  id: string,
+): Promise<boolean> {
+  const file = transcriptPath(projectRoot)
+  if (!existsSync(file)) return false
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf-8')) as unknown as TranscriptManifest
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.fixes)) return false
+    const { config } = loadEffectiveConfig(projectRoot)
+    const approval = config.observatory?.approval ?? 'ask'
+    const builder = rehydrateBuilder(parsed, approval)
+    builder.markFixRolledBack(id)
+    await persist(file, builder.serialize())
+    return true
+  } catch {
+    // Never let the secondary transcript write break the rollback flow.
+    return false
+  }
+}

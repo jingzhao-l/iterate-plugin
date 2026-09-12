@@ -259,8 +259,8 @@ validation:
 - `iterate_history` — 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数）。用于审查运行过程、审计日志、盘点修复
 - `iterate_prune` — 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次、崩溃原子写入残留的临时文件。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志
 - `iterate_transcript` — 运行时观测台：把审查转录、线程、修复与 nudge 指令持久化到 `.iterate/transcript.json`，供客户端观测台读取
-- `iterate_experience` — **v3.2** 查询经验银行（list / search / get），或 `add` 一条新的已验证修复：重复添加同一 pattern + dimension 累加命中次数而非重复写入。持久化到 `.iterate/experience.json`
-- `iterate_quality_gate` — **v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率
+- `iterate_experience` — **v3.2** 查询经验银行（list / search / get），或 `add` 一条新的已验证修复：重复添加同一 pattern + dimension 累加命中次数而非重复写入。**v3.5 新增 `remove`：按 `id` 删除过时或错误的经验条目**。持久化到 `.iterate/experience.json`
+- `iterate_quality_gate` — **v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率。**v3.5 新增 `clear`：删除持久化的质量凭证**，用于新一轮迭代前重置陈旧的门禁
 - `iterate_defense_events` — **v3.2** 查询防御事件（list / counts），或 `record` 记录一条新事件。可读标签跟随项目语言（en / zh）
 
 ---

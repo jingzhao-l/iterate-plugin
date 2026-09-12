@@ -49,6 +49,20 @@ test('classifyTool: iterate tools are typed by name', () => {
   assert.equal(rollback?.target, 'fix fix-abc')
 })
 
+test('classifyTool: v3.0 command-center tools surface activity in the live feed', () => {
+  const qg = classifyTool('iterate_quality_gate', { operation: 'compute' }, '/tmp')
+  assert.equal(qg?.type, 'info')
+  assert.equal(qg?.target, 'compute')
+
+  const exp = classifyTool('iterate_experience', { operation: 'add', pattern: 'guard null' }, '/tmp')
+  assert.equal(exp?.type, 'info')
+  assert.equal(exp?.target, 'add')
+
+  const def = classifyTool('iterate_defense_events', { operation: 'list' }, '/tmp')
+  assert.equal(def?.type, 'info')
+  assert.equal(def?.target, 'list')
+})
+
 test('classifyTool: unknown tools are ignored', () => {
   assert.equal(classifyTool('ls', { path: '/tmp' }, '/tmp'), null)
   assert.equal(classifyTool('web_search', {}, '/tmp'), null)
