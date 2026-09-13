@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { findSkillMd, findSkillRoot, normalizeAttachment, normalizeAttachments } from '../src/tools/context.ts'
+import { findSkillMd, findSkillRoot, isAllowedSkillDir, normalizeAttachment, normalizeAttachments } from '../src/tools/context.ts'
 
 /** Create a temp tree and return its root plus a cleanup fn. */
 function tempTree(): { root: string; cleanup: () => void } {
@@ -178,5 +178,79 @@ describe('normalizeAttachments', () => {
     // Once the cap is hit, the loop stops and reports a single drop notice.
     assert.equal(res.errors.length, 1)
     assert.match(res.errors[0] as string, /capped/)
+  })
+})
+
+describe('isAllowedSkillDir', () => {
+  it('accepts an existing directory inside the allowed roots', () => {
+    const { root, cleanup } = tempTree()
+    try {
+      const skillDir = join(root, 'skill')
+      mk(skillDir)
+      assert.equal(isAllowedSkillDir(skillDir, [root]), true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('accepts the allowed root itself', () => {
+    const { root, cleanup } = tempTree()
+    try {
+      assert.equal(isAllowedSkillDir(root, [root]), true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects a directory outside the allowed roots', () => {
+    const { root, cleanup } = tempTree()
+    try {
+      const other = mkdtempSync(join(tmpdir(), 'iterate-context-other-'))
+      try {
+        mk(other)
+        assert.equal(isAllowedSkillDir(other, [root]), false)
+      } finally {
+        rmSync(other, { recursive: true, force: true })
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects a nonexistent directory and an empty path', () => {
+    const { root, cleanup } = tempTree()
+    try {
+      assert.equal(isAllowedSkillDir(join(root, 'nope'), [root]), false)
+      assert.equal(isAllowedSkillDir('   ', [root]), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects a symlink whose target is outside the allowed roots', () => {
+    const { root, cleanup } = tempTree()
+    try {
+      const outside = mkdtempSync(join(tmpdir(), 'iterate-context-outside-'))
+      try {
+        symlinkSync(outside, join(root, 'sneaky'))
+        assert.equal(isAllowedSkillDir(join(root, 'sneaky'), [root]), false)
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('accepts a symlink whose target is inside the allowed roots', () => {
+    const { root, cleanup } = tempTree()
+    try {
+      const realDir = join(root, 'real')
+      mk(realDir)
+      symlinkSync(realDir, join(root, 'alias'))
+      assert.equal(isAllowedSkillDir(join(root, 'alias'), [root]), true)
+    } finally {
+      cleanup()
+    }
   })
 })

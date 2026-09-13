@@ -5,6 +5,50 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.2] - 2026-09-13
+
+### Changed
+
+- **Upgraded DSH runtime deps to `0.1.5-rc.2`** — `@deepseek-ai/dsh-tools`,
+  `@deepseek-ai/dsh-util-values` (deps) and `@deepseek-ai/dsh-jobs`,
+  `@deepseek-ai/dsh-session` (devDeps) moved from `0.1.2-rc.1` to `0.1.5-rc.2`
+  so the plugin aligns with the current harness release. Verified in a clean
+  sandbox: typecheck against the rc.2 type declarations passes unchanged and
+  the full test suite passes; the plugin does not reference the renamed
+  `tool/ptc-dispatch-*` events. `dsh.compatibility.dshReleases` now declares
+  `0.1.5-rc.2: compatible`.
+
+### Fixed
+
+- **`resolveProjectFile` symlink escape via nonexistent target** (fix.ts) —
+  symlink containment only ran when the target file existed, so a fix creating
+  a NEW file under a symlinked parent directory could write outside the
+  project root. The containment check now walks up to the nearest existing
+  ancestor (stopping at the harness-provided project root) and validates its
+  real path.
+- **Non-atomic restore in `iterate_rollback` and fix compensating-restore**
+  (fix.ts) — rollback and the registry-write-failure rollback used raw
+  `copyFileSync`, which could leave a truncated source file on crash. Both now
+  restore via `writeTextAtomic`, matching the atomic-write guarantee used
+  everywhere else.
+- **`skillDir` arbitrary-path content injection** (context.ts) — the
+  model-controlled `skillDir` argument was honored for ANY existing directory,
+  letting e.g. `/etc` contents be injected wholesale into the review context.
+  New exported helper `isAllowedSkillDir` only honors it when its real path
+  (symlinks resolved) sits inside the project root or the plugin directory.
+- **Decision-log structural validation** (decision-log.ts) —
+  `readDecisionLogDetailed` now rejects parsed-but-malformed lines (non-object
+  JSON or entries missing `timestamp`/`type`) as `invalidLines` instead of
+  letting them flow into entries, where a missing `timestamp` previously made
+  prune retention comparisons never fire (bad entries could never be pruned).
+
+### Tests
+
+- Added 12 tests: symlink-escape rejection (existing target, new-file parent),
+  plain nonexistent in-project paths accepted, atomic registry-failure restore,
+  decision-log structural validation (malformed shapes counted, legacy entries
+  kept), and `isAllowedSkillDir` acceptance/rejection incl. symlinked dirs.
+
 ## [3.5.1] - 2026-09-12
 
 ### Added

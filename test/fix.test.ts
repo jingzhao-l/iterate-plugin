@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -21,7 +21,7 @@ import {
   registerDiffTool,
   registerRollbackTool,
 } from '../src/tools/fix.ts'
-import { readDecisionEntries } from '../src/tools/decision-log.ts'
+import { readDecisionEntries, readDecisionLogDetailed } from '../src/tools/decision-log.ts'
 import type { FixRegistry, ReviewFinding } from '../src/types.ts'
 
 // ─── Test harness ────────────────────────────────────────────────────────────
@@ -209,6 +209,49 @@ describe('resolveProjectFile', () => {
     if (r.ok) assert.equal(r.resolved, join('/proj', 'src', 'app.ts'))
   })
 
+  it('rejects a symlinked file pointing outside the project', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'iterate-fix-outside-'))
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'secret', 'utf-8')
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      symlinkSync(join(outside, 'secret.txt'), join(dir, 'src', 'app.ts'))
+      const r = resolveProjectFile(dir, 'src/app.ts')
+      assert.equal(r.ok, false)
+      if (!r.ok) assert.match(r.reason, /symlink escape/)
+    } finally {
+      cleanup()
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a NEW file whose parent is a symlink pointing outside the project', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'iterate-fix-outside-'))
+    const { dir, cleanup } = tempProject()
+    try {
+      // `src` does not exist yet as a real dir; it is a symlink to a dir
+      // OUTSIDE the project. Writing src/new-file.ts must be rejected even
+      // though src/new-file.ts itself does not exist.
+      symlinkSync(outside, join(dir, 'src'))
+      const r = resolveProjectFile(dir, 'src/new-file.ts')
+      assert.equal(r.ok, false)
+      if (!r.ok) assert.match(r.reason, /symlink escape/)
+    } finally {
+      cleanup()
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a NEW file whose parent chain is a plain nonexistent path inside the project', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const r = resolveProjectFile(dir, 'a/b/c/new-file.ts')
+      assert.equal(r.ok, true)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('rejects empty, absolute, and traversing paths', () => {
     assert.equal(resolveProjectFile('/proj', '').ok, false)
     assert.equal(resolveProjectFile('/proj', '/etc/passwd').ok, false)
@@ -263,6 +306,31 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
       assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), ORIGINAL)
       assert.deepEqual(readRegistry(dir), { rounds: [] })
       assert.equal(readDecisionEntries(dir).some((e) => e.type === 'revert'), true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects a fix whose registry write fails and restores the original atomically', async () => {
+    // Cover the compensating-restore path: registry write fails → the source
+    // file must be restored from backup via the ATOMIC writer (never a raw
+    // copy that could leave a truncated file on crash). Sabotage: make the
+    // registry path a DIRECTORY so the atomic rename cannot replace it.
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      mkdirSync(join(dir, '.iterate', 'fixes', 'registry.json'), { recursive: true })
+      const res = (await fix({
+        file: 'src/app.ts',
+        content: FIXED,
+        finding: finding(),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /failed to write fix registry/)
+      // Original content restored.
+      assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), ORIGINAL)
     } finally {
       cleanup()
     }
@@ -391,6 +459,52 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
       const files = res.files as Array<{ file: string }>
       assert.equal(files.length, 1)
       assert.equal(files[0]!.file, 'src/app.ts')
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ─── decision log structural validation ──────────────────────────────────────
+
+describe('readDecisionLogDetailed structural validation', () => {
+  it('counts structurally-broken (non-object / missing fields) lines as invalid', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const good = JSON.stringify({
+        timestamp: '2026-09-13T00:00:00.000Z',
+        round: 1,
+        type: 'atomic_fix',
+        data: { id: 'fix-x' },
+      })
+      const badShape = JSON.stringify({ foo: 'bar' }) // object but no timestamp/type
+      const notObject = JSON.stringify([1, 2, 3]) // valid JSON, not an object
+      const broken = '{ not json'
+      const logDir = join(dir, '.iterate')
+      mkdirSync(logDir, { recursive: true })
+      writeFileSync(join(logDir, 'decision-log.jsonl'), [good, badShape, notObject, broken, ''].join('\n'), 'utf-8')
+      const detail = readDecisionLogDetailed(realpathSync(dir))
+      assert.equal(detail.entries.length, 1)
+      assert.equal(detail.entries[0]!.type, 'atomic_fix')
+      // 3 structurally invalid lines: badShape, notObject, broken.
+      assert.equal(detail.invalidLines, 3)
+      // readDecisionEntries keeps only the well-formed entry.
+      assert.equal(readDecisionEntries(realpathSync(dir)).length, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('still accepts legacy entries that only carry timestamp + type', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const legacy = JSON.stringify({ timestamp: '2026-09-13T00:00:00.000Z', round: 2, type: 'decision' })
+      const logDir = join(dir, '.iterate')
+      mkdirSync(logDir, { recursive: true })
+      writeFileSync(join(logDir, 'decision-log.jsonl'), legacy + '\n', 'utf-8')
+      const detail = readDecisionLogDetailed(realpathSync(dir))
+      assert.equal(detail.entries.length, 1)
+      assert.equal(detail.invalidLines, 0)
     } finally {
       cleanup()
     }

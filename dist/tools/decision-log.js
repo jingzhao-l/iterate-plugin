@@ -94,7 +94,14 @@ export function readDecisionLogDetailed(projectRoot) {
         if (trimmed.length === 0)
             continue;
         try {
-            entries.push(JSON.parse(trimmed));
+            const parsed = JSON.parse(trimmed);
+            if (parsed === null || typeof parsed !== 'object' ||
+                typeof parsed.timestamp !== 'string' ||
+                typeof parsed.type !== 'string') {
+                invalidLines += 1;
+                continue;
+            }
+            entries.push(parsed);
         }
         catch {
             invalidLines += 1;

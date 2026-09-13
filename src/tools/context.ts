@@ -1,11 +1,38 @@
-import { readFileSync, existsSync, statSync } from 'node:fs'
-import { join, dirname, resolve } from 'node:path'
+import { readFileSync, existsSync, realpathSync, statSync } from 'node:fs'
+import { join, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 
 /** How many ancestor directories we walk up looking for a SKILL.md. */
 const MAX_SKILL_DIR_LOOKUP_DEPTH = 12
+
+/**
+ * Whether a model-supplied `skillDir` may be used as a SKILL.md search root.
+ *
+ * `skillDir` is model-controlled, so it is only honored when it is an existing
+ * directory whose REAL path (symlinks resolved) sits inside one of the allowed
+ * roots (the project root or the plugin directory). Anything else — a path
+ * outside the allowed roots, a nonexistent dir, or a symlink pointing outside
+ * (e.g. at `/etc`) — is rejected so arbitrary file contents can never be
+ * injected wholesale into the review context.
+ */
+export function isAllowedSkillDir(skillDir: string, allowedRoots: readonly string[]): boolean {
+  if (typeof skillDir !== 'string' || skillDir.trim().length === 0) return false
+  try {
+    const dir = resolve(skillDir)
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) return false
+    return allowedRoots.some((root) => {
+      if (typeof root !== 'string' || root.length === 0) return false
+      const rootReal = realpathSync(root)
+      const rootPrefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep
+      const real = realpathSync(dir)
+      return real === rootReal || real.startsWith(rootPrefix)
+    })
+  } catch {
+    return false
+  }
+}
 
 /** Maximum number of image attachments relayed into the context in one call. */
 const MAX_ATTACHMENTS = 8
@@ -304,8 +331,13 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
           // the auto-detected root / project root.
           if (typeof args.skillDir === 'string' && args.skillDir.trim()) {
             try {
-              const dir = resolve(args.skillDir)
-              if (existsSync(dir) && statSync(dir).isDirectory()) candidates.push(dir)
+              // Model-controlled path: only honor it when its REAL path stays
+              // inside the project root or the plugin directory — never let a
+              // skillDir point at arbitrary filesystem locations (e.g. /etc)
+              // whose contents would be injected wholesale into the context.
+              if (isAllowedSkillDir(args.skillDir, [projectRoot, PLUGIN_SRC_DIR])) {
+                candidates.push(resolve(args.skillDir))
+              }
             } catch {
               // unreadable/invalid skillDir — skip it
             }

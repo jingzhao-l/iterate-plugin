@@ -19,7 +19,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { writeJsonAtomic, writeTextAtomic } from '../atomic-fs.ts'
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { loadEffectiveConfig, resolveProjectRootForExec } from '../config-loader.ts'
@@ -207,15 +207,25 @@ export function resolveProjectFile(projectRoot: string, file: string): { ok: tru
     return { ok: false, reason: 'file resolves outside the project root' }
   }
   // Symlink containment: the lexical prefix check above does not resolve
-  // symlinks. If the target exists, verify its REAL path stays inside the REAL
-  // project root so a symlinked directory/file inside the repo can never route
-  // a fix (write/rollback/diff) outside the project.
-  if (existsSync(resolved)) {
+  // symlinks. Verify the REAL path of the target (when it exists) AND of its
+  // nearest existing ancestor directory (when it does not — e.g. a fix that
+  // creates a new file) stays inside the REAL project root, so a symlinked
+  // directory inside the repo can never route a fix (write/rollback/diff)
+  // outside the project. The probe stops at the project root itself: the root
+  // is harness-provided (not model-controlled), and a path with no existing
+  // entry inside the repo cannot hide a symlink.
+  let probe = resolved
+  while (!existsSync(probe) && probe !== projectRoot) {
+    const parent = dirname(probe)
+    if (parent === probe) break
+    probe = parent
+  }
+  if (existsSync(probe)) {
     let rootReal: string
     let real: string
     try {
       rootReal = realpathSync(projectRoot)
-      real = realpathSync(resolved)
+      real = realpathSync(probe)
     } catch {
       return { ok: false, reason: 'failed to resolve real path for containment check' }
     }
@@ -492,9 +502,9 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
           // Registry write failed → the file was already modified but no record
           // exists, so a later rollback/diff could never see it and a retry would
           // back up the already-fixed content as "original". Restore the file
-          // from the backup to leave the tree exactly as it was.
+          // from the backup atomically to leave the tree exactly as it was.
           try {
-            copyFileSync(backupPath, target.resolved)
+            writeTextAtomic(target.resolved, readFileSync(backupPath, 'utf-8'))
           } catch (restoreErr) {
             return {
               ok: false,
@@ -705,7 +715,9 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
         const target = resolveProjectFile(projectRoot, record.finding.file)
         if (!target.ok) return { ok: false, error: target.reason }
         try {
-          copyFileSync(record.backupPath, target.resolved)
+          // Atomic restore: never leave a truncated source file if we crash
+          // mid-restore (matches the writeTextAtomic guarantee used by apply).
+          writeTextAtomic(target.resolved, readFileSync(record.backupPath, 'utf-8'))
         } catch (err) {
           return { ok: false, error: `failed to restore backup: ${String(err)}` }
         }

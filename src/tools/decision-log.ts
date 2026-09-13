@@ -106,7 +106,16 @@ export function readDecisionLogDetailed(projectRoot: string): DecisionLogRead {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
     try {
-      entries.push(JSON.parse(trimmed) as DecisionLogEntry)
+      const parsed: unknown = JSON.parse(trimmed)
+      if (
+        parsed === null || typeof parsed !== 'object' ||
+        typeof (parsed as { timestamp?: unknown }).timestamp !== 'string' ||
+        typeof (parsed as { type?: unknown }).type !== 'string'
+      ) {
+        invalidLines += 1
+        continue
+      }
+      entries.push(parsed as DecisionLogEntry)
     } catch {
       invalidLines += 1
     }
