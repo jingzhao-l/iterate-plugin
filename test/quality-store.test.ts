@@ -110,6 +110,22 @@ describe('computeQualityGate', () => {
     assert.equal(poorScore.overallStatus, 'fail')
     assert.match(poorScore.failReason as string, /below threshold/)
   })
+
+  it('reports pending (not fail) for an empty review with nothing to gate', () => {
+    // No dimensions, no findings, no validation results — there is nothing to
+    // gate, so a fabricated FAIL("Overall score 0 below threshold") is wrong.
+    const empty = computeQualityGate({ dimensions: [], findings: [] })
+    assert.equal(empty.overallStatus, 'pending')
+    assert.equal(empty.failReason, undefined)
+    assert.equal(empty.overallScore, 0)
+    // A dimension-less review is STILL gated when validation checks ran.
+    const withChecks = computeQualityGate({
+      dimensions: [],
+      findings: [],
+      validationResults: [{ command: 'npm test', exitCode: 1 }],
+    })
+    assert.equal(withChecks.overallStatus, 'fail')
+  })
 })
 
 describe('writeQualityGate', () => {

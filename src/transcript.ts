@@ -53,6 +53,11 @@ const MAX_TIMELINE = 500
  *  grow the manifest payload without limit). */
 const MAX_FIXES = 200
 
+/** Max round number accepted by the builder. A model-authored/manifest-backed
+ *  round value is attacker-influenced JSON: `roundStart(1e9)` / `snapshotConvergence`
+ *  would otherwise preallocate arrays of that size and OOM the host. */
+const MAX_ROUNDS = 1000
+
 /** Thresholds applied when reducing a string list under a cap. */
 function clampStringList(source: string[], cap: number): string[] {
   const out: string[] = []
@@ -207,9 +212,13 @@ export class ReviewTranscriptBuilder {
   /** Open a review round, capturing the current round index. */
   roundStart(round: number, maxRounds?: number): void {
     const r = typeof round === 'number' && Number.isFinite(round) ? Math.floor(round) : 1
-    this.round = r > 0 ? r : 1
+    // Clamp to MAX_ROUNDS: `this.rounds.length < this.round` below preallocates
+    // an array of size `round` — an unbounded model-controlled value (e.g. 1e9)
+    // would OOM the host. Values above the cap are folded into the cap so the
+    // real rounds are never silently dropped.
+    this.round = Math.min(r > 0 ? r : 1, MAX_ROUNDS)
     if (typeof maxRounds === 'number' && Number.isFinite(maxRounds) && maxRounds >= 0) {
-      this.maxRounds = Math.floor(maxRounds)
+      this.maxRounds = Math.min(Math.floor(maxRounds), MAX_ROUNDS)
     }
     while (this.rounds.length < this.round) {
       this.rounds.push({ round: this.rounds.length + 1, threads: [] })
@@ -294,7 +303,10 @@ export class ReviewTranscriptBuilder {
 
   /** Record a round's new-finding count for the convergence series. */
   snapshotConvergence(round: number, newCount: number): void {
-    const r = typeof round === 'number' && Number.isFinite(round) ? Math.floor(round) : 1
+    const rawR = typeof round === 'number' && Number.isFinite(round) ? Math.floor(round) : 1
+    // Clamp (mirrors roundStart): the loop below preallocates `r` slots, so an
+    // unbounded model-controlled round number would OOM the host.
+    const r = Math.min(rawR > 0 ? rawR : 1, MAX_ROUNDS)
     const n = typeof newCount === 'number' && Number.isFinite(newCount) ? newCount : 0
     while (this.convergence.length < r) this.convergence.push(-1)
     this.convergence[r - 1] = Math.floor(n)
@@ -312,7 +324,10 @@ export class ReviewTranscriptBuilder {
     this.fixes.push({
       id,
       timestamp: typeof record.timestamp === 'string' ? record.timestamp : isoNow(),
-      round: typeof record.round === 'number' ? record.round : this.round,
+      round:
+        typeof record.round === 'number' && Number.isFinite(record.round)
+          ? Math.floor(record.round)
+          : this.round,
       file,
       summary: typeof record.summary === 'string' ? record.summary : '',
       linesAdded:
@@ -363,7 +378,10 @@ export class ReviewTranscriptBuilder {
     const type = typeof entry.type === 'string' ? entry.type : 'decision'
     this.timeline.push({
       timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : isoNow(),
-      round: typeof entry.round === 'number' ? entry.round : this.round,
+      round:
+        typeof entry.round === 'number' && Number.isFinite(entry.round)
+          ? Math.floor(entry.round)
+          : this.round,
       type,
       data:
         entry.data && typeof entry.data === 'object'

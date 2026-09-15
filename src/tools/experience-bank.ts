@@ -151,8 +151,8 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
               `Dimension: ${entry.dimension}`,
               `Description: ${entry.description}`,
               `Fix: ${entry.verifiedFix}`,
-              `Files: ${entry.files.join(', ')}`,
-              `Tags: ${entry.tags.join(', ')}`,
+              `Files: ${Array.isArray(entry.files) ? entry.files.join(', ') : ''}`,
+              `Tags: ${Array.isArray(entry.tags) ? entry.tags.join(', ') : ''}`,
             ].join('\n') }]
           }
           if (value.operation === 'remove') {
@@ -165,9 +165,9 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
               `Pattern: ${entry.pattern}`,
               `Description: ${entry.description}`,
               `Fix: ${entry.verifiedFix}`,
-              `Files: ${entry.files.join(', ')}`,
+              `Files: ${Array.isArray(entry.files) ? entry.files.join(', ') : ''}`,
               `Hits: ${entry.hitCount}`,
-              `Tags: ${entry.tags.join(', ')}`,
+              `Tags: ${Array.isArray(entry.tags) ? entry.tags.join(', ') : ''}`,
             ].join('\n') }]
           }
           const entries = (value.entries as unknown as ExperienceEntry[] | undefined) ?? []
@@ -264,7 +264,7 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
             operation: 'get',
             count: 1,
             entry: entry as unknown as JsonValue,
-            totalHits: bank.totalHits,
+            totalHits: bank.totalHits ?? 0,
           }
         }
 
@@ -280,7 +280,7 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
             operation: 'search',
             count: entries.length,
             entries: entries as unknown as JsonValue,
-            totalHits: bank.totalHits,
+            totalHits: bank.totalHits ?? 0,
           }
         }
 
@@ -290,7 +290,7 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
           entries = entries.filter((e) => e.dimension === args.dimension)
         }
         if (Array.isArray(args.tags) && args.tags.length > 0) {
-          entries = entries.filter((e) => args.tags!.every((t: string) => e.tags.includes(t)))
+          entries = entries.filter((e) => args.tags!.every((t: string) => Array.isArray(e.tags) && e.tags.includes(t)))
         }
 
         return {
@@ -299,7 +299,7 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
           operation: 'list',
           count: Math.min(entries.length, limit),
           entries: entries.slice(0, limit) as unknown as JsonValue,
-          totalHits: bank.totalHits,
+          totalHits: bank.totalHits ?? 0,
         }
       },
     }),

@@ -1,6 +1,7 @@
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from "../config-loader.js";
+import { defaultConfig, loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { applyConfigUpdates, readRawConfig, validateConfigUpdates, writeConfigFile, } from "../config-write.js";
 /**
  * Register the `iterate_config` tool.
@@ -91,7 +92,15 @@ export function registerConfigTool(ctx) {
                 }
                 let base;
                 try {
-                    base = readRawConfig(join(projectRoot, 'iterate.config.yaml'));
+                    // Partial updates must be mergeable on a FRESH project (no config
+                    // file yet): otherwise `{max_rounds: 5}` alone fails schema
+                    // validation with a misleading "missing goal". Merge against the
+                    // built-in defaults when there is no file to read, so the written
+                    // config captures the effective config (defaults + update) and the
+                    // documented "write a partial update" contract works out of the box.
+                    base = existsSync(join(projectRoot, 'iterate.config.yaml'))
+                        ? readRawConfig(join(projectRoot, 'iterate.config.yaml'))
+                        : defaultConfig();
                 }
                 catch (err) {
                     return { operation: 'write', ok: false, found: false, error: `failed to read config: ${String(err)}` };

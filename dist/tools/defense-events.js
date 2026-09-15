@@ -10,7 +10,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec, loadEffectiveConfig } from "../config-loader.js";
-import { readDefenseEvents, writeDefenseEvents, addDefenseEvent } from "./defense-store.js";
+import { readDefenseEvents, writeDefenseEvents, addDefenseEvent, clearDefenseEvents } from "./defense-store.js";
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const EVENT_TYPES = [
@@ -75,16 +75,18 @@ export function registerDefenseEventsTool(ctx) {
         // List/counts never write; only `record` persists an event → read shapes
         // join a parallel dispatch group.
         isConcurrencySafe: (args) => args.operation !== 'record',
-        description: 'Query or record defense events: precondition failures, rollbacks, invariant violations, ' +
+        description: 'Query, record, or clear defense events: precondition failures, rollbacks, invariant violations, ' +
             'and assumption falsifications. ' +
             'List/counts return events with descriptions, outcomes, and summary counts; ' +
-            '"record" persists a new event to .iterate/defense-events.json. ' +
+            '"record" persists a new event to .iterate/defense-events.json; ' +
+            '"clear" resets the persisted event stream (use it to start a fresh iteration without stale ' +
+            'defense data). ' +
             'Use it to review defensive actions taken, or to log one when a defense fires.',
         parameters: {
             operation: {
                 type: 'string',
-                description: 'Operation: list (browse all), counts (summary by type), record (log a new event). Default: list.',
-                enum: ['list', 'counts', 'record'],
+                description: 'Operation: list (browse all), counts (summary by type), record (log a new event), clear (reset the stream). Default: list.',
+                enum: ['list', 'counts', 'record', 'clear'],
             },
             type: {
                 type: 'string',
@@ -141,6 +143,7 @@ export function registerDefenseEventsTool(ctx) {
                     kind: { type: 'string' },
                     operation: { type: 'string' },
                     count: { type: 'integer' },
+                    counted: { type: 'boolean', description: 'clear only: true when a persisted stream was removed.' },
                     events: { type: 'json' },
                     counts: { type: 'json' },
                     event: { type: 'json' },
@@ -153,6 +156,16 @@ export function registerDefenseEventsTool(ctx) {
                 if (!value.ok)
                     return [{ type: 'text', text: `defense events query failed: ${value.error}` }];
                 const language = value.language === 'zh' ? 'zh' : 'en';
+                if (value.operation === 'clear') {
+                    // Fresh stream: counts are all zero and the event list is empty.
+                    return [{ type: 'text', text: [
+                                value.counted === true
+                                    ? 'Defense event stream cleared — a fresh iteration starts with an empty stream.'
+                                    : 'No persisted defense event stream to clear.',
+                                'Defense Event Summary:',
+                                ...EVENT_TYPES.map((type) => `  ${labelFor(type, language)}: 0`),
+                            ].join('\n') }];
+                }
                 if (value.operation === 'counts' && value.counts) {
                     const counts = value.counts;
                     const lines = [
@@ -193,10 +206,32 @@ export function registerDefenseEventsTool(ctx) {
             if (!resolved.ok)
                 return { ok: false, kind: 'defense_events', error: resolved.reason };
             const projectRoot = resolved.root;
-            const configLang = loadEffectiveConfig(projectRoot).config.language;
+            // A hand-edited `language` value outside zh/en must not leak out of the
+            // declared 'zh' | 'en' enum (labelFor would return undefined for it) —
+            // normalize any non-'zh' config value to 'en'.
+            const rawConfigLang = loadEffectiveConfig(projectRoot).config.language;
+            const configLang = rawConfigLang === 'zh' ? 'zh' : 'en';
             const language = args.language === 'zh' || args.language === 'en' ? args.language : configLang;
             const operation = typeof args.operation === 'string' ? args.operation : 'list';
             const limit = clampLimit(args.limit);
+            if (operation === 'clear') {
+                // Reset the persisted event stream so a fresh iteration does not carry
+                // stale defensive data (mirrors iterate_quality_gate clear / clearQualityGate).
+                const result = clearDefenseEvents(projectRoot);
+                if (!result.ok) {
+                    return { ok: false, kind: 'defense_events', operation: 'clear', error: result.error };
+                }
+                const empty = readDefenseEvents(projectRoot);
+                return {
+                    ok: true,
+                    kind: 'defense_events',
+                    operation: 'clear',
+                    counted: result.existed,
+                    language,
+                    counts: empty.counts,
+                    events: empty.events,
+                };
+            }
             if (operation === 'record') {
                 const errors = validateRecordInput(args);
                 if (errors.length > 0) {

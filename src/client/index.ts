@@ -2172,6 +2172,11 @@ function ObservatoryPanel(props: SlotProps) {
       mode: String(cp.mode || 'normal'),
       maxRounds: typeof cp.maxRounds === 'number' ? cp.maxRounds : null,
     }, null, 2)}\n\`\`\``
+    // Clearing a stale checkpoint after an interrupted run — iterate_checkpoint
+    // exposes `clear`, but before this button it was only reachable by typing
+    // the command manually (an interrupted run otherwise shows a permanent
+    // "可恢复" chip with no companion reset action).
+    const clearText = `请调用 \`iterate_checkpoint\` 清除当前断点：\n\n\`\`\`json\n${JSON.stringify({ operation: 'clear' }, null, 2)}\n\`\`\``
     const item = (label: string, value: unknown) =>
       React.createElement('span', { className: 'iterate-obs-chip' }, `${label} ${String(value ?? '?')}`)
     return React.createElement('div', { className: 'iterate-obs-block' },
@@ -2187,11 +2192,18 @@ function ObservatoryPanel(props: SlotProps) {
           item('fixed', cp.fixedCount),
           item('resume', cp.resumeCount),
         ),
-        React.createElement('button', {
-          className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'cp-resume' ? '' : undefined,
-          onClick: () => copyInstruction('cp-resume', resumeText),
-          title: '复制 iterate_checkpoint resume 指令文本（加载断点并计数一次恢复）',
-        }, copiedKey === 'cp-resume' ? '已复制' : '复制恢复指令'),
+        React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 4 } },
+          React.createElement('button', {
+            className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'cp-resume' ? '' : undefined,
+            onClick: () => copyInstruction('cp-resume', resumeText),
+            title: '复制 iterate_checkpoint resume 指令文本（加载断点并计数一次恢复）',
+          }, copiedKey === 'cp-resume' ? '已复制' : '复制恢复指令'),
+          React.createElement('button', {
+            className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'cp-clear' ? '' : undefined,
+            onClick: () => copyInstruction('cp-clear', clearText),
+            title: '复制 iterate_checkpoint clear 指令文本（清除当前断点，供重新开始）',
+          }, copiedKey === 'cp-clear' ? '已复制' : '清除断点'),
+        ),
       ),
     )
   }
@@ -2338,6 +2350,9 @@ function ObservatoryPanel(props: SlotProps) {
   // falls back to copy-able query instructions when no snapshot exists yet.
   const renderQualityGate = () => {
     const gateInstruction = '请调用 `iterate_quality_gate` 查询当前质量门禁状态'
+    // Reset a stale FAIL certificate before a fresh iteration — the tool's
+    // `clear` operation existed since v3.5.1 but had no client entry point.
+    const gateClearInstruction = `请调用 \`iterate_quality_gate\` 清除当前质量门禁证书：\n\n\`\`\`json\n${JSON.stringify({ operation: 'clear' }, null, 2)}\n\`\`\``
     const gate = qualityGate
     const dims = gate && gate.dimensions ? gate.dimensions : []
     const hasGate = gate !== null && Boolean(gate.overallStatus || gate.overallScore != null || dims.length > 0)
@@ -2352,6 +2367,11 @@ function ObservatoryPanel(props: SlotProps) {
         onClick: () => copyInstruction('qgate', gateInstruction),
         title: '复制 iterate_quality_gate 查询指令',
       }, copiedKey === 'qgate' ? '已复制' : '查询门禁'),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'qgate-clear' ? '' : undefined,
+        onClick: () => copyInstruction('qgate-clear', gateClearInstruction),
+        title: '复制 iterate_quality_gate clear 指令文本（重置陈旧的 FAIL 证书）',
+      }, copiedKey === 'qgate-clear' ? '已复制' : '清除门禁'),
     )
 
     if (!hasGate) {
@@ -2538,6 +2558,11 @@ function ObservatoryPanel(props: SlotProps) {
         onClick: () => copyInstruction('defense-counts', '请调用 `iterate_defense_events` 查询事件统计'),
         title: '复制统计指令',
       }, copiedKey === 'defense-counts' ? '已复制' : '统计'),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'defense-clear' ? '' : undefined,
+        onClick: () => copyInstruction('defense-clear', `请调用 \`iterate_defense_events\` 清除防御事件流：\n\n\`\`\`json\n${JSON.stringify({ operation: 'clear' }, null, 2)}\n\`\`\``),
+        title: '复制 iterate_defense_events clear 指令文本（重置陈旧事件流）',
+      }, copiedKey === 'defense-clear' ? '已复制' : '清除事件'),
     )
 
     if (allEvents.length === 0 && totalCount === 0) {

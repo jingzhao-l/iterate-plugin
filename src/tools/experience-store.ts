@@ -22,14 +22,62 @@ function emptyBank(): ExperienceBank {
   }
 }
 
+/** Valid severity values (kept in sync with ExperienceEntry). */
+const VALID_SEVERITIES: ReadonlySet<string> = new Set(['critical', 'high', 'medium', 'low'])
+
+/** String array guard for fields that must be arrays (`files`, `tags`). */
+function stringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v.filter((x): x is string => typeof x === 'string')
+}
+
+/**
+ * Normalize one persisted experience entry. A hand-edited bank entry can be
+ * missing `files`/`tags` arrays (or `hitCount`) — consumers rendering/searching
+ * entries (`render` `.join(', ')`, `searchExperienceEntries` spread) must never
+ * throw or emit NaN. Returns null for non-object entries; every required field
+ * gets a safe default.
+ */
+function normalizeEntry(raw: unknown): ExperienceEntry | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const e = raw as Record<string, unknown>
+  const pattern = typeof e.pattern === 'string' ? e.pattern : ''
+  const dimension = typeof e.dimension === 'string' ? e.dimension : ''
+  const id = typeof e.id === 'string' && e.id ? e.id : `exp-${Math.random().toString(36).slice(2, 8)}`
+  if (!pattern && !dimension) return null
+  const hitCount = typeof e.hitCount === 'number' && Number.isFinite(e.hitCount) ? e.hitCount : 0
+  return {
+    id,
+    timestamp: typeof e.timestamp === 'string' ? e.timestamp : new Date().toISOString(),
+    dimension,
+    pattern,
+    description: typeof e.description === 'string' ? e.description : '',
+    verifiedFix: typeof e.verifiedFix === 'string' ? e.verifiedFix : '',
+    findingSummary: typeof e.findingSummary === 'string' ? e.findingSummary : '',
+    files: stringArray(e.files),
+    hitCount,
+    ...(typeof e.lastHitAt === 'string' ? { lastHitAt: e.lastHitAt } : {}),
+    tags: stringArray(e.tags),
+    severity: VALID_SEVERITIES.has(String(e.severity)) ? (e.severity as ExperienceEntry['severity']) : 'low',
+  }
+}
+
 /** Read the experience bank from disk. Returns empty bank if not found. */
 export function readExperienceBank(projectRoot: string): ExperienceBank {
   const filePath = path.join(projectRoot, '.iterate', EXPERIENCE_FILE)
   try {
     const content = fs.readFileSync(filePath, 'utf-8')
-    const parsed = JSON.parse(content) as ExperienceBank
+    const parsed = JSON.parse(content) as Partial<ExperienceBank>
     if (parsed && Array.isArray(parsed.entries)) {
-      return parsed
+      const entries = parsed.entries
+        .map(normalizeEntry)
+        .filter((e): e is ExperienceEntry => e !== null)
+      return {
+        entries,
+        lastUpdated: typeof parsed.lastUpdated === 'string' ? parsed.lastUpdated : emptyBank().lastUpdated,
+        totalHits:
+          typeof parsed.totalHits === 'number' && Number.isFinite(parsed.totalHits) ? parsed.totalHits : 0,
+      }
     }
   } catch {
     // File not found or invalid JSON
@@ -72,6 +120,9 @@ export function searchExperienceEntries(
   const lowerQuery = query.toLowerCase()
 
   return entries.filter((entry) => {
+    if (!entry || typeof entry !== 'object') return false
+    const rawEntry = entry as unknown as Record<string, unknown>
+    const tags = stringArray(rawEntry.tags)
     // Dimension filter
     if (opts.dimension && entry.dimension !== opts.dimension) {
       return false
@@ -79,22 +130,24 @@ export function searchExperienceEntries(
 
     // Tags filter (AND logic)
     if (opts.tags && opts.tags.length > 0) {
-      if (!opts.tags.every((t) => entry.tags.includes(t))) {
+      if (!opts.tags.every((t) => tags.includes(t))) {
         return false
       }
     }
 
-    // Text search across multiple fields
-    if (query) {
-      const searchableText = [
-        entry.pattern,
-        entry.description,
-        entry.verifiedFix,
-        entry.findingSummary,
-        entry.dimension,
-        ...entry.files,
-        ...entry.tags,
-      ].join(' ').toLowerCase()
+    // Text search across multiple fields. Guards against a hand-edited bank entry
+  // whose `files`/`tags` are missing or non-array (the spread below would
+  // otherwise throw a TypeError on a non-iterable).
+  if (query) {
+    const searchableText = [
+      entry.pattern,
+      entry.description,
+      entry.verifiedFix,
+      entry.findingSummary,
+      entry.dimension,
+      ...stringArray(entry.files),
+      ...stringArray(entry.tags),
+    ].join(' ').toLowerCase()
 
       if (!searchableText.includes(lowerQuery)) {
         return false

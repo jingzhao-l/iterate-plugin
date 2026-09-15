@@ -60,8 +60,10 @@ export function summarizeFixRegistry(registry: FixRegistry): {
 } {
   const rounds = (registry.rounds ?? []).map((r) => ({
     round: r.round,
-    fixedCount: r.fixedCount,
-    failedCount: r.failedCount,
+    // Coerce defensively so a hand-edited registry round missing either count
+    // can never propagate NaN into the integer output fields.
+    fixedCount: Number(r.fixedCount) || 0,
+    failedCount: Number(r.failedCount) || 0,
   }))
   return {
     totalFixed: rounds.reduce((s, r) => s + r.fixedCount, 0),
@@ -92,7 +94,7 @@ export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<t
           type: 'string',
           description:
             'Optional entry-type filter: round_start, review_result, atomic_fix, architectural_fix, ' +
-            'revert, validation, decision, report.',
+            'revert, round_failed, validation, decision, report, resume.',
         },
         since: {
           type: 'string',

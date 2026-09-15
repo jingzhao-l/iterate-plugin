@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { upsertExperience, removeExperience, writeExperienceBank } from '../src/tools/experience-store.ts'
+import { upsertExperience, removeExperience, writeExperienceBank, readExperienceBank, searchExperienceEntries } from '../src/tools/experience-store.ts'
 import type { ExperienceEntryInput } from '../src/tools/experience-store.ts'
 import type { ExperienceBank } from '../src/types.ts'
 
@@ -170,5 +170,59 @@ describe('writeExperienceBank', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('readExperienceBank normalization', () => {
+  it('normalizes a hand-edited bank so entries always carry arrays + numbers', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-exp-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'experience.json'), JSON.stringify({
+        lastUpdated: 't',
+        totalHits: 'bogus',
+        entries: [
+          // Well-formed entry: survives unchanged (aside from type coercion).
+          { id: 'e1', timestamp: 't', dimension: 'security', pattern: 'p1', description: 'd', verifiedFix: 'f', files: ['a.ts'], hitCount: 2, tags: [], findingSummary: 's', severity: 'high' },
+          // Missing files/tags/hitCount — previously the render's `.join(', ')`
+          // and search's spread would throw a TypeError.
+          { id: 'e2', dimension: 'correctness', pattern: 'p2', description: 'd2', verifiedFix: 'f2', findingSummary: 's2', severity: 'bogus' },
+          // Non-object junk is dropped.
+          42,
+        ],
+      }), 'utf-8')
+      const bank = readExperienceBank(dir)
+      assert.equal(bank.entries.length, 2)
+      assert.equal(bank.totalHits, 0) // non-numeric totalHits → 0
+      for (const e of bank.entries) {
+        assert.ok(Array.isArray(e.files))
+        assert.ok(Array.isArray(e.tags))
+        assert.equal(typeof e.hitCount, 'number')
+        assert.equal(Number.isNaN(e.hitCount), false)
+      }
+      const e2 = bank.entries[1]!
+      assert.deepEqual(e2.files, [])
+      assert.deepEqual(e2.tags, [])
+      assert.equal(e2.severity, 'low') // unknown severity normalizes to low
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('searchExperienceEntries never throws on malformed in-memory entries', () => {
+    const entries = [
+      { pattern: 'p', dimension: 'd', description: 'desc', verifiedFix: 'f', findingSummary: 's' },
+    ] as never
+    // No files/tags fields on the entry — spread/search would previously throw.
+    const found = searchExperienceEntries(entries, 'desc')
+    assert.equal(found.length, 1)
+    // A query matching a field still works when the arrays are absent.
+    const noMatch = searchExperienceEntries(entries, 'no-such-term')
+    assert.equal(noMatch.length, 0)
+    // Non-object entries are skipped, not fatal.
+    const mixed = searchExperienceEntries([42, null, entries[0]] as never, 'p')
+    assert.equal(mixed.length, 1)
+    // Tag filter with missing tags array does not throw.
+    assert.equal(searchExperienceEntries(entries, '', { tags: ['x'] }).length, 0)
   })
 })

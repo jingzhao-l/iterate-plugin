@@ -31,7 +31,10 @@ function captureRound(builder, round) {
     if (!round || typeof round !== 'object')
         return;
     const r = round;
-    const roundNo = typeof r.round === 'number' ? Math.floor(r.round) : 0;
+    const roundNo = typeof r.round === 'number' && Number.isFinite(r.round) ? Math.floor(r.round) : 0;
+    // NaN round values (`Math.floor(NaN) === NaN`, and `NaN <= 0` is false) would
+    // fall through the guard below; a finite check rejects them outright so a
+    // malformed round can never collapse into round 1 via the builder's coercion.
     if (roundNo <= 0)
         return;
     builder.roundStart(roundNo);
@@ -61,15 +64,17 @@ function normalizeCheckpoint(input) {
     if (!input || typeof input !== 'object')
         return null;
     const c = input;
-    const round = typeof c.round === 'number' ? c.round : 0;
+    // Number.isFinite: a NaN round must not pass `round <= 0` (which is false for
+    // NaN) and later coerce into a phantom round 1 row.
+    const round = typeof c.round === 'number' && Number.isFinite(c.round) ? c.round : 0;
     if (round <= 0)
         return null;
     return {
         mode: c.mode === 'dry-run' || c.mode === 'normal' ? c.mode : 'normal',
         round,
-        maxRounds: typeof c.maxRounds === 'number' ? c.maxRounds : 0,
-        fixedCount: typeof c.fixedCount === 'number' ? c.fixedCount : 0,
-        resumeCount: typeof c.resumeCount === 'number' ? c.resumeCount : 0,
+        maxRounds: typeof c.maxRounds === 'number' && Number.isFinite(c.maxRounds) ? c.maxRounds : 0,
+        fixedCount: typeof c.fixedCount === 'number' && Number.isFinite(c.fixedCount) ? c.fixedCount : 0,
+        resumeCount: typeof c.resumeCount === 'number' && Number.isFinite(c.resumeCount) ? c.resumeCount : 0,
         updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : new Date().toISOString(),
     };
 }
@@ -85,7 +90,7 @@ function normalizeFix(input) {
     return {
         id,
         timestamp: typeof f.timestamp === 'string' ? f.timestamp : new Date().toISOString(),
-        round: typeof f.round === 'number' ? f.round : 0,
+        round: typeof f.round === 'number' && Number.isFinite(f.round) ? f.round : 0,
         file,
         summary: typeof f.summary === 'string' ? f.summary : '',
         linesAdded: typeof f.linesAdded === 'number' ? f.linesAdded : 0,
@@ -211,11 +216,26 @@ export function registerTranscriptTool(ctx) {
                         manifest = null;
                     }
                 }
-                const builder = manifest
-                    ? rehydrateBuilder(manifest, approval)
-                    : new ReviewTranscriptBuilder({ project: projectRoot, mode: 'normal', approval });
+                // Rehydrating a parsed-but-malformed manifest (e.g. `rounds: [null]`
+                // or a non-object) must never crash the nudge — degrade to a fresh
+                // builder so the steering text still lands.
+                let builder;
+                if (manifest) {
+                    try {
+                        builder = rehydrateBuilder(manifest, approval);
+                    }
+                    catch {
+                        builder = new ReviewTranscriptBuilder({ project: projectRoot, mode: 'normal', approval });
+                    }
+                }
+                else {
+                    builder = new ReviewTranscriptBuilder({ project: projectRoot, mode: 'normal', approval });
+                }
                 builder.setNudge(typeof args.text === 'string' && args.text.trim() ? args.text : null);
-                await persist(file, builder.serialize());
+                const persisted = await persistChecked(file, builder.serialize());
+                if (!persisted.ok) {
+                    return { operation: 'nudge', updated: false, error: persisted.error };
+                }
                 return {
                     operation: 'nudge',
                     updated: true,
@@ -276,7 +296,10 @@ export function registerTranscriptTool(ctx) {
             const last = convergence[convergence.length - 1];
             if (convergence.length > 0 && last === 0)
                 builder.finish();
-            await persist(file, builder.serialize());
+            const persisted = await persistChecked(file, builder.serialize());
+            if (!persisted.ok) {
+                return { operation: 'capture', found: true, updated: false, error: persisted.error };
+            }
             const live = await readLive(projectRoot);
             return {
                 operation: 'capture',
@@ -330,6 +353,18 @@ function rehydrateBuilder(manifest, approval) {
 async function persist(file, manifest) {
     await mkdir(dirname(file), { recursive: true });
     await writeTextAtomicAsync(file, JSON.stringify(manifest, null, 2));
+}
+/** persist wrapped with a structured error channel so disk failures surface
+ *  as a structured tool result instead of rejecting the whole execute (matches
+ *  every other write path in this codebase). */
+async function persistChecked(file, manifest) {
+    try {
+        await persist(file, manifest);
+        return { ok: true };
+    }
+    catch (err) {
+        return { ok: false, error: `failed to persist transcript: ${err instanceof Error ? err.message : String(err)}` };
+    }
 }
 /**
  * Mark one applied fix as rolled back in the PERSISTED transcript, so the

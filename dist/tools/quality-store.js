@@ -200,13 +200,19 @@ export function computeQualityGate(opts) {
     const overallScore = dimensionGates.length > 0
         ? Math.round(dimensionGates.reduce((sum, d) => sum + d.score, 0) / dimensionGates.length)
         : 0;
-    // Determine overall status
+    // Determine overall status. An empty review (no dimensions, no findings, no
+    // validation results) is NOT a failure — there is simply nothing to gate —
+    // so it reports `pending` (not-applicable) instead of a fabricated FAIL.
     const hasCritical = criticalCount > 0;
     const hasHighFail = dimensionGates.some((d) => d.status === 'fail');
     const verificationFails = totalChecks > 0 && failedChecks > 0;
+    const noData = dimensionGates.length === 0 && totalFindings === 0 && totalChecks === 0;
     let overallStatus = 'pass';
     let failReason;
-    if (hasCritical) {
+    if (noData) {
+        overallStatus = 'pending';
+    }
+    else if (hasCritical) {
         overallStatus = 'fail';
         failReason = `${criticalCount} critical findings present`;
     }

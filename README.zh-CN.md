@@ -105,7 +105,7 @@ dsh plugin --profile web add iterate-plugin
 ### UI 层（客户端免构建槽位，v3.2：10 个标签页）
 
 - **收敛看板 `ConvergenceDashboard`**（`conversation.input.dock`）— 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图；normal 模式另显示修复计数徽章；还有运行阶段芯片（当前工作流阶段 + 运行中/已结束）与 **v3.2 task_mode 指示器（code / iterate）**。
-- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十个标签页**运行时观测台：实时活动流（支持按活动类型筛选）、审查线程（支持全部展开/全部收起）、收敛趋势、发现定位（支持按严重度/维度/关键词筛选）、修复与回滚、断点恢复、决策时间线（支持按类型/轮次筛选与关键词搜索）。**v3.2 新增标签：质量门禁（F8）、经验银行（F9）、防御事件（F10）**；支持一键导出全部观测数据为 JSON（优先下载，失败回退复制）。
+- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十个标签页**运行时观测台：实时活动流（支持按活动类型筛选）、审查线程（支持全部展开/全部收起）、收敛趋势、发现定位（支持按严重度/维度/关键词筛选）、修复与回滚、断点恢复、决策时间线（支持按类型/轮次筛选与关键词搜索）。**v3.2 新增标签：质量门禁（F8）、经验银行（F9）、防御事件（F10）**；支持一键导出全部观测数据为 JSON（优先下载，失败回退复制）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
 - **Findings 分诊面板 `TriagePanel`**（`conversation.chat.turnTail`）— 逐条 y/n/a 判定，支持筛选、批量（含一键全选所有 findings）、键盘快捷键、localStorage 持久化、复制 YAML / 应用指令。**v3.2：原生命令按钮**（批准架构修复、触发新一轮、回滚到断点）。
 - **收敛统计卡片 `StatsCard`**（`conversation.chat.turnTail`）— 无 findings 时显示收敛统计、历史轮次、趋势图、完成摘要。
 - **iterate 主题皮肤**（`theme.overrideTokens`）— 暖琥珀配色的 13 个 `--dsw-*` token 覆盖，明暗双模式，可在设置页开关。
@@ -254,14 +254,14 @@ validation:
 - `iterate_fix` — 应用**一个原子修复**：校验相对路径、备份原文件、按 `atomic.max_lines` 强制原子性（可 `force` 跳过）、写入新内容、记录 FixRecord 与 `atomic_fix` 日志。normal 模式唯一合法的改文件入口
 - `iterate_diff` — 查看修复累积变更：指定 `file` 返回相对首个备份的 unified diff；省略则返回每个已修复文件的汇总
 - `iterate_rollback` — 回滚一个已应用的修复：从备份还原文件、从注册表移除该 FixRecord、追加 `revert` 日志。用于某轮验证失败后
-- `iterate_checkpoint` — 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`resume` 加载并累加恢复计数（中断恢复），`clear` 清除。长迭代可中断续跑
+- `iterate_checkpoint` — 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`resume` 加载并累加恢复计数（中断恢复），`clear` 清除（findings 载荷有上限，强制 `round ≤ maxRounds`）。长迭代可中断续跑
 - `iterate_status` — 汇总当前迭代状态：模式、当前轮/总轮、已修复数、剩余 architectural、决策日志条数、是否存在 checkpoint；**v3.4：同时返回持久化的质量门禁快照、经验银行摘要与防御事件摘要**（`qualityGate` / `experienceBank` / `defenseEvents`）
 - `iterate_history` — 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数）。用于审查运行过程、审计日志、盘点修复
 - `iterate_prune` — 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次、崩溃原子写入残留的临时文件。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志
 - `iterate_transcript` — 运行时观测台：把审查转录、线程、修复与 nudge 指令持久化到 `.iterate/transcript.json`，供客户端观测台读取
 - `iterate_experience` — **v3.2** 查询经验银行（list / search / get），或 `add` 一条新的已验证修复：重复添加同一 pattern + dimension 累加命中次数而非重复写入。**v3.5 新增 `remove`：按 `id` 删除过时或错误的经验条目**。持久化到 `.iterate/experience.json`
 - `iterate_quality_gate` — **v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率。**v3.5 新增 `clear`：删除持久化的质量凭证**，用于新一轮迭代前重置陈旧的门禁
-- `iterate_defense_events` — **v3.2** 查询防御事件（list / counts），或 `record` 记录一条新事件。可读标签跟随项目语言（en / zh）
+- `iterate_defense_events` — **v3.2** 查询防御事件（list / counts），`record` 记录一条新事件，或 **v3.5.3 `clear` 清除持久化事件流**，让新一轮迭代不带陈旧防御数据起跑。可读标签跟随项目语言（en / zh）
 
 ---
 

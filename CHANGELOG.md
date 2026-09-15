@@ -5,6 +5,81 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.3] - 2026-09-16
+
+### Added
+
+- **`iterate_defense_events` `clear` operation** — reset the persisted
+  `.iterate/defense-events.json` stream so a fresh iteration does not carry
+  stale defensive data (mirrors `iterate_quality_gate clear` /
+  `clearQualityGate`). The store helper `clearDefenseEvents` reports `existed`
+  and is idempotent; the tool returns the fresh empty counts and renders a
+  clear-summary card.
+- **Observatory client actions for the previously-unreachable reset ops** —
+  F5 checkpoint now offers a danger-styled **清除断点** copy-to-command button
+  (`iterate_checkpoint {operation:"clear"}`), F8 quality gate a **清除门禁**
+  button (`iterate_quality_gate {operation:"clear"}`), and F10 defense events a
+  **清除事件** button (`iterate_defense_events {operation:"clear"}`). Settings
+  status guide (`buildRuntimeStatusGuide`) now documents all three reset ops
+  alongside `iterate_prune`.
+
+### Fixed
+
+- **Transcript builder unbounded-array OOM** (src/transcript.ts) —
+  `roundStart(1e9)` / `snapshotConvergence(1e9)` preallocated arrays of that
+  size from model-authored JSON (a resumed/malformed round number); both are
+  now clamped to `MAX_ROUNDS` (1000) so a single hostile value cannot OOM the
+  host. `fix()`/`decision()` also reject NaN round numbers.
+- **Transcript tool round/NaN guards** (src/tools/transcript.ts) —
+  `captureRound`/`normalizeCheckpoint`/`normalizeFix` used `round <= 0` gates
+  that NaN values (for which both comparisons are false) slipped through to
+  collapse a malformed round into round 1. All now use `Number.isFinite`.
+- **Transcript nudge/capture disk-failure handling** — `nudge` and `capture`
+  awaited `persist(...)` unguarded, so a permission/disk-full failure rejected
+  the whole tool call. Both now go through `persistChecked` and return the
+  structured `{ok:false, error}` contract like every other write op; `nudge`
+  also degrades to a fresh builder when a parsed-but-malformed manifest would
+  make `rehydrateBuilder` throw.
+- **Store-level normalization for hand-edited files** — `readDefenseEvents`
+  now shape-normalizes every event (string timestamp / finite round / valid
+  severity) so the list's `b.timestamp.localeCompare(...)` sort can never throw
+  on a missing timestamp; `readExperienceBank` normalizes entries (arrays for
+  `files`/`tags`, finite `hitCount`, valid severity, `totalHits` coerced) so the
+  render's `.join(', ')` and the search spread can never throw; `readRegistry`
+  now drops records lacking `id`/`finding` so `findFixRecord` /
+  `recordsForFile` / `iterate_diff` can never crash or sum NaN.
+- **Numeral hardening in summaries** — `computeStatus` /
+  `summarizeFixRegistry` / the `iterate_diff` accumulation coerce registry
+  counts so a hand-edited round missing `fixedCount`/`failedCount` stays finite
+  instead of emitting NaN.
+- **`iterate_config` write on a fresh project** (src/tools/config.ts) — a
+  partial update like `{max_rounds: 5}` previously failed schema validation
+  with a misleading "missing goal" because the merge base was `{}`. It now
+  merges against the built-in defaults when no `iterate.config.yaml` exists, so
+  the documented partial-update contract works out of the box (and materializes
+  a complete, default-merged config file).
+- **`validateCheckpoint` round cap** (src/tools/checkpoint.ts) — a save with
+  `round > maxRounds` is rejected instead of persisting an inconsistent
+  `Round X / Y` state; `readCheckpoint` also normalizes hand-edited numeric
+  fields (string `maxRounds`, missing counts) and caps the persisted `findings`
+  payload; `prune` no longer throws when `.iterate/fixes` or `.iterate` exists
+  as a non-listable entry (`readdirSync` guarded); the quality gate now reports
+  `pending` (not FAIL) for an empty review with nothing to gate, and
+  `iterate_quality_gate`/`iterate_defense_events` list language falls back to
+  `en` for a non-zh/en config `language`.
+
+### Tests
+
+- Added 23 tests: transcript round-cap OOM guard + NaN round handling; nudge
+  malformed-manifest survival + structured persist failure; defense-store
+  clear + normalized hand-edited streams + clear tool round-trips; experience
+  store normalization/search guards; registry malformed-round normalization;
+  checkpoint round(>max) rejection + hand-edited normalization + findings cap +
+  NaN registry coercion; history count coercion; prune non-listable paths;
+  quality-gate empty-review `pending`; config-write partial update on a fresh
+  project. 576 tests total, typecheck + typecheck:client + build + build:client
+  clean.
+
 ## [3.5.2] - 2026-09-13
 
 ### Changed

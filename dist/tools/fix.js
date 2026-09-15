@@ -120,9 +120,22 @@ export function readRegistry(projectRoot) {
         const parsed = JSON.parse(readFileSync(file, 'utf-8'));
         if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.rounds))
             return emptyRegistry();
-        // Defensive: a hand-edited or partially-written registry may contain a
-        // round without a `records` array — normalize instead of crashing readers.
-        parsed.rounds = parsed.rounds.filter((r) => r && typeof r === 'object' && Array.isArray(r.records));
+        // Defensive normalization: a hand-edited or partially-written registry may
+        // contain a round without a `records` array, or records that are missing
+        // their id / finding object — all of which would make readers
+        // (findFixRecord / recordsForFile / iterate_diff) throw or sum NaN.
+        parsed.rounds = parsed.rounds
+            .filter((r) => r && typeof r === 'object' && Array.isArray(r.records))
+            .map((r) => ({
+            ...r,
+            round: typeof r.round === 'number' && Number.isFinite(r.round) ? Math.floor(r.round) : 0,
+            records: r.records.filter((rec) => !!rec &&
+                typeof rec === 'object' &&
+                typeof rec.id === 'string' &&
+                !!rec.finding &&
+                typeof rec.finding === 'object'),
+        }))
+            .filter((r) => typeof r.round === 'number' && Number.isFinite(r.round));
         return parsed;
     }
     catch {
@@ -611,20 +624,27 @@ export function registerDiffTool(ctx) {
                 for (const r of round.records) {
                     if (!r.success)
                         continue;
-                    const existing = files.find((f) => f.file === r.finding.file);
+                    const file = typeof r.finding.file === 'string' ? r.finding.file : '';
+                    if (!file)
+                        continue;
+                    // Coerce defensively: a hand-edited registry record missing the
+                    // numeric fields must not produce NaN in the accumulated summary.
+                    const added = Number(r.linesAdded) || 0;
+                    const removed = Number(r.linesRemoved) || 0;
+                    const existing = files.find((f) => f.file === file);
                     if (existing) {
-                        existing.linesAdded += r.linesAdded;
-                        existing.linesRemoved += r.linesRemoved;
+                        existing.linesAdded += added;
+                        existing.linesRemoved += removed;
                         // Recompute the summary from the summed counts so a multi-fix
                         // file's text does not contradict its accumulated numbers.
                         existing.diffSummary = `+${existing.linesAdded}/-${existing.linesRemoved} lines`;
                     }
                     else {
                         files.push({
-                            file: r.finding.file,
-                            diffSummary: r.diffSummary,
-                            linesAdded: r.linesAdded,
-                            linesRemoved: r.linesRemoved,
+                            file,
+                            diffSummary: typeof r.diffSummary === 'string' ? r.diffSummary : `+${added}/-${removed} lines`,
+                            linesAdded: added,
+                            linesRemoved: removed,
                         });
                     }
                 }

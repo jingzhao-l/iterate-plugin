@@ -174,6 +174,21 @@ describe('summarizeFixRegistry', () => {
     assert.equal(s.totalFailed, 0)
     assert.equal(s.roundCount, 0)
   })
+
+  it('coerces malformed per-round counts instead of emitting NaN', () => {
+    const registry = {
+      rounds: [
+        { round: 1, fixedCount: 2, failedCount: 1, records: [] },
+        // Hand-edited round missing its count fields.
+        { round: 2, fixedCount: undefined, failedCount: undefined, records: [] } as unknown,
+      ],
+    } as unknown as FixRegistry
+    const s = summarizeFixRegistry(registry)
+    assert.equal(Number.isFinite(s.totalFixed), true)
+    assert.equal(Number.isFinite(s.totalFailed), true)
+    assert.equal(s.totalFixed, 2) // only the well-formed round counts
+    assert.equal(s.totalFailed, 1)
+  })
 })
 
 // ─── iterate_history tool (end-to-end) ───────────────────────────────────────

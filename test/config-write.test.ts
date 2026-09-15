@@ -265,6 +265,32 @@ describe('iterate_config write operation', () => {
     }
   })
 
+  it('accepts a PARTIAL update on a fresh project by merging built-in defaults', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      // A bare `{max_rounds: 5}` must not fail schema validation with a
+      // misleading "missing goal" — the write merges against the defaults so
+      // the documented partial-update contract works out of the box.
+      const res = (await configTool({
+        operation: 'write',
+        path: dir,
+        updates: { max_rounds: 5 },
+      })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.error, undefined)
+      assert.equal(res.backupPath, null)
+      const parsed = yaml.load(readFileSync(join(dir, CONFIG_FILE), 'utf-8')) as Record<string, unknown>
+      assert.equal(parsed.max_rounds, 5)
+      // Defaults were materialized so the file is a complete, valid config.
+      assert.equal(typeof parsed.goal, 'string')
+      assert.ok(Array.isArray(parsed.dimensions))
+      assert.equal(typeof parsed.validation, 'object')
+    } finally {
+      cleanup()
+    }
+  })
+
   it('rejects an invalid update without writing', async () => {
     const [configTool] = captureTools([registerConfigTool]) as [Tool]
     const { dir, cleanup } = tempProject(MINIMAL_CONFIG)

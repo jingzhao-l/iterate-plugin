@@ -198,6 +198,36 @@ describe('registry helpers', () => {
       cleanup()
     }
   })
+
+  it('readRegistry normalizes malformed rounds/records instead of crashing readers', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      mkdirSync(join(dir, '.iterate', 'fixes'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'fixes', 'registry.json'), JSON.stringify({
+        rounds: [
+          // Round with a bad `records` member kind — dropped wholesale.
+          { round: 1, fixedCount: 1, failedCount: 0, records: 'nope' },
+          // Records lacking id or finding object — dropped individually.
+          { round: 2, fixedCount: 1, failedCount: 0, records: [
+            { id: 'fix-ok', timestamp: 't', round: 2, finding: finding(), backupPath: '/b', diffSummary: 'x', linesAdded: 1, linesRemoved: 0, success: true },
+            { id: null, timestamp: 't', round: 2, finding: finding() },
+            { timestamp: 't', round: 2, finding: finding() },
+            { id: 'fix-no-finding', timestamp: 't', round: 2 },
+          ] },
+        ],
+      }), 'utf-8')
+      const registry = readRegistry(dir)
+      assert.equal(registry.rounds.length, 1) // round 1 dropped (records not an array)
+      assert.equal(registry.rounds[0]!.records.length, 1) // only fix-ok survives
+      assert.equal(registry.rounds[0]!.records[0]!.id, 'fix-ok')
+      // Consumers never throw on the normalized registry.
+      assert.equal(findFixRecord(registry, 'fix-ok')?.id, 'fix-ok')
+      assert.equal(findFixRecord(registry, 'fix-no-finding'), undefined)
+      assert.deepEqual(recordsForFile(registry, 'src/app.ts').map((r) => r.id), ['fix-ok'])
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 // ─── resolveProjectFile (path safety) ────────────────────────────────────────

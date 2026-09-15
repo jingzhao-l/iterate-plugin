@@ -7,8 +7,19 @@ import {
   ReviewTranscriptBuilder,
   TRANSCRIPT_VERSION,
 } from '../src/transcript.ts'
-import { markFixRolledBackInTranscript } from '../src/tools/transcript.ts'
+import { markFixRolledBackInTranscript, registerTranscriptTool } from '../src/tools/transcript.ts'
 import type { TranscriptEntry } from '../src/types.ts'
+
+/** Capture the iterate_transcript tool's execute so tests can drive it. */
+function captureTranscriptTool(): (args: unknown) => Promise<unknown> {
+  let def: { execute: (a: unknown, e: unknown) => Promise<unknown> } | null = null
+  registerTranscriptTool({
+    tools: { register: (d: never) => { def = d as typeof def } },
+  } as never)
+  if (!def) throw new Error('iterate_transcript was not registered')
+  const exec = { signal: new AbortController().signal }
+  return (args: unknown) => def!.execute(args, exec as never) as Promise<unknown>
+}
 
 /** Monotonic clock so serialize() timestamps are deterministic and ordered. */
 function fixedClock(): () => string {
@@ -127,6 +138,29 @@ describe('ReviewTranscriptBuilder', () => {
     assert.deepEqual(b.serialize().convergence, [-1, -1, 7])
     b.snapshotConvergence(1, 0)
     assert.deepEqual(b.serialize().convergence, [0, -1, 7])
+  })
+
+  it('clamps an absurd model-controlled round number so preallocation cannot OOM', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    // A hostile/malformed round like 1e9 would previously drive
+    // `while (this.rounds.length < round)` into a 1e9-slot allocation.
+    b.roundStart(1_000_000_000)
+    const m = b.serialize()
+    assert.ok(m.rounds.length <= 1000, `expected rounds capped, got ${m.rounds.length}`)
+    // The builder still records real rounds below the cap.
+    const b2 = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b2.snapshotConvergence(1_000_000_000, 3)
+    assert.ok(b2.serialize().convergence.length <= 1000, 'convergence preallocation must be capped')
+    b2.snapshotConvergence(2, 1)
+    assert.deepEqual(b2.serialize().convergence[1], 1)
+  })
+
+  it('ignores NaN round values instead of collapsing them into round 1', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b.roundStart(NaN)
+    assert.equal(b.serialize().round, 1) // coerced to the safe default, not exploded
+    b.snapshotConvergence(NaN, 5)
+    assert.deepEqual(b.serialize().convergence, [5])
   })
 
   it('fix() drops bad records and markFixRolledBack flips success', () => {
@@ -269,6 +303,46 @@ describe('markFixRolledBackInTranscript', () => {
       writeFileSync(join(root, '.iterate', 'transcript.json'), '{not json', 'utf-8')
       const updated = await markFixRolledBackInTranscript(root, 'f1')
       assert.equal(updated, false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('iterate_transcript nudge execute', () => {
+  it('nudge survives a malformed persisted manifest instead of crashing', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      // Valid JSON, wrong shape (rounds: [null]) — previously rehydrateBuilder
+      // threw inside nudge and rejected the whole call.
+      writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify({
+        version: 1,
+        rounds: [null],
+        convergence: [1],
+        fixes: [{ id: 'f1', round: null }],
+      }), 'utf-8')
+      const res = (await tool({ operation: 'nudge', path: root, text: 'focus on auth' })) as Record<string, unknown>
+      assert.equal(res.operation, 'nudge')
+      assert.equal(res.updated, true)
+      assert.equal(res.error, undefined)
+      const manifest = res.transcript as { nudge: { text: string } }
+      assert.equal(manifest.nudge.text, 'focus on auth')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('nudge surfaces a persistence failure as a structured error', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      // `.iterate` exists as a plain FILE — the atomic write below it must fail.
+      writeFileSync(join(root, '.iterate'), '', 'utf-8')
+      const res = (await tool({ operation: 'nudge', path: root, text: 'x' })) as Record<string, unknown>
+      assert.equal(res.updated, false)
+      assert.match(res.error as string, /persist transcript/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

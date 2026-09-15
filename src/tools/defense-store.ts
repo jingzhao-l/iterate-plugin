@@ -46,11 +46,41 @@ function emptyStream(): DefenseEventStream {
   }
 }
 
+/** Valid severity values (kept in sync with DefenseEvent). */
+const VALID_SEVERITIES: ReadonlySet<string> = new Set(['critical', 'high', 'medium', 'low'])
+
+/**
+ * Normalize one persisted event. Hand-edited files can carry events missing
+ * `timestamp`/`round`/`description`/`defense`/`outcome`/`severity` — readers
+ * (list sort by timestamp, render label selection) must never crash or emit
+ * NaN for those. Returns null when the entry is not an object or has no usable
+ * `type`; otherwise fills every required field with a safe default.
+ */
+function normalizeEvent(raw: unknown): DefenseEvent | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const e = raw as Record<string, unknown>
+  if (typeof e.type !== 'string' || !VALID_EVENT_TYPES.has(e.type as DefenseEventType)) return null
+  return {
+    id: typeof e.id === 'string' && e.id ? e.id : `def-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : new Date().toISOString(),
+    round: typeof e.round === 'number' && Number.isFinite(e.round) ? Math.floor(e.round) : 0,
+    type: e.type as DefenseEventType,
+    description: typeof e.description === 'string' ? e.description : '',
+    defense: typeof e.defense === 'string' ? e.defense : '',
+    outcome: typeof e.outcome === 'string' ? e.outcome : '',
+    ...(typeof e.file === 'string' && e.file.length > 0 ? { file: e.file } : {}),
+    ...(typeof e.line === 'number' && Number.isFinite(e.line) && e.line >= 0 ? { line: e.line } : {}),
+    severity: VALID_SEVERITIES.has(String(e.severity)) ? (e.severity as DefenseEvent['severity']) : 'low',
+  }
+}
+
 /**
  * Read the defense events stream from disk.
  * Normalizes the persisted stream so a hand-edited / partial file can never
  * produce NaN counts: `counts` is recomputed from the events when missing or
- * malformed, and every type key is guaranteed present.
+ * malformed, every type key is guaranteed present, and every surviving event is
+ * shape-normalized so consumers (timestamp sort, render label selection) cannot
+ * throw on missing fields.
  */
 export function readDefenseEvents(projectRoot: string): DefenseEventStream {
   const filePath = path.join(projectRoot, '.iterate', DEFENSE_EVENTS_FILE)
@@ -58,10 +88,9 @@ export function readDefenseEvents(projectRoot: string): DefenseEventStream {
     const content = fs.readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(content) as Partial<DefenseEventStream>
     if (parsed && Array.isArray(parsed.events)) {
-      const events = parsed.events.filter(
-        (e): e is DefenseEvent =>
-          !!e && typeof e === 'object' && typeof (e as DefenseEvent).type === 'string',
-      )
+      const events = parsed.events
+        .map(normalizeEvent)
+        .filter((e): e is DefenseEvent => e !== null)
       const counts = computeCounts(events)
       return {
         events,
@@ -99,6 +128,26 @@ export function writeDefenseEvents(
     return { ok: false, error: `unable to write ${filePath}: ${String(err)}` }
   }
   return { ok: true }
+}
+
+/**
+ * Clear the persisted defense-event stream (`.iterate/defense-events.json`).
+ * Mirrors `clearQualityGate` in quality-store.ts: a stale event stream from a
+ * previous iteration must be resettable before a fresh run. Returns whether a
+ * file existed and was removed, or a structured error when removal fails.
+ */
+export function clearDefenseEvents(
+  projectRoot: string,
+): { ok: true; existed: boolean } | { ok: false; error: string } {
+  const filePath = path.join(iterateDir(projectRoot), DEFENSE_EVENTS_FILE)
+  const existed = fs.existsSync(filePath)
+  if (!existed) return { ok: true, existed: false }
+  try {
+    fs.rmSync(filePath, { force: true })
+  } catch (err) {
+    return { ok: false, error: `unable to remove ${filePath}: ${String(err)}` }
+  }
+  return { ok: true, existed: true }
 }
 
 /** Add a defense event to the stream. */

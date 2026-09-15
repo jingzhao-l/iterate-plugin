@@ -106,16 +106,22 @@ export function inspectPrune(
   }
   const staleBackups: string[] = []
   const fixDir = fixesDir(projectRoot)
-  if (existsSync(fixDir)) {
-    for (const entry of readdirSync(fixDir)) {
-      if (!entry.endsWith('.bak')) continue
-      // Extract the fix-id prefix (up to the first underscore after the id).
-      // e.g. "fix-abc123_2026-08-17T00-00-00-000Z.bak" → "fix-abc123"
-      const match = entry.match(/^(fix-[a-z0-9]+)_/)
-      const id = match?.[1]
-      if (id && !activeIds.has(id)) {
-        staleBackups.push(entry)
-      }
+  // existsSync does not prove readability — a permissions failure must degrade
+  // to "nothing listable" (report skipped) instead of throwing out of execute.
+  let fixEntries: string[] = []
+  try {
+    if (existsSync(fixDir)) fixEntries = readdirSync(fixDir)
+  } catch {
+    fixEntries = []
+  }
+  for (const entry of fixEntries) {
+    if (!entry.endsWith('.bak')) continue
+    // Extract the fix-id prefix (up to the first underscore after the id).
+    // e.g. "fix-abc123_2026-08-17T00-00-00-000Z.bak" → "fix-abc123"
+    const match = entry.match(/^(fix-[a-z0-9]+)_/)
+    const id = match?.[1]
+    if (id && !activeIds.has(id)) {
+      staleBackups.push(entry)
     }
   }
 
@@ -126,10 +132,15 @@ export function inspectPrune(
 
   // 5. Stray atomic-write temp files left behind by a crashed writer. The
   // unique prefix makes them recognizable and safe to delete — no live writer
-  // ever reads another writer's temp file.
-  const staleTemps = existsSync(iterateDir(projectRoot))
-    ? readdirSync(iterateDir(projectRoot)).filter((f) => isPrunableTemp(f)).sort()
-    : []
+  // ever reads another writer's temp file. A permissions failure listing the
+  // dir degrades to "none found" (report-only) rather than throwing.
+  let iterateEntries: string[] = []
+  try {
+    iterateEntries = existsSync(iterateDir(projectRoot)) ? readdirSync(iterateDir(projectRoot)) : []
+  } catch {
+    iterateEntries = []
+  }
+  const staleTemps = iterateEntries.filter((f) => isPrunableTemp(f)).sort()
 
   return {
     oldLogEntries,

@@ -24,16 +24,41 @@ import type { DefenseEventType, IterationCheckpoint, IterationStatus, QualityGat
 
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
 
+/** Max findings persisted in a checkpoint (a model-authored findings payload is
+ *  bounded, mirroring MAX_FIX_CONTENT_CHARS for fix content). */
+export const MAX_CHECKPOINT_FINDINGS = 1000
+
 /** Read the current checkpoint from disk (missing/corrupt → null). */
 export function readCheckpoint(projectRoot: string): IterationCheckpoint | null {
   const file = checkpointPath(projectRoot)
   if (!existsSync(file)) return null
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf-8')) as IterationCheckpoint
+    const parsed = JSON.parse(readFileSync(file, 'utf-8')) as Partial<IterationCheckpoint>
     if (!parsed || typeof parsed !== 'object') return null
     if (parsed.mode !== 'dry-run' && parsed.mode !== 'normal') return null
-    if (typeof parsed.round !== 'number') return null
-    return parsed
+    // Strict round gate: non-numeric (incl. NaN — `NaN <= 0` is false and
+    // `NaN < 0` also false) round values must not survive into the status.
+    const round =
+      typeof parsed.round === 'number' && Number.isFinite(parsed.round)
+        ? Math.floor(parsed.round)
+        : null
+    if (round === null || round < 0) return null
+    const num = (v: unknown, fallback: number): number =>
+      typeof v === 'number' && Number.isFinite(v) ? v : fallback
+    // Normalize every field so a hand-edited/corrupt checkpoint (string
+    // maxRounds, missing fixedCount, …) can never leak a non-numeric value
+    // into the status output or crash a consumer.
+    return {
+      mode: parsed.mode,
+      round,
+      maxRounds: num(parsed.maxRounds, round),
+      fixedCount: num(parsed.fixedCount, 0),
+      architecturalCount: num(parsed.architecturalCount, 0),
+      resumeCount: num(parsed.resumeCount, 0),
+      findings: Array.isArray(parsed.findings) ? (parsed.findings as IterationCheckpoint['findings']) : [],
+      startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    }
   } catch {
     return null
   }
@@ -82,6 +107,17 @@ export function validateCheckpoint(input: {
   ) {
     return 'resumeCount must be a non-negative integer'
   }
+  // A round that claims to be past the configured cap is an inconsistent save —
+  // the status would render `Round X / Y` with X > Y, which is never legitimate
+  // for a resumed run (resume continues AT the checkpoint, it does not exceed
+  // the cap).
+  if (
+    typeof input.round === 'number' &&
+    typeof input.maxRounds === 'number' &&
+    input.round > input.maxRounds
+  ) {
+    return 'round must not exceed maxRounds'
+  }
   return null
 }
 
@@ -118,8 +154,11 @@ export function computeStatus(input: {
   }
 
   const totalRounds = checkpoint?.maxRounds ?? currentRound
-  const registryFixed = registry.rounds.reduce((sum, r) => sum + r.fixedCount, 0)
-  const failedCount = registry.rounds.reduce((sum, r) => sum + r.failedCount, 0)
+  // Coerce the registry's per-round counts defensively: a hand-edited registry
+  // round missing fixedCount/failedCount would otherwise feed NaN into the
+  // status integer fields.
+  const registryFixed = registry.rounds.reduce((sum, r) => sum + (Number(r.fixedCount) || 0), 0)
+  const failedCount = registry.rounds.reduce((sum, r) => sum + (Number(r.failedCount) || 0), 0)
   // When a checkpoint exists, its snapshot fields are authoritative for resume
   // (fixedCount / architecturalCount / findings); otherwise derive from the
   // live fix registry and decision log.
@@ -258,7 +297,7 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
             fixedCount: args.fixedCount as number,
             architecturalCount: args.architecturalCount as number,
             resumeCount: (typeof args.resumeCount === 'number' ? args.resumeCount : 0),
-            findings: (Array.isArray(args.findings) ? args.findings : []) as unknown as IterationCheckpoint['findings'],
+            findings: (Array.isArray(args.findings) ? args.findings.slice(0, MAX_CHECKPOINT_FINDINGS) : []) as unknown as IterationCheckpoint['findings'],
             startedAt: readCheckpoint(projectRoot)?.startedAt ?? new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           }

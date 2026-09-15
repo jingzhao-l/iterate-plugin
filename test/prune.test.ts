@@ -170,6 +170,33 @@ describe('inspectPrune', () => {
     assert.match(report.staleBackups[0]!, /fix-dead/)
     cleanup()
   })
+
+  it('degrades gracefully when the fixes / .iterate paths are not listable directories', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      // `fixes` exists as a plain FILE — `existsSync` is true but readdirSync
+      // throws ENOTDIR; inspectPrune must report "nothing" instead of throwing.
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'fixes'), '', 'utf-8')
+      // `.iterate` itself is a plain FILE for the temp-file sweep — the second
+      // readdirSync path previously threw too.
+      const { dir: dir2, cleanup: cleanup2 } = tempProject()
+      try {
+        writeFileSync(join(dir2, '.iterate'), '', 'utf-8')
+        const report2 = inspectPrune(dir2, 30)
+        assert.equal(report2.staleTemps.length, 0)
+        assert.equal(report2.staleBackups.length, 0)
+      } finally {
+        cleanup2()
+      }
+      const report = inspectPrune(dir, 30)
+      assert.equal(report.staleBackups.length, 0)
+      assert.equal(report.staleTemps.length, 0)
+      assert.deepEqual(report.emptyRounds, [])
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 // ─── executePrune ────────────────────────────────────────────────────────────

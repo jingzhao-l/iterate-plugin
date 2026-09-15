@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { addDefenseEvent, computeCounts, readDefenseEvents, writeDefenseEvents } from '../src/tools/defense-store.ts'
+import { addDefenseEvent, computeCounts, readDefenseEvents, writeDefenseEvents, clearDefenseEvents } from '../src/tools/defense-store.ts'
 import type { DefenseEvent, DefenseEventStream } from '../src/types.ts'
 
 const emptyStream = (): DefenseEventStream => ({
@@ -184,6 +184,39 @@ describe('readDefenseEvents', () => {
       assert.equal(stream.events.length, 1)
       assert.equal(stream.counts.precondition_failed, 1)
       assert.equal(Object.values(stream.counts).every((n) => Number.isFinite(n)), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('clearDefenseEvents', () => {
+  it('removes a persisted stream and reports existence', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-clear-'))
+    try {
+      const seeded = writeDefenseEvents(dir, {
+        events: [event({ id: '1', type: 'rollback' })],
+        lastUpdated: 't',
+        counts: { precondition_failed: 0, rollback: 1, invariant_violated: 0, assumption_falsified: 0 },
+      })
+      assert.deepEqual(seeded, { ok: true })
+      const result = clearDefenseEvents(dir)
+      assert.deepEqual(result, { ok: true, existed: true })
+      assert.equal(existsSync(join(dir, '.iterate', 'defense-events.json')), false)
+      // The stream is now empty again.
+      const stream = readDefenseEvents(dir)
+      assert.equal(stream.events.length, 0)
+      assert.equal(stream.counts.rollback, 0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is a clean no-op when no stream exists', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-clear-'))
+    try {
+      const result = clearDefenseEvents(dir)
+      assert.deepEqual(result, { ok: true, existed: false })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

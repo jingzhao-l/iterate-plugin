@@ -9,6 +9,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
 import { readQualityGate, writeQualityGate, computeQualityGate, clearQualityGate } from "./quality-store.js";
+/** Valid severity values (kept in sync with QualityGateSnapshot counting). */
+const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 /** Validate a single finding object; returns true when well-formed. */
 function isValidFinding(raw) {
     if (!raw || typeof raw !== 'object')
@@ -16,6 +18,7 @@ function isValidFinding(raw) {
     const f = raw;
     return (typeof f.dimension === 'string' &&
         typeof f.severity === 'string' &&
+        VALID_SEVERITIES.has(f.severity) &&
         typeof f.file === 'string' &&
         (f.line === undefined || typeof f.line === 'number'));
 }

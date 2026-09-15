@@ -13,6 +13,9 @@ import { resolveProjectRootForExec } from '../config-loader.ts'
 import { readQualityGate, writeQualityGate, computeQualityGate, clearQualityGate } from './quality-store.ts'
 import type { QualityGateSnapshot } from '../types.ts'
 
+/** Valid severity values (kept in sync with QualityGateSnapshot counting). */
+const VALID_SEVERITIES: ReadonlySet<string> = new Set(['critical', 'high', 'medium', 'low'])
+
 /** Validate a single finding object; returns true when well-formed. */
 function isValidFinding(raw: unknown): raw is { dimension: string; severity: string; file: string; line?: number } {
   if (!raw || typeof raw !== 'object') return false
@@ -20,6 +23,7 @@ function isValidFinding(raw: unknown): raw is { dimension: string; severity: str
   return (
     typeof f.dimension === 'string' &&
     typeof f.severity === 'string' &&
+    VALID_SEVERITIES.has(f.severity) &&
     typeof f.file === 'string' &&
     (f.line === undefined || typeof f.line === 'number')
   )

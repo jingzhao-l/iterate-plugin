@@ -64,6 +64,15 @@ describe('validateCheckpoint', () => {
     assert.match(validateCheckpoint({ mode: 'normal', round: 1, maxRounds: 5, fixedCount: -1, architecturalCount: 0 }) ?? '', /fixedCount/)
     assert.match(validateCheckpoint({ mode: 'normal', round: 1, maxRounds: 5, fixedCount: 0, architecturalCount: 2.5 }) ?? '', /architecturalCount/)
   })
+
+  it('rejects a round past the configured cap (round > maxRounds)', () => {
+    assert.match(
+      validateCheckpoint({ mode: 'normal', round: 6, maxRounds: 5, fixedCount: 0, architecturalCount: 0 }) ?? '',
+      /maxRounds/,
+    )
+    // At the cap (equal) is still valid.
+    assert.equal(validateCheckpoint({ mode: 'normal', round: 5, maxRounds: 5, fixedCount: 0, architecturalCount: 0 }), null)
+  })
 })
 
 // ─── readCheckpoint ──────────────────────────────────────────────────────────
@@ -87,6 +96,48 @@ describe('readCheckpoint', () => {
       const loaded = readCheckpoint(dir)
       assert.equal(loaded?.round, 3)
       assert.equal(loaded?.fixedCount, 7)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects a hand-edited checkpoint with a non-numeric round', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify({ ...checkpoint(), round: 'bogus' }), 'utf-8')
+      assert.equal(readCheckpoint(dir), null)
+      // NaN round (e.g. from a corrupt write) must also be rejected — `NaN <= 0`
+      // is false, so a bare `typeof` + `<= 0` gate would have let it through.
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify({ ...checkpoint(), round: NaN }), 'utf-8')
+      assert.equal(readCheckpoint(dir), null)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('normalizes a hand-edited checkpoint so no non-numeric field leaks out', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      // maxRounds / fixedCount as strings, missing findings array — readCheckpoint
+      // must coerce them instead of letting strings flow into the status.
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify({
+        mode: 'normal',
+        round: 2,
+        maxRounds: '5',
+        fixedCount: '3',
+        architecturalCount: null,
+        resumeCount: undefined,
+        startedAt: '2026-08-16T00:00:00.000Z',
+        updatedAt: '2026-08-16T01:00:00.000Z',
+      }), 'utf-8')
+      const loaded = readCheckpoint(dir)
+      assert.ok(loaded)
+      assert.equal(loaded.round, 2)
+      assert.equal(loaded.maxRounds, 2) // string maxRounds falls back to round
+      assert.equal(loaded.fixedCount, 0)
+      assert.equal(loaded.architecturalCount, 0)
+      assert.equal(loaded.resumeCount, 0)
+      assert.deepEqual(loaded.findings, [])
     } finally {
       cleanup()
     }
@@ -155,6 +206,24 @@ describe('computeStatus', () => {
       },
     })
     assert.equal(status.fixedCount, 5)
+  })
+
+  it('coerces NaN registry counts instead of propagating NaN', () => {
+    const status = computeStatus({
+      checkpoint: null,
+      decisionEntries: [],
+      fixRegistry: {
+        rounds: [
+          { round: 1, fixedCount: 2, failedCount: 1 },
+          // Hand-edited round missing its count fields.
+          { round: 2, fixedCount: undefined, failedCount: undefined } as unknown as {
+            round: number; fixedCount: number; failedCount: number
+          },
+        ],
+      },
+    })
+    assert.equal(status.fixedCount, 2) // one valid + 0 from the malformed round
+    assert.equal(Number.isFinite(status.fixedCount), true)
   })
 
   it('handles an empty state without throwing', () => {
@@ -313,6 +382,58 @@ describe('iterate_checkpoint / iterate_status execute', () => {
       assert.equal(res.ok, false)
       assert.match(String(res.error), /round/)
       assert.equal(existsSync(join(dir, '.iterate', 'checkpoint.json')), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects a save whose round exceeds maxRounds', async () => {
+    const [checkpointTool] = captureTools([registerCheckpointTool]) as [Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      const res = (await checkpointTool({
+        operation: 'save',
+        mode: 'normal',
+        round: 6,
+        maxRounds: 5,
+        fixedCount: 0,
+        architecturalCount: 0,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /maxRounds/)
+      assert.equal(existsSync(join(dir, '.iterate', 'checkpoint.json')), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('caps the checkpoint findings payload on save', async () => {
+    const [checkpointTool] = captureTools([registerCheckpointTool]) as [Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      const findings = Array.from({ length: 1500 }, (_, i) => ({
+        dimension: 'security',
+        file: `src/a${i}.ts`,
+        severity: 'low' as const,
+        summary: `s${i}`,
+        failure_scenario: 'f',
+        suggested_fix: 'g',
+        is_atomic: false,
+      }))
+      const res = (await checkpointTool({
+        operation: 'save',
+        mode: 'normal',
+        round: 1,
+        maxRounds: 5,
+        fixedCount: 0,
+        architecturalCount: 0,
+        findings,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      const ck = (res.checkpoint as IterationCheckpoint)
+      assert.equal(ck.findings.length, 1000) // capped at MAX_CHECKPOINT_FINDINGS
     } finally {
       cleanup()
     }

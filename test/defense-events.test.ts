@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -186,6 +186,92 @@ describe('iterate_defense_events record', () => {
       assert.equal(result.operation, 'record')
       assert.equal(result.event, undefined)
       assert.match(result.error as string, /defense-events\.json/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('lists a hand-edited file without crashing on missing timestamps/severity', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // Seed a hand-edited stream: one event missing `timestamp` (the list sort
+      // would previously throw `b.timestamp.localeCompare is not a function`)
+      // and one with a non-string severity.
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'defense-events.json'), JSON.stringify({
+        lastUpdated: 't',
+        counts: { precondition_failed: 1, rollback: 0, invariant_violated: 0, assumption_falsified: 0 },
+        events: [
+          { id: 'd1', round: 1, type: 'precondition_failed', description: 'x', defense: 'y', outcome: 'z', severity: 'medium' },
+          { id: 'd2', round: 1, type: 'rollback', description: 'desc', defense: 'def', outcome: 'out', severity: 'bogus' },
+        ],
+      }), 'utf-8')
+
+      const listed = (await tool.execute({ operation: 'list', path: dir })) as Record<string, unknown>
+      assert.equal(listed.ok, true)
+      const events = listed.events as Array<Record<string, unknown>>
+      assert.equal(events.length, 2)
+      // Both events survive with a normalized timestamp string + valid severity.
+      for (const e of events) {
+        assert.equal(typeof e.timestamp, 'string')
+        assert.ok(['critical', 'high', 'medium', 'low'].includes(e.severity as string))
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falls back to en for a config language that is not zh/en', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject('goal: "g"\nlanguage: fr\n')
+    try {
+      await tool.execute({ operation: 'record', path: dir, round: 1, type: 'rollback', description: 'd', defense: 'def', outcome: 'o', severity: 'high' })
+      const counts = (await tool.execute({ operation: 'counts', path: dir })) as Record<string, unknown>
+      assert.equal(counts.language, 'en')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clears a persisted stream and renders the fresh summary', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const recorded = (await tool.execute({ operation: 'record', path: dir, ...recordArgs })) as Record<string, unknown>
+      assert.equal(recorded.ok, true)
+      assert.equal(existsSync(join(dir, '.iterate', 'defense-events.json')), true)
+
+      const cleared = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(cleared.ok, true)
+      assert.equal(cleared.operation, 'clear')
+      assert.equal(cleared.counted, true)
+      assert.deepEqual(cleared.counts as Record<string, number>, {
+        precondition_failed: 0,
+        rollback: 0,
+        invariant_violated: 0,
+        assumption_falsified: 0,
+      })
+      assert.equal(existsSync(join(dir, '.iterate', 'defense-events.json')), false)
+
+      // The render shows the empty-summary clear card without crashing.
+      const blocks = tool.render({ operation: 'clear' }, { ok: true, operation: 'clear', counted: true })
+      assert.match(blocks[0]!.text, /Defense event stream cleared/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clear is idempotent when no stream exists yet', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const cleared = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(cleared.ok, true)
+      assert.equal(cleared.counted, false)
+      // Render of the no-op clear path.
+      const blocks = tool.render({ operation: 'clear' }, { ok: true, operation: 'clear', counted: false })
+      assert.match(blocks[0]!.text, /No persisted defense event stream/)
     } finally {
       cleanup()
     }
