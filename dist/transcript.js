@@ -107,6 +107,7 @@ export class ReviewTranscriptBuilder {
     round = 0;
     maxRounds = 0;
     active = true;
+    stoppedReason = null;
     rounds = [];
     convergence = [];
     globalFindings = [];
@@ -158,9 +159,15 @@ export class ReviewTranscriptBuilder {
             this.phases.push(n);
         this.touch();
     }
-    /** End the run (stops the "active" pulsing in the UI). */
-    finish() {
+    /**
+     * End the run (stops the "active" pulsing in the UI). `reason` records WHY
+     * it ended, so a run stopped by max-rounds or validation is never mistaken
+     * for a live run NOR for a clean convergence.
+     */
+    finish(reason) {
         this.active = false;
+        if (typeof reason === 'string' && reason.trim())
+            this.stoppedReason = reason.trim();
         this.touch();
     }
     /** Open a review round, capturing the current round index. */
@@ -385,6 +392,7 @@ export class ReviewTranscriptBuilder {
             checkpoint: this.checkpoint,
             timeline: this.timeline,
             nudge: this.nudge,
+            stoppedReason: this.stoppedReason,
             approval: {
                 active: this.approval !== 'allow',
                 policy: this.approval,

@@ -13,6 +13,10 @@
  *   - Empty fix rounds (rounds with 0 records).
  *   - Stray temp files left behind by a crashed atomic write (see
  *     `isPrunableTemp` for the recognized naming conventions).
+ *   - Experience bank entries beyond `MAX_EXPERIENCE_ENTRIES` (newest kept) —
+ *     the bank grows across sessions with no natural bound; a sweep caps it.
+ *   - Defense events older than `retainDays` (stale iteration streams that
+ *     were never cleared).
  *
  * Security model:
  *   - Only operates under the resolved project `.iterate/` directory.
@@ -28,13 +32,26 @@ import { resolveProjectRootForExec } from '../config-loader.ts'
 import { writeTextAtomic, writeJsonAtomic } from '../atomic-fs.ts'
 import { readDecisionEntries, appendDecisionEntry } from './decision-log.ts'
 import { readRegistry, removeRecord, recomputeRoundCounts } from './fix.ts'
+import { readExperienceBank, writeExperienceBank } from './experience-store.ts'
+import { readDefenseEvents, writeDefenseEvents } from './defense-store.ts'
 import { iterateDir, fixesDir, checkpointPath, fixRegistryPath } from '../paths.ts'
-import type { FixRegistry } from '../types.ts'
+import type { DefenseEventStream, ExperienceBank, FixRegistry } from '../types.ts'
 
 /** Default retention for decision-log entries (in days). */
 const DEFAULT_RETAIN_DAYS = 30
 const MIN_RETAIN_DAYS = 1
 const MAX_RETAIN_DAYS = 365
+
+/**
+ * Upper bound on experience-bank entries retained by a prune sweep. The bank
+ * accumulates curated knowledge across sessions and each entry is small, so a
+ * generous cap drops only the oldest tail of a pathologically large bank
+ * (never recent learning).
+ */
+export const MAX_EXPERIENCE_ENTRIES = 2000
+
+/** How many compare-and-append retries bound the decision-log rewrite race. */
+const MAX_LOG_REWRITE_RETRIES = 3
 
 /** Clamp retainDays to a sane range. */
 export function clampRetainDays(days: number | undefined): number {
@@ -72,6 +89,62 @@ export function isPrunableTemp(name: string): boolean {
 }
 
 /**
+ * Bound the experience bank to its newest `cap` entries (by timestamp; ties
+ * keep their original order via stable sort). Returns the trimmed bank plus
+ * how many entries would be dropped. Never mutates the input bank.
+ */
+export function sweepExperienceBank(bank: ExperienceBank, cap: number): { bank: ExperienceBank; removed: number } {
+  const size = Number.isFinite(cap) && (cap as number) >= 0 ? Math.floor(cap) : MAX_EXPERIENCE_ENTRIES
+  const total = bank.entries.length
+  if (total <= size) return { bank, removed: 0 }
+  const kept = [...bank.entries]
+    .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
+    .slice(0, size)
+  // Preserve the original (insertion) order of the surviving entries.
+  const keptIds = new Set(kept.map((e) => e.id))
+  const ordered = bank.entries.filter((e) => keptIds.has(e.id))
+  return {
+    bank: { ...bank, entries: ordered, lastUpdated: new Date().toISOString() },
+    removed: total - ordered.length,
+  }
+}
+
+/**
+ * Drop defense events older than `cutoff` from the stream using an ISO
+ * timestamp comparison, recomputing the counts so they can never drift from
+ * the surviving events. Never mutates the input stream.
+ */
+export function sweepDefenseEvents(
+  stream: DefenseEventStream,
+  cutoff: string,
+): { stream: DefenseEventStream; removed: number } {
+  const kept = stream.events.filter((e) => e.timestamp >= cutoff)
+  if (kept.length === stream.events.length) return { stream, removed: 0 }
+  return {
+    stream: {
+      events: kept,
+      lastUpdated: new Date().toISOString(),
+      counts: computeDefenseCounts(kept),
+    },
+    removed: stream.events.length - kept.length,
+  }
+}
+
+/** Recompute per-type defense counts from a list of events. */
+function computeDefenseCounts(events: DefenseEventStream['events']): DefenseEventStream['counts'] {
+  const counts: DefenseEventStream['counts'] = {
+    precondition_failed: 0,
+    rollback: 0,
+    invariant_violated: 0,
+    assumption_falsified: 0,
+  }
+  for (const e of events) {
+    if (e.type in counts) counts[e.type]++
+  }
+  return counts
+}
+
+/**
  * Inspect the runtime state and report what would be pruned.
  * Pure (no deletions). Returns a structured report.
  */
@@ -86,6 +159,10 @@ export function inspectPrune(
   emptyRounds: number[]
   totalLogEntries: number
   registryRounds: number
+  totalExperiences: number
+  experienceOversize: number
+  totalDefenseEvents: number
+  staleDefenseEvents: number
 } {
   const cutoff = cutoffTimestamp(retainDays)
 
@@ -142,6 +219,17 @@ export function inspectPrune(
   }
   const staleTemps = iterateEntries.filter((f) => isPrunableTemp(f)).sort()
 
+  // 6. Experience-bank oversize (entries beyond the entry cap). The bank grows
+  // across sessions with no natural bound — a sweep reports the tail that a
+  // prune would drop (newest `MAX_EXPERIENCE_ENTRIES` preserved).
+  const bank = readExperienceBank(projectRoot)
+  const sweptBank = sweepExperienceBank(bank, MAX_EXPERIENCE_ENTRIES)
+
+  // 7. Defense events older than retainDays (a previous iteration's stream
+  // that was never cleared).
+  const defenseStream = readDefenseEvents(projectRoot)
+  const sweptDefense = sweepDefenseEvents(defenseStream, cutoff)
+
   return {
     oldLogEntries,
     hasCheckpoint,
@@ -150,12 +238,55 @@ export function inspectPrune(
     emptyRounds,
     totalLogEntries: entries.length,
     registryRounds: registry.rounds.length,
+    totalExperiences: bank.entries.length,
+    experienceOversize: sweptBank.removed,
+    totalDefenseEvents: defenseStream.events.length,
+    staleDefenseEvents: sweptDefense.removed,
   }
 }
 
 /**
  * Actually prune the runtime artifacts (only called when dryRun=false).
  * Returns a detailed report of what was deleted.
+ */
+/**
+ * Rewrite the decision log to the entries younger than `cutoff`.
+ *
+ * The read-before-rewrite is a TOCTOU hot spot: a concurrent worker can append
+ * a fresh audit line between our read and our atomic rewrite, and an atomic
+ * rename would silently discard it. So instead of a single read+write we use a
+ * bounded compare-and-append loop — after each rewrite we re-read the log and
+ * retry whenever the file grew (a concurrent append slipped in). The loop
+ * terminates when the file is stable or after `MAX_LOG_REWRITE_RETRIES`, and a
+ * failure here is surfaced as a structured error instead of truncating the log.
+ *
+ * @returns the number of entries removed (best-effort) or 0 on error.
+ */
+function rewriteDecisionLogKeepingRecent(projectRoot: string, cutoff: string): { deleted: number; error?: string } {
+  const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl')
+  for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
+    try {
+      const entries = readDecisionEntries(projectRoot)
+      const kept = entries.filter((e) => e.timestamp >= cutoff)
+      const deleted = entries.length - kept.length
+      if (deleted === 0) return { deleted: 0 }
+      writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n')
+      // A concurrent appender may have landed new lines after our read. If the
+      // log grew during the write window, re-read and prune again instead of
+      // accepting a lost audit trail.
+      const after = readDecisionEntries(projectRoot)
+      if (after.length <= kept.length) return { deleted }
+    } catch (err) {
+      return { deleted: 0, error: `failed to rewrite decision log: ${String(err)}` }
+    }
+  }
+  return { deleted: 0, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` }
+}
+
+/**
+ * Execute the prune: apply every cleanable item reported by `inspectPrune`.
+ * Every step is individually hedged so a single disk failure degrades to a
+ * reported error rather than aborting the whole cleanup.
  */
 export function executePrune(
   projectRoot: string,
@@ -167,6 +298,8 @@ export function executePrune(
   deletedBackups: string[]
   deletedTemps: string[]
   trimmedEmptyRounds: number
+  deletedExperiences: number
+  deletedDefenseEvents: number
   errors: string[]
 } {
   const cutoff = cutoffTimestamp(retainDays)
@@ -176,22 +309,19 @@ export function executePrune(
     deletedBackups: [] as string[],
     deletedTemps: [] as string[],
     trimmedEmptyRounds: 0,
+    deletedExperiences: 0,
+    deletedDefenseEvents: 0,
     errors: [] as string[],
   }
 
   // 1. Rewrite the decision log, keeping only recent entries. Atomic
-  // (temp + rename) so a crash mid-write can never truncate the log.
-  try {
-    const entries = readDecisionEntries(projectRoot)
-    const kept = entries.filter((e) => e.timestamp >= cutoff)
-    result.deletedLogEntries = entries.length - kept.length
-    if (result.deletedLogEntries > 0) {
-      const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl')
-      writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n')
-    }
-  } catch (err) {
-    result.errors.push(`failed to rewrite decision log: ${String(err)}`)
-    result.deletedLogEntries = 0
+  // (temp + rename) so a crash mid-write can never truncate the log; the
+  // bounded compare-and-append loop guards against a concurrent appender
+  // slipping a fresh audit line into the read-before-rewrite window.
+  {
+    const { deleted, error } = rewriteDecisionLogKeepingRecent(projectRoot, cutoff)
+    result.deletedLogEntries = deleted
+    if (error) result.errors.push(error)
   }
 
   // 2. Remove checkpoint.
@@ -244,6 +374,34 @@ export function executePrune(
     }
   }
 
+  // 6. Trim the experience bank to its entry cap (newest wins).
+  if (report.experienceOversize > 0) {
+    try {
+      const bank = readExperienceBank(projectRoot)
+      const { bank: swept, removed } = sweepExperienceBank(bank, MAX_EXPERIENCE_ENTRIES)
+      if (removed > 0) {
+        writeExperienceBank(projectRoot, swept)
+        result.deletedExperiences = removed
+      }
+    } catch (err) {
+      result.errors.push(`failed to trim experience bank: ${String(err)}`)
+    }
+  }
+
+  // 7. Drop defense events older than retainDays (recounted on write).
+  if (report.staleDefenseEvents > 0) {
+    try {
+      const stream = readDefenseEvents(projectRoot)
+      const { stream: swept, removed } = sweepDefenseEvents(stream, cutoff)
+      if (removed > 0) {
+        writeDefenseEvents(projectRoot, swept)
+        result.deletedDefenseEvents = removed
+      }
+    } catch (err) {
+      result.errors.push(`failed to sweep defense events: ${String(err)}`)
+    }
+  }
+
   return result
 }
 
@@ -260,7 +418,8 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
         'Inspect or clean up old iterate runtime artifacts (.iterate/). ' +
         'Defaults to dry-run (report-only, no deletion). Pass `dryRun: false` to actually prune. ' +
         'Manages: old decision-log entries, stale checkpoints, orphaned fix backups, empty fix rounds, ' +
-        'and stray temp files left by crashed atomic writes. ' +
+        'stray temp files left by crashed atomic writes, experience-bank entries beyond the entry cap, ' +
+        'and stale defense events. ' +
         'Each deletion is logged to the decision log.',
       parameters: {
         dryRun: {
@@ -302,6 +461,8 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
               `  Stale backups to delete: ${(report?.staleBackups as string[] | undefined)?.length ?? 0}`,
               `  Stray temp files to delete: ${(report?.staleTemps as string[] | undefined)?.length ?? 0}`,
               `  Empty rounds to trim: ${(report?.emptyRounds as number[] | undefined)?.length ?? 0}`,
+              `  Experience entries to drop (over ${report?.totalExperiences ?? '?'} cap): ${report?.experienceOversize ?? 0} of ${report?.totalExperiences ?? '?'}`,
+              `  Stale defense events to remove: ${report?.staleDefenseEvents ?? 0} (of ${report?.totalDefenseEvents ?? '?'})`,
               '',
               'Pass dryRun:false to execute the prune.',
             ]
@@ -314,6 +475,8 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
             `  Deleted ${(result?.deletedBackups as string[] | undefined)?.length ?? 0} stale backups.`,
             `  Deleted ${(result?.deletedTemps as string[] | undefined)?.length ?? 0} stray temp files.`,
             `  Trimmed ${result?.trimmedEmptyRounds ?? 0} empty rounds.`,
+            `  Trimmed ${result?.deletedExperiences ?? 0} experience entries (over the entry cap).`,
+            `  Removed ${result?.deletedDefenseEvents ?? 0} stale defense events.`,
           ]
           const errs = (result?.errors as string[] | undefined) ?? []
           if (errs.length > 0) {
@@ -356,6 +519,8 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
             deletedCheckpoint: result.deletedCheckpoint,
             deletedBackups: result.deletedBackups.length,
             trimmedEmptyRounds: result.trimmedEmptyRounds,
+            deletedExperiences: result.deletedExperiences,
+            deletedDefenseEvents: result.deletedDefenseEvents,
           },
         })
 

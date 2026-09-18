@@ -8,8 +8,13 @@ import { registerExperienceBankTool } from '../src/tools/experience-bank.ts'
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+  isConcurrencySafe: (args: unknown) => boolean
 } {
-  let def: { execute: (a: unknown, e: unknown) => Promise<unknown>; output: { render: (a: unknown, v: unknown) => unknown } } | null = null
+  let def: {
+    execute: (a: unknown, e: unknown) => Promise<unknown>
+    output: { render: (a: unknown, v: unknown) => unknown }
+    isConcurrencySafe?: (a: unknown) => boolean
+  } | null = null
   registerExperienceBankTool({
     tools: { register: (d: never) => { def = d as typeof def } },
   } as never)
@@ -18,6 +23,7 @@ function captureTool(): {
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
+    isConcurrencySafe: (args) => (def!.isConcurrencySafe?.(args) ?? false),
   }
 }
 
@@ -192,5 +198,17 @@ describe('iterate_experience add', () => {
     assert.equal(blocks.length, 1)
     assert.match(blocks[0]!.text, /Removed experience entry/)
     assert.match(blocks[0]!.text, /3 entries/)
+  })
+})
+
+describe('iterate_experience concurrency safety', () => {
+  it('excludes every write shape (add + remove) from the parallel dispatch group', () => {
+    const tool = captureTool()
+    assert.equal(tool.isConcurrencySafe({ operation: 'list' }), true)
+    assert.equal(tool.isConcurrencySafe({ operation: 'search' }), true)
+    assert.equal(tool.isConcurrencySafe({ operation: 'get' }), true)
+    assert.equal(tool.isConcurrencySafe({}), true) // default = list
+    assert.equal(tool.isConcurrencySafe({ operation: 'add' }), false)
+    assert.equal(tool.isConcurrencySafe({ operation: 'remove' }), false)
   })
 })

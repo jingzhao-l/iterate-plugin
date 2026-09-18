@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 interface FakeToolExecution {
   readonly name: string
   readonly arguments?: unknown
+  readonly signal?: AbortSignal
   readonly agent?: {
     readonly session?: { readonly header?: { readonly cwd?: string } }
   }
@@ -140,6 +141,54 @@ describe('gateDecision', () => {
     const d = gateDecision(hostile as unknown as ToolExecution)
     assert.equal(d.kind, 'ask')
   })
+
+  it('a caller-aborted destructive call is canceled before any policy reads', () => {
+    // dsh 0.1.6-alpha.1: an already-aborted invocation must resolve to `cancel`
+    // — a dead request must never run, prompt for consent, or be allow-listed.
+    const aborted = new AbortController()
+    aborted.abort()
+    const withConfig = tempDir({ 'iterate.config.yaml': configYaml('allow') })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_fix', arguments: { path: withConfig.dir }, signal: aborted.signal }))
+      assert.equal(d.kind, 'cancel')
+    } finally {
+      withConfig.cleanup()
+    }
+
+    // Cancellation takes precedence over the deny policy too.
+    const withDeny = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_rollback', arguments: { path: withDeny.dir }, signal: aborted.signal }))
+      assert.equal(d.kind, 'cancel')
+    } finally {
+      withDeny.cleanup()
+    }
+  })
+
+  it('a live (unaborted) destructive call is not canceled', () => {
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_fix', arguments: { path: dir }, signal: new AbortController().signal }))
+      assert.equal(d.kind, 'deny')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('deny carries structured info (dsh 0.1.6-alpha.1 deny.info)', () => {
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_fix', arguments: { path: dir } }))
+      assert.equal(d.kind, 'deny')
+      if (d.kind === 'deny') {
+        assert.equal(d.info?.name, 'iterate-approval-gate')
+        assert.equal(d.info?.code, 'APPROVAL_DENIED')
+        assert.ok(d.info?.reason && d.info.reason.length > 0)
+      }
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 describe('registerSessionHooks', () => {
@@ -194,6 +243,27 @@ describe('registerSessionHooks', () => {
       )
       assert.equal(nextCalled, false)
       assert.equal(decision.kind, 'deny')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('cancel decisions short-circuit without calling next', async () => {
+    const { handler } = capture()
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': configYaml('allow') })
+    try {
+      let nextCalled = false
+      const aborted = new AbortController()
+      aborted.abort()
+      const decision = await handler!(
+        exec({ name: 'iterate_fix', arguments: { path: dir }, signal: aborted.signal }),
+        () => {
+          nextCalled = true
+          return Promise.resolve({ kind: 'allow' })
+        },
+      )
+      assert.equal(nextCalled, false, 'an aborted call must not fall through to next()')
+      assert.equal(decision.kind, 'cancel')
     } finally {
       cleanup()
     }

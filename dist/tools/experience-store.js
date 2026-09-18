@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { iterateDir } from "../paths.js";
 import { writeJsonAtomic } from "../atomic-fs.js";
+import { hashString } from "./fix.js";
 const EXPERIENCE_FILE = 'experience.json';
 /** Default empty experience bank. */
 function emptyBank() {
@@ -32,13 +33,16 @@ function stringArray(v) {
  * throw or emit NaN. Returns null for non-object entries; every required field
  * gets a safe default.
  */
-function normalizeEntry(raw) {
+function normalizeEntry(raw, index) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw))
         return null;
     const e = raw;
     const pattern = typeof e.pattern === 'string' ? e.pattern : '';
     const dimension = typeof e.dimension === 'string' ? e.dimension : '';
-    const id = typeof e.id === 'string' && e.id ? e.id : `exp-${Math.random().toString(36).slice(2, 8)}`;
+    // Deterministic id (content + position based) so a read→write cycle never
+    // churns random ids on entries that were hand-edited without one.
+    const derivedId = `exp-${hashString(`${index}|${pattern}|${dimension}`)}`;
+    const id = typeof e.id === 'string' && e.id ? e.id : derivedId;
     if (!pattern && !dimension)
         return null;
     const hitCount = typeof e.hitCount === 'number' && Number.isFinite(e.hitCount) ? e.hitCount : 0;
@@ -65,7 +69,7 @@ export function readExperienceBank(projectRoot) {
         const parsed = JSON.parse(content);
         if (parsed && Array.isArray(parsed.entries)) {
             const entries = parsed.entries
-                .map(normalizeEntry)
+                .map((raw, i) => normalizeEntry(raw, i))
                 .filter((e) => e !== null);
             return {
                 entries,
@@ -142,8 +146,11 @@ export function searchExperienceEntries(entries, query, opts = {}) {
 /**
  * Add or update an experience entry.
  *
- * An entry with an `id` that already exists, OR a new entry whose
- * `pattern`+`dimension` pair matches an existing entry, is treated as a HIT:
+ * An entry with an `id` that already exists is treated as an UPDATE + HIT:
+ * the caller-supplied fields replace the stored ones and the hitCount is
+ * incremented (lastHitAt refreshed) — this fulfills the documented
+ * "update a specific entry via add" contract. A NEW entry whose
+ * `pattern`+`dimension` pair matches an existing entry is treated as a HIT:
  * the matching entry's hitCount is incremented (lastHitAt refreshed) so
  * repeated encounters of the same pattern do not create duplicates. Otherwise
  * a fresh entry is appended with hitCount 1. Never mutates the input bank.
@@ -157,11 +164,14 @@ export function upsertExperience(bank, entry) {
         ? bank.entries.find((e) => e.id === entry.id)
         : bank.entries.find((e) => e.pattern === entry.pattern && e.dimension === entry.dimension);
     if (existing) {
-        const updated = {
-            ...existing,
-            hitCount: (existing.hitCount ?? 0) + 1,
-            lastHitAt: lastUpdated,
-        };
+        // Explicit-id updates REPLACE the editable fields (fulfilling the
+        // documented "update a specific entry via add" contract); a pattern+
+        // dimension HIT only bumps the hit metadata so a repeat encounter never
+        // overwrites the curated entry.
+        const byId = typeof entry.id === 'string' && entry.id.length > 0;
+        const updated = byId
+            ? { ...existing, ...entry, id: existing.id, hitCount: (existing.hitCount ?? 0) + 1, lastHitAt: lastUpdated }
+            : { ...existing, hitCount: (existing.hitCount ?? 0) + 1, lastHitAt: lastUpdated };
         return {
             bank: {
                 ...bank,
@@ -173,14 +183,16 @@ export function upsertExperience(bank, entry) {
             entryId: existing.id,
         };
     }
-    // Add new entry
+    // Add new entry. Spread the caller input FIRST so the store-generated
+    // `id`/`timestamp`/`hitCount`/`lastHitAt` always win — a hostile or
+    // malformed input can never forge its own identity or hit count.
     const id = entry.id || `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const newEntry = {
+        ...entry,
         id,
         timestamp: lastUpdated,
         hitCount: 1,
         lastHitAt: lastUpdated,
-        ...entry,
     };
     return {
         bank: {

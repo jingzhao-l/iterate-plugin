@@ -72,9 +72,13 @@ function validateRecordInput(args) {
 export function registerDefenseEventsTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_defense_events',
-        // List/counts never write; only `record` persists an event → read shapes
-        // join a parallel dispatch group.
-        isConcurrencySafe: (args) => args.operation !== 'record',
+        // List/counts never write; `record` persists an event and `clear` removes
+        // the persisted stream, so only the read shapes may join a parallel
+        // dispatch group.
+        isConcurrencySafe: (args) => {
+            const op = args.operation;
+            return op !== 'record' && op !== 'clear';
+        },
         description: 'Query, record, or clear defense events: precondition failures, rollbacks, invariant violations, ' +
             'and assumption falsifications. ' +
             'List/counts return events with descriptions, outcomes, and summary counts; ' +

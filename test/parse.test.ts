@@ -256,6 +256,38 @@ describe('convergence helpers', () => {
     assert.equal(computeConvergenceProgress(zero), 0)
     assert.ok(Number.isFinite(computeConvergenceProgress(empty)))
   })
+
+  it('reads the actual round number from a normal-mode single-round report', () => {
+    // Normal-mode aggregates ship ONLY the live round: rounds.length is 1, but
+    // the run may be on round 3. The round number must win over array length.
+    const report = normalizeReport({
+      convergence: { totalRounds: 5, findingsByRound: [4, 3, 2] },
+      rounds: [{ round: 3, findings: [{ dimension: 'x' }] }],
+      findings: [],
+    })
+    assert.equal(getCurrentRound(report), 3)
+    assert.equal(computeConvergenceProgress(report), Math.round((3 / 5) * 100))
+  })
+
+  it('uses the highest round number when a cumulative report has gaps', () => {
+    const report = normalizeReport({
+      convergence: { totalRounds: 5 },
+      rounds: [{ round: 1, findings: [] }, { round: 3, findings: [] }],
+      findings: [],
+    })
+    assert.equal(getCurrentRound(report), 3)
+    assert.equal(computeConvergenceProgress(report), Math.round((3 / 5) * 100))
+  })
+
+  it('falls back to array length when round numbers are missing', () => {
+    const report = normalizeReport({
+      convergence: { totalRounds: 5 },
+      rounds: [{ findings: [] }, { findings: [] }],
+      findings: [],
+    })
+    assert.equal(getCurrentRound(report), 2)
+    assert.equal(computeConvergenceProgress(report), Math.round((2 / 5) * 100))
+  })
 })
 
 // ─── severityStats / groupByDimension ────────────────────────────────────────

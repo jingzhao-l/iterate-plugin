@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { describe, it } from 'node:test'
-import { findSkillMd, findSkillRoot, isAllowedSkillDir, normalizeAttachment, normalizeAttachments } from '../src/tools/context.ts'
+import { findSkillMd, findSkillRoot, isAllowedSkillDir, normalizeAttachment, normalizeAttachments, registerContextTool } from '../src/tools/context.ts'
 
 /** Create a temp tree and return its root plus a cleanup fn. */
 function tempTree(): { root: string; cleanup: () => void } {
@@ -249,6 +249,58 @@ describe('isAllowedSkillDir', () => {
       mk(realDir)
       symlinkSync(realDir, join(root, 'alias'))
       assert.equal(isAllowedSkillDir(join(root, 'alias'), [root]), true)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_context skillDir realpath resolution', () => {
+  function captureTool(): (args: unknown) => Promise<unknown> {
+    let def: { execute: (a: unknown, e: unknown) => Promise<unknown> } | null = null
+    registerContextTool({
+      tools: { register: (d: never) => { def = d as typeof def } },
+    } as never)
+    if (!def) throw new Error('iterate_context was not registered')
+    const exec = { signal: new AbortController().signal }
+    return (args: unknown) => def!.execute(args, exec as never) as Promise<unknown>
+  }
+
+  it('reads through the SYMLINK-RESOLVED skillDir, not the raw link path', async () => {
+    const { root, cleanup } = tempTree()
+    try {
+      // SKILL.md lives in `real`; `alias` is a symlink to it.
+      const realDir = join(root, 'real')
+      writeSkill(realDir, '# Skill instructions')
+      symlinkSync(realDir, join(root, 'alias'))
+
+      const tool = captureTool()
+      const res = (await tool({ files: 'skill', path: root, skillDir: join(root, 'alias') })) as Record<string, unknown>
+      assert.equal(res.error, undefined)
+      assert.equal(res.found, true)
+      assert.match(res.skill as string, /Skill instructions/)
+      // The first search candidate is the VALIDATED realpath (closes the
+      // check-vs-read TOCTOU window) — never the raw symlink spelling.
+      assert.equal(res.skillSource, realpathSync(join(root, 'alias')))
+      assert.equal((res.searched as string[])[0], realpathSync(join(root, 'alias')))
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falls through to lower-priority candidates when skillDir is not an existing dir', async () => {
+    const { root, cleanup } = tempTree()
+    try {
+      writeSkill(root, '# Project skill')
+      const tool = captureTool()
+      const missingDir = resolve(join(root, 'does-not-exist'))
+      const res = (await tool({ files: 'skill', path: root, skillDir: missingDir })) as Record<string, unknown>
+      assert.equal(res.found, true)
+      // The invalid candidate is skipped entirely (never a search candidate)
+      // and the read still lands on a real SKILL.md via the fallback chain.
+      assert.equal((res.searched as string[]).includes(missingDir), false)
+      assert.ok(res.searched && (res.searched as string[]).length >= 2)
+      assert.ok(res.skill && (res.skill as string).length > 0)
     } finally {
       cleanup()
     }

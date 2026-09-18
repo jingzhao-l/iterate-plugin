@@ -306,7 +306,11 @@ export function registerContextTool(ctx) {
                         // skillDir point at arbitrary filesystem locations (e.g. /etc)
                         // whose contents would be injected wholesale into the context.
                         if (isAllowedSkillDir(args.skillDir, [projectRoot, PLUGIN_SRC_DIR])) {
-                            candidates.push(resolve(args.skillDir));
+                            // Read from the REAL (symlink-resolved) path that was actually
+                            // validated — never the raw path. Validating one path and then
+                            // reading through a different (swappable) symlink would leave a
+                            // check-vs-read TOCTOU gap; using the realpath here closes it.
+                            candidates.push(realpathSync(resolve(args.skillDir)));
                         }
                     }
                     catch {

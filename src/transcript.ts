@@ -142,6 +142,7 @@ export class ReviewTranscriptBuilder {
   private round = 0
   private maxRounds = 0
   private active = true
+  private stoppedReason: string | null = null
   private readonly rounds: LiveRound[] = []
   private readonly convergence: number[] = []
   private readonly globalFindings: TranscriptFinding[] = []
@@ -203,9 +204,14 @@ export class ReviewTranscriptBuilder {
     this.touch()
   }
 
-  /** End the run (stops the "active" pulsing in the UI). */
-  finish(): void {
+  /**
+   * End the run (stops the "active" pulsing in the UI). `reason` records WHY
+   * it ended, so a run stopped by max-rounds or validation is never mistaken
+   * for a live run NOR for a clean convergence.
+   */
+  finish(reason?: string): void {
     this.active = false
+    if (typeof reason === 'string' && reason.trim()) this.stoppedReason = reason.trim()
     this.touch()
   }
 
@@ -443,6 +449,7 @@ export class ReviewTranscriptBuilder {
       checkpoint: this.checkpoint,
       timeline: this.timeline,
       nudge: this.nudge,
+      stoppedReason: this.stoppedReason,
       approval: {
         active: this.approval !== 'allow',
         policy: this.approval,

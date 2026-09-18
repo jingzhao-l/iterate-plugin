@@ -9,6 +9,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { iterateDir } from '../paths.ts'
 import { writeJsonAtomic } from '../atomic-fs.ts'
+import { hashString } from './fix.ts'
 import type { ExperienceBank, ExperienceEntry } from '../types.ts'
 
 const EXPERIENCE_FILE = 'experience.json'
@@ -38,12 +39,15 @@ function stringArray(v: unknown): string[] {
  * throw or emit NaN. Returns null for non-object entries; every required field
  * gets a safe default.
  */
-function normalizeEntry(raw: unknown): ExperienceEntry | null {
+function normalizeEntry(raw: unknown, index: number): ExperienceEntry | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const e = raw as Record<string, unknown>
   const pattern = typeof e.pattern === 'string' ? e.pattern : ''
   const dimension = typeof e.dimension === 'string' ? e.dimension : ''
-  const id = typeof e.id === 'string' && e.id ? e.id : `exp-${Math.random().toString(36).slice(2, 8)}`
+  // Deterministic id (content + position based) so a read→write cycle never
+  // churns random ids on entries that were hand-edited without one.
+  const derivedId = `exp-${hashString(`${index}|${pattern}|${dimension}`)}`
+  const id = typeof e.id === 'string' && e.id ? e.id : derivedId
   if (!pattern && !dimension) return null
   const hitCount = typeof e.hitCount === 'number' && Number.isFinite(e.hitCount) ? e.hitCount : 0
   return {
@@ -70,7 +74,7 @@ export function readExperienceBank(projectRoot: string): ExperienceBank {
     const parsed = JSON.parse(content) as Partial<ExperienceBank>
     if (parsed && Array.isArray(parsed.entries)) {
       const entries = parsed.entries
-        .map(normalizeEntry)
+        .map((raw, i) => normalizeEntry(raw, i))
         .filter((e): e is ExperienceEntry => e !== null)
       return {
         entries,
@@ -167,8 +171,11 @@ export type ExperienceEntryInput = Omit<
 /**
  * Add or update an experience entry.
  *
- * An entry with an `id` that already exists, OR a new entry whose
- * `pattern`+`dimension` pair matches an existing entry, is treated as a HIT:
+ * An entry with an `id` that already exists is treated as an UPDATE + HIT:
+ * the caller-supplied fields replace the stored ones and the hitCount is
+ * incremented (lastHitAt refreshed) — this fulfills the documented
+ * "update a specific entry via add" contract. A NEW entry whose
+ * `pattern`+`dimension` pair matches an existing entry is treated as a HIT:
  * the matching entry's hitCount is incremented (lastHitAt refreshed) so
  * repeated encounters of the same pattern do not create duplicates. Otherwise
  * a fresh entry is appended with hitCount 1. Never mutates the input bank.
@@ -186,11 +193,14 @@ export function upsertExperience(
     : bank.entries.find((e) => e.pattern === entry.pattern && e.dimension === entry.dimension)
 
   if (existing) {
-    const updated: ExperienceEntry = {
-      ...existing,
-      hitCount: (existing.hitCount ?? 0) + 1,
-      lastHitAt: lastUpdated,
-    }
+    // Explicit-id updates REPLACE the editable fields (fulfilling the
+    // documented "update a specific entry via add" contract); a pattern+
+    // dimension HIT only bumps the hit metadata so a repeat encounter never
+    // overwrites the curated entry.
+    const byId = typeof entry.id === 'string' && entry.id.length > 0
+    const updated: ExperienceEntry = byId
+      ? { ...existing, ...entry, id: existing.id, hitCount: (existing.hitCount ?? 0) + 1, lastHitAt: lastUpdated }
+      : { ...existing, hitCount: (existing.hitCount ?? 0) + 1, lastHitAt: lastUpdated }
     return {
       bank: {
         ...bank,
@@ -203,14 +213,16 @@ export function upsertExperience(
     }
   }
 
-  // Add new entry
+  // Add new entry. Spread the caller input FIRST so the store-generated
+  // `id`/`timestamp`/`hitCount`/`lastHitAt` always win — a hostile or
+  // malformed input can never forge its own identity or hit count.
   const id = entry.id || `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const newEntry: ExperienceEntry = {
+    ...entry,
     id,
     timestamp: lastUpdated,
     hitCount: 1,
     lastHitAt: lastUpdated,
-    ...entry,
   }
 
   return {

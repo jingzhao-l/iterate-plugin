@@ -72,9 +72,12 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
   ctx.tools.register(
     defineTool({
       name: 'iterate_experience',
-      // List/search/get never write; only `add` upserts the bank → read shapes
-      // join a parallel dispatch group.
-      isConcurrencySafe: (args) => (args as { operation?: unknown }).operation !== 'add',
+      // List/search/get never write; `add` upserts the bank and `remove`
+      // rewrites it → only the read shapes may join a parallel dispatch group.
+      isConcurrencySafe: (args) => {
+        const op = (args as { operation?: unknown }).operation
+        return op !== 'add' && op !== 'remove'
+      },
       description:
         'Query or extend the experience bank: browse/search historical fixes and patterns, ' +
         'or record a new verified fix (operation:"add"). ' +

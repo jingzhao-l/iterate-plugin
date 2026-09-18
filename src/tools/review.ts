@@ -265,9 +265,22 @@ export function registerReviewTool(ctx: { tools: { register: (def: ReturnType<ty
           const coverageEnabled = config.reviewer?.coverage_validation !== false
           let coverage: CoverageResult | null = null
           if (coverageEnabled) {
-            const assigned = collectScopeFiles(projectRoot, {
-              scope: config.review?.scope === 'changed-only' ? 'changed-only' : 'full',
-            })
+            // Build the assigned inventory the SAME way `plan` builds it: a
+            // changed-only scope uses the resolved git-diff file set, and
+            // falls back to the FULL walk when git is unavailable or nothing
+            // changed (mirrors buildReviewPlan's effective-scope decision), so
+            // the coverage ratio reflects the files reviewers were actually
+            // told to read — never a vacuous 1.0 on an empty inventory.
+            let assigned: string[]
+            if (config.review?.scope === 'changed-only') {
+              const gitScope = await resolveChangedFiles(projectRoot, config.git?.target_branch ?? 'main')
+              assigned =
+                gitScope.changedFiles.length > 0
+                  ? collectScopeFiles(projectRoot, { scope: 'changed-only', changedFiles: gitScope.changedFiles })
+                  : collectScopeFiles(projectRoot, { scope: 'full' })
+            } else {
+              assigned = collectScopeFiles(projectRoot, { scope: 'full' })
+            }
             const readFiles = Array.isArray((source as unknown as { readFiles?: unknown }).readFiles)
               ? ((source as unknown as { readFiles?: unknown }).readFiles as string[])
               : null

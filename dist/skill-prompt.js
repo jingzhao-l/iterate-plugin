@@ -94,10 +94,11 @@ for (let r = 1; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — finding NEW issues only')
   let agg = null
   let schemaInvalid = false
-  let retries = 0
+  let attempts = 0
   do {
+    attempts += 1
     // Schema validation retry: on the 2nd+ pass, nudge reviewers toward strict JSON.
-    const nudge = retries > 0
+    const nudge = attempts > 1
       ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
       : ''
     const raw = await parallel(dims.map(dim => () => {
@@ -134,11 +135,15 @@ for (let r = 1; r <= maxRounds; r++) {
     schemaInvalid = agg && agg.schemaValidation && agg.schemaValidation.length > 0
       ? agg.schemaValidation[agg.schemaValidation.length - 1].valid === false
       : false
-    if (schemaInvalid && retries < 2) {
-      retries += 1
-      log('retry ' + retries + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
+    if (schemaInvalid && attempts < 3) {
+      log('retry ' + attempts + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
     }
-  } while (schemaInvalid && retries <= 2)
+  } while (schemaInvalid && attempts < 3)
+  if (schemaInvalid) {
+    // Bounded exit: never loop forever. Surface the failure so the run's
+    // final summary can explain WHY the round was inconclusive.
+    log('round ' + r + ' output STILL schema-invalid after 3 attempts — marking round inconclusive (NOT converged)')
+  }
   // Feed the DEDUPED + already-filtered set back (not raw findings) so the known
   // list stays bounded and reviewers never see the same issue twice.
   if (agg && agg.report && Array.isArray(agg.report.findings)) known = agg.report.findings
@@ -269,6 +274,7 @@ let fixedCount = (checkpoint && typeof checkpoint.fixedCount === 'number') ? che
 let converged = false
 let abortedByValidation = false
 let failedCommands = []
+let configErrors = []          // validation commands NOT in validation.commands (config gap, no rollback)
 const fixRecords = []        // observatory fix records collected round by round
 
 // Read any steering nudge intended for this run's reviewers.
@@ -288,10 +294,11 @@ for (let r = startRound; r <= maxRounds; r++) {
   )
   let agg = null
   let schemaInvalid = false
-  let retries = 0
+  let attempts = 0
   do {
+    attempts += 1
     // Schema validation retry: on the 2nd+ pass, nudge reviewers toward strict JSON.
-    const nudge = retries > 0
+    const nudge = attempts > 1
       ? '\\nSTRICT JSON REQUIRED: your previous output failed schema validation. Return ONLY a JSON object {"findings":[...]} where EVERY finding has dimension, file, line (non-negative integer; 0 = whole-file), severity (critical|high|medium|low), summary, failure_scenario, suggested_fix, is_atomic (boolean).'
       : ''
     const raw = await parallel(dims.map(dim => () => {
@@ -327,11 +334,15 @@ for (let r = startRound; r <= maxRounds; r++) {
     schemaInvalid = agg && agg.schemaValidation && agg.schemaValidation.length > 0
       ? agg.schemaValidation[agg.schemaValidation.length - 1].valid === false
       : false
-    if (schemaInvalid && retries < 2) {
-      retries += 1
-      log('retry ' + retries + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
+    if (schemaInvalid && attempts < 3) {
+      log('retry ' + attempts + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
     }
-  } while (schemaInvalid && retries <= 2)
+  } while (schemaInvalid && attempts < 3)
+  if (schemaInvalid) {
+    // Bounded exit: never loop forever. Surface the failure so the run's
+    // final summary can explain WHY the round was inconclusive.
+    log('round ' + r + ' output STILL schema-invalid after 3 attempts — marking round inconclusive (NOT converged)')
+  }
   const findings = (agg && agg.report && agg.report.findings) ? agg.report.findings : thisRound.findings
   const atomic = findings.filter(f => f.is_atomic === true)
   const remaining = findings.filter(f => f.is_atomic !== true)
@@ -386,18 +397,33 @@ for (let r = startRound; r <= maxRounds; r++) {
     if (seenKeys.indexOf(key) < 0) { architectural.push(f); seenKeys.push(key) }
   }
 
-  // Validate every configured command; on ANY failure roll back this round's fixes.
+  // Validate every configured command; on ANY *executed* failure roll back this
+  // round's fixes. iterate_validate returns \`allowed:false\` + \`rejectReason\`
+  // when a command is NOT in validation.commands (a config gap, NOT a code
+  // failure) — those abort the run WITHOUT rolling back (the code changes are
+  // fine; the trust list just needs fixing).
   const valRes = await agent(
     'Read iterate.config.yaml validation.commands, then call iterate_validate({ command: <cmd> }) for EACH configured command ' +
-    '(one tool call per command). Return all results as {command, exitCode} entries.',
+    '(one tool call per command). Return all results as {command, exitCode, allowed, rejectReason} entries — include \`allowed\` and \`rejectReason\` exactly as returned by iterate_validate (allowed:false means the command is not in validation.commands).',
     Object.assign({ label: 'validate:r' + r, phase: 'validate', schema: {
       type: 'object', additionalProperties: false,
       properties: {
-        results: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { command: { type: 'string' }, exitCode: { type: 'integer' } }, required: ['command', 'exitCode'] } }
+        results: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { command: { type: 'string' }, exitCode: { type: 'integer' }, allowed: { type: 'boolean' }, rejectReason: { type: 'string' } }, required: ['command', 'exitCode'] } }
       },
       required: ['results'] } }, backend)
   )
-  failedCommands = (valRes && Array.isArray(valRes.results)) ? valRes.results.filter(v => v.exitCode !== 0).map(v => v.command) : []
+  const valResults = (valRes && Array.isArray(valRes.results)) ? valRes.results : []
+  configErrors = valResults.filter(v => v.allowed === false).map(v => v.rejectReason || (v.command + ' was rejected'))
+  failedCommands = valResults.filter(v => !(v.allowed === false) && v.exitCode !== 0).map(v => v.command)
+  if (configErrors.length > 0) {
+    log('round ' + r + ' validation CONFIG error (not in validation.commands): ' + configErrors.join(' | ') + ' — aborting WITHOUT rollback (code changes are kept; the command trust list needs updating)')
+    abortedByValidation = true
+    await agent(
+      'Call iterate_decision_log({operation:"append", type:"round_failed", round:' + r + ', data:{configErrors:' + JSON.stringify(configErrors) + ', rolledBack:0, reason:"command not in validation.commands"}})',
+      Object.assign({ label: 'log:configError:r' + r }, backend)
+    )
+    break
+  }
   if (failedCommands.length > 0) {
     log('round ' + r + ' validation FAILED on: ' + failedCommands.join(', ') + ' — rolling back this round')
     abortedByValidation = true
@@ -458,17 +484,23 @@ if (!abortedByValidation) {
 }
 // Persist the run's observatory transcript (threads, trend, fixes, checkpoint)
 // so the client observatory panel reflects the run. Writes ONLY .iterate/transcript.json.
-const obsCheckpoint = abortedByValidation ? null : {
-  mode: 'normal',
-  round: rounds.length,
-  maxRounds: maxRounds,
-  fixedCount: fixedCount,
-  resumeCount: effectiveResumeCount,
-}
-await agent(
-  'Call iterate_transcript({operation:"capture", mode:"normal", goal:' + JSON.stringify(plan.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + rounds.length + ', findingsByRound:' + JSON.stringify(rounds.map(rr => (rr.findings && rr.findings.length) ? rr.findings.length : 0)) + ', fixes:' + JSON.stringify(fixRecords) + ', checkpoint:' + JSON.stringify(obsCheckpoint) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
-  { label: 'transcript:capture' }
-)
+// The checkpoint survives on disk for aborted runs (that is how resumption
+  // works), so the transcript must mirror that reality — a null checkpoint here
+  // would hide the very thing F5 is meant to resume. Reflect what is on disk.
+  const obsCheckpoint = {
+    mode: 'normal',
+    round: rounds.length,
+    maxRounds: maxRounds,
+    fixedCount: fixedCount,
+    resumeCount: effectiveResumeCount,
+  }
+  const stopReason = abortedByValidation
+    ? (configErrors.length > 0 ? 'aborted_by_config' : 'aborted_by_validation')
+    : (converged ? 'converged' : 'max_rounds_reached')
+  await agent(
+    'Call iterate_transcript({operation:"capture", mode:"normal", goal:' + JSON.stringify(plan.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + rounds.length + ', findingsByRound:' + JSON.stringify(rounds.map(rr => (rr.findings && rr.findings.length) ? rr.findings.length : 0)) + ', stoppedReason:"' + stopReason + '", fixes:' + JSON.stringify(fixRecords) + ', checkpoint:' + JSON.stringify(obsCheckpoint) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
+    { label: 'transcript:capture' }
+  )
 return {
   mode: 'normal',
   goal: plan.goal,
@@ -477,6 +509,8 @@ return {
   converged: converged,
   abortedByValidation: abortedByValidation,
   failedCommands: failedCommands,
+  configErrors: configErrors,
+  stoppedReason: stopReason,
   findingsFixed: fixedCount,
   remainingArchitecturalCount: architectural.length,
   remainingArchitectural: architectural,
@@ -494,10 +528,10 @@ return {
 Key rules for normal mode:
 - Fixers are the ONLY agents allowed to write files, and they must go through \`iterate_fix\` — never edit files directly. That is what gives every change a backup, a diff, and a rollback path. Reviewers read only. Architectural findings are reported, never auto-fixed.
 - Aggregate the current round deterministically (\`report.findings\`) before fixing, so fixes act on deduped/filtered/sorted findings.
-- **Schema validation & retry**: when \`reviewer.output_schema_validation\` is on (default), retry the round's reviewers up to 2 times when \`aggregate\` reports \`schemaValidation\` valid=false for it, then re-aggregate. Never forward schema-invalid findings into \`iterate_fix\`.
+- **Schema validation & retry**: when \`reviewer.output_schema_validation\` is on (default), retry the round's reviewers up to 2 times (3 attempts total) when \`aggregate\` reports \`schemaValidation\` valid=false for it, then re-aggregate. Never forward schema-invalid findings into \`iterate_fix\`. If the output is still schema-invalid after the 3rd attempt, mark the round inconclusive (never report it as a clean convergence).
 - Apply atomic fixes **per file**: one fixer agent handles all findings for a given file serially (so the same file is never edited concurrently); different files are fixed in parallel.
 - **Resume**: load the checkpoint first; if a previous run left one, continue from \`checkpoint.round + 1\` (its \`fixedCount\` and deduped \`findings\` are carried forward).
-- **Validate after every round** of fixes; on ANY validation failure, roll back the round's fixes via \`iterate_rollback\` and stop (the checkpoint is left in place so the run can be resumed).
+- **Validate after every round** of fixes; on ANY validation failure, roll back the round's fixes via \`iterate_rollback\` and stop (the checkpoint is left in place so the run can be resumed). EXCEPTION: \`iterate_validate\` returning \`allowed:false\` means the command is simply not in \`validation.commands\` — a config gap, not broken code. In that case abort WITHOUT rolling back the round's fixes and surface the missing command + file so the user can fix the trust list.
 - **Checkpoint after every round**; clear it only when the iteration completes cleanly.
 - Stop when a round produces nothing to fix (converged) or maxReviewRounds is reached.
 - Every round, every rollback, and the final report go to the append-only decision log.

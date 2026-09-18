@@ -5,6 +5,102 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.4] - 2026-09-18
+
+### Changed
+
+- **Upgraded DSH runtime deps to `0.1.6-alpha.1`** — `@deepseek-ai/dsh-tools` /
+  `@deepseek-ai/dsh-util-values` (deps) and `@deepseek-ai/dsh-jobs` /
+  `@deepseek-ai/dsh-session` / `@deepseek-ai/dsh-agent` (devDeps) moved from
+  `0.1.5-rc.2` to `0.1.6-alpha.1` (dsh-jobs peer requires dsh-agent, so the
+  agent runtime is now a declared devDependency), with a clean reinstall.
+  `dsh.compatibility.dshReleases` now declares `0.1.6-alpha.1: compatible`.
+- **Adopted `0.1.6-alpha.1` `PreToolDecision.cancel` + `deny.info`** in the
+  approval gate (`src/session-hooks.ts`) — a destructive iterate call whose
+  caller already aborted before dispatch now resolves to the canonical
+  `{kind:'cancel'}` (never prompting for consent or running `next()`'s allow on
+  a dead request), and every policy denial now carries structured
+  `ToolErrorInfo` (`name: iterate-approval-gate`, `code: APPROVAL_DENIED`, plus
+  the human-readable `reason`) so durable projections can route it distinctly
+  from a normal tool failure.
+- **Schema-validation retry is now bounded (skill-prompt)** — the two `do…while`
+  reviewer-retry loops (dry-run and normal modes) incremented a `retries`
+  counter only while `< 2` but looped while `<= 2`, so the 3rd pass stayed true
+  forever: a persistently schema-invalid reviewer output caused an INFINITE
+  loop. Both loops now use an unconditional attempt counter and exit after 3
+  attempts, logging a visible "still schema-invalid — round inconclusive" line
+  (never reporting a broken round as a clean convergence).
+
+### Added
+
+- **`stoppedReason` in the observatory manifest** — `iterate_transcript
+  capture` accepts an explicit `stoppedReason` (`converged` /
+  `max_rounds_reached` / `aborted_by_validation` / `aborted_by_config`), and
+  derives `converged` / `max_rounds_reached` when omitted; the builder/finish
+  persist and rehydrate it; the client observatory badge now renders the reason
+  (`已收敛（无新发现）` / `达到轮数上限` / `验证失败后回滚停止` /
+  `验证命令不在白名单（配置需修复）`) instead of a bare "运行中" for dead runs.
+- **Checkpoint/transcript consistency on validation abort** — the normal-mode
+  final transcript no longer records `checkpoint: null` for an aborted run;
+  since the checkpoint is intentionally left on disk for resumption (F5), the
+  transcript now mirrors the on-disk checkpoint so the panel and the resume
+  affordance agree.
+- **Config-gap validation abort (UX-5)** — the normal-mode validator schema now
+  carries `allowed` + `rejectReason` from `iterate_validate`. A command NOT in
+  `validation.commands` (`allowed:false`) is a config gap, NOT broken code: the
+  run aborts WITHOUT rolling back the round's fixes and reports
+  `configErrors` + `aborted_by_config` so the user can fix the trust list.
+  Real command failures still roll back via `iterate_rollback` as before.
+
+### Fixed
+
+- **Normal-mode round counter stuck at 1 in the client** (lib/parse.js) —
+  `getCurrentRound` / `computeConvergenceProgress` used `report.rounds.length`,
+  but normal-mode aggregates ship ONLY the live round (one element), so a run
+  on round 3 displayed "Round 1". Both now use the highest per-round `round`
+  number (correct for both normal single-round and dry-run cumulative reports),
+  with array-length fallback for missing round fields.
+- **Defense/experience concurrency + store semantics** — `captureTool` writers
+  now declare `isConcurrencySafe` on the store mutation paths; the
+  experience/defense stores apply field spreads AFTER the defaults/normalizers
+  so hand-edited values cannot clobber invariants; adding an entry with an
+  explicit `id` updates that entry (documentation contract "update a specific
+  entry via add") while hitCount/timestamp/lastHitAt always stay store-owned;
+  deterministic ids are derived for `iterate_defense_events newest-first`
+  sorting and hand-edited malformed entries.
+- **Meta-review changed-only coverage** mirrors the plan fallback — when
+  `review.scope: changed-only` yields an empty diff, `meta-review`'s
+  coverage-gate now falls back to a full review inventory exactly like the plan
+  phase does (integration-tested against a real git repo, including a
+  git-unavailable fallback).
+- **Transcript nudge fallback preserves run identity** — a malformed persisted
+  manifest no longer loses `mode`/`taskMode`/`goal`/`maxRounds`; a missing
+  manifest still defaults to a fresh normal-mode run.
+- **`iterate_triage` backup cap** — `pruneOldConfigBackups` keeps only the
+  newest `MAX_TRIAGE_BACKUPS` config backups (documented behavior) instead of
+  never removing the timestamps.
+- **Prune sweeps** — `sweepExperienceBank` / `sweepDefenseEvents` keep the
+  newest `MAX_EXPERIENCE_ENTRIES` / drop old defense events and recompute
+  counts, wired into the inspect/execute/render paths.
+- **Decision-log rewrite TOCTOU** — pruning the decision log now re-reads and
+  compare-and-appends for any concurrent fresh entries, with a bounded retry
+  (`MAX_LOG_REWRITE_RETRIES = 3`); a rewrite that races a new entry no longer
+  silently drops it.
+
+### Tests
+
+- Added 34 tests: bounded schema-retry termination is prompt-level; parse round
+  counter (single-round normal, gapped cumulative, missing-round fallback);
+  transcript `stoppedReason` (explicit/derived/empty, rehydrate preservation,
+  capture tool round-trips); session-hooks `cancel` (pre-dispatch abort
+  short-circuits, live calls unaffected) + `deny.info` structure; meta-review
+  changed-only coverage with a real git repo; defense/experience concurrency +
+  deterministic ids + explicit-id update + forged metadata; triage backup cap;
+  prune sweeps + decision-log rewrite; nudge identity fallback; context
+  `skillDir` realpath resolution (environment-independent assertions). 610 tests
+  total, typecheck + typecheck:client + build + build:client clean, full suite
+  green.
+
 ## [3.5.3] - 2026-09-16
 
 ### Added

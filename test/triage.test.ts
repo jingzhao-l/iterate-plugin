@@ -13,6 +13,8 @@ import {
   readKnownIntentional,
   backupSuffix,
   registerTriageTool,
+  pruneOldConfigBackups,
+  MAX_TRIAGE_BACKUPS,
 } from '../src/tools/triage.ts'
 import type { KnownIntentional } from '../src/types.ts'
 
@@ -316,5 +318,58 @@ describe('iterate_triage execute', () => {
     const blocks = tool.render({ operation: 'list' }, { operation: 'list', count: 0, entries: [] })
     assert.equal(blocks[0]!.type, 'text')
     assert.match(blocks[0]!.text, /"operation": "list"/)
+  })
+})
+
+describe('pruneOldConfigBackups', () => {
+  it('deletes timestamped config backups beyond the newest keep, newest-first', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-triage-prune-'))
+    const configPath = join(dir, 'iterate.config.yaml')
+    try {
+      writeFileSync(configPath, 'goal: "g"\n', 'utf-8')
+      for (let i = 1; i <= 9; i++) {
+        const stamp = `2026-08-0${i}T00-00-00-000Z`
+        writeFileSync(join(dir, `iterate.config.yaml.bak-${stamp}`), 'old', 'utf-8')
+      }
+      // Unrelated sibling files and OTHER config names are never touched.
+      writeFileSync(join(dir, 'other.config.yaml.bak-2026-08-01T00-00-00-000Z'), 'x', 'utf-8')
+      writeFileSync(join(dir, 'README.md'), 'x', 'utf-8')
+
+      const removed = pruneOldConfigBackups(configPath, MAX_TRIAGE_BACKUPS)
+      assert.equal(removed.length, 4) // 9 backups − keep 5
+      const remaining = readdirSync(dir).filter((f) => f.startsWith('iterate.config.yaml.bak-'))
+      assert.equal(remaining.length, MAX_TRIAGE_BACKUPS)
+      // The 5 NEWEST survive (lexicographic ISO sort = oldest stamps removed).
+      assert.deepEqual(remaining, [
+        'iterate.config.yaml.bak-2026-08-05T00-00-00-000Z',
+        'iterate.config.yaml.bak-2026-08-06T00-00-00-000Z',
+        'iterate.config.yaml.bak-2026-08-07T00-00-00-000Z',
+        'iterate.config.yaml.bak-2026-08-08T00-00-00-000Z',
+        'iterate.config.yaml.bak-2026-08-09T00-00-00-000Z',
+      ])
+      assert.equal(existsSync(join(dir, 'other.config.yaml.bak-2026-08-01T00-00-00-000Z')), true)
+      assert.equal(existsSync(join(dir, 'README.md')), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is a no-op when at or under the keep bound (and errors never surface)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-triage-prune-'))
+    const configPath = join(dir, 'iterate.config.yaml')
+    try {
+      writeFileSync(configPath, 'goal: "g"\n', 'utf-8')
+      for (let i = 1; i <= 3; i++) {
+        writeFileSync(join(dir, `iterate.config.yaml.bak-2026-08-0${i}T00-00-00-000Z`), 'old', 'utf-8')
+      }
+      assert.deepEqual(pruneOldConfigBackups(configPath, MAX_TRIAGE_BACKUPS), [])
+      // Missing config dir → best-effort no-op, returns [] without throwing.
+      assert.deepEqual(
+        pruneOldConfigBackups(join(dir, 'does-not-exist', 'iterate.config.yaml')),
+        [],
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

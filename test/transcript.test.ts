@@ -255,6 +255,55 @@ describe('ReviewTranscriptBuilder', () => {
     }).serialize()
     assert.equal(junk.taskMode, 'iterate')
   })
+
+  it('finish(reason) records stoppedReason and leaves the run finished', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', mode: 'normal', now: fixedClock() })
+    b.roundStart(1, 3)
+    b.snapshotConvergence(1, 2)
+    b.finish('max_rounds_reached')
+    const m = b.serialize()
+    assert.equal(m.active, false)
+    assert.equal(m.stoppedReason, 'max_rounds_reached')
+
+    // A plain finish() carries no reason; stoppedReason stays null.
+    const b2 = new ReviewTranscriptBuilder({ project: '/proj', mode: 'normal', now: fixedClock() })
+    b2.finish()
+    assert.equal(b2.serialize().active, false)
+    assert.equal(b2.serialize().stoppedReason, null)
+  })
+
+  it('rehydrateBuilder preserves stoppedReason when re-persisted', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-reason-'))
+    try {
+      const run = captureTranscriptTool()
+      const b = new ReviewTranscriptBuilder({ project: root, mode: 'normal', now: fixedClock() })
+      b.roundStart(1, 2)
+      b.snapshotConvergence(1, 3)
+      b.finish('aborted_by_validation')
+      const dir = join(root, '.iterate')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'transcript.json'), JSON.stringify(b.serialize()), 'utf-8')
+
+      // A nudge rehydrates the persisted manifest and must not drop the reason.
+      const res = await run({
+        operation: 'nudge',
+        path: root,
+        text: 'keep going',
+      })
+      const persisted = res && typeof res === 'object'
+        ? (res as Record<string, unknown>).transcript as Record<string, unknown>
+        : null
+      assert.ok(persisted)
+      assert.equal(persisted.active, false)
+      assert.equal(persisted.stoppedReason, 'aborted_by_validation')
+      assert.equal(
+        (persisted.nudge as { text?: string } | null)?.text,
+        'keep going',
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('markFixRolledBackInTranscript', () => {
@@ -334,6 +383,53 @@ describe('iterate_transcript nudge execute', () => {
     }
   })
 
+  it('nudge fallback keeps the ORIGINAL run identity (mode/taskMode/goal/maxRounds)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      // A dry-run/code run whose manifest is too malformed to rehydrate must NOT
+      // degrade into a `normal` run — the fallback preserves the identity.
+      writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify({
+        version: 1,
+        mode: 'dry-run',
+        taskMode: 'code',
+        goal: 'audit auth paths',
+        maxRounds: 2,
+        rounds: [null],
+        convergence: [1],
+        fixes: [],
+      }), 'utf-8')
+      const res = (await tool({ operation: 'nudge', path: root, text: 'focus on auth' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const manifest = res.transcript as {
+        mode: 'dry-run' | 'normal'
+        taskMode: 'code' | 'iterate'
+        goal: string
+        maxRounds: number
+      }
+      assert.equal(manifest.mode, 'dry-run')
+      assert.equal(manifest.taskMode, 'code')
+      assert.equal(manifest.goal, 'audit auth paths')
+      assert.equal(manifest.maxRounds, 2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('a missing manifest nudge defaults to a fresh normal-mode run', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      const res = (await tool({ operation: 'nudge', path: root, text: 'go' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const manifest = res.transcript as { mode: 'dry-run' | 'normal' }
+      assert.equal(manifest.mode, 'normal')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('nudge surfaces a persistence failure as a structured error', async () => {
     const tool = captureTranscriptTool()
     const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
@@ -343,6 +439,82 @@ describe('iterate_transcript nudge execute', () => {
       const res = (await tool({ operation: 'nudge', path: root, text: 'x' })) as Record<string, unknown>
       assert.equal(res.updated, false)
       assert.match(res.error as string, /persist transcript/i)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('capture records an explicit stoppedReason and closes the run', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-capture-'))
+    try {
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        mode: 'normal',
+        goal: 'fix it',
+        maxRounds: 3,
+        roundsExecuted: 2,
+        stoppedReason: 'aborted_by_validation',
+        findingsByRound: [2, 1],
+        rounds: [
+          { round: 1, findings: [finding({ file: 'src/a.ts', summary: 'x' })] },
+          { round: 2, findings: [] },
+        ],
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const manifest = res.transcript as { active: boolean; stoppedReason: string | null }
+      assert.equal(manifest.active, false)
+      assert.equal(manifest.stoppedReason, 'aborted_by_validation')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('capture derives converged / max_rounds_reached when no explicit reason is given', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-capture-'))
+    try {
+      // Trailing 0 → converged.
+      const converged = (await tool({
+        operation: 'capture',
+        path: root,
+        mode: 'dry-run',
+        roundsExecuted: 2,
+        findingsByRound: [2, 0],
+        rounds: [
+          { round: 1, findings: [finding({ file: 'src/a.ts', summary: 'x' })] },
+          { round: 2, findings: [] },
+        ],
+      })) as { transcript: { active: boolean; stoppedReason: string | null } }
+      assert.equal(converged.transcript.active, false)
+      assert.equal(converged.transcript.stoppedReason, 'converged')
+
+      // Work done but never trended to 0 → max_rounds_reached.
+      const capped = (await tool({
+        operation: 'capture',
+        path: root,
+        mode: 'normal',
+        roundsExecuted: 3,
+        findingsByRound: [2, 1, 3],
+        rounds: [
+          { round: 1, findings: [finding({ file: 'src/a.ts', summary: 'x' })] },
+        ],
+      })) as { transcript: { active: boolean; stoppedReason: string | null } }
+      assert.equal(capped.transcript.active, false)
+      assert.equal(capped.transcript.stoppedReason, 'max_rounds_reached')
+
+      // No rounds recorded → still active, no reason.
+      const fresh = (await tool({
+        operation: 'capture',
+        path: root,
+        mode: 'dry-run',
+        roundsExecuted: 0,
+        findingsByRound: [],
+        rounds: [],
+      })) as { transcript: { active: boolean; stoppedReason: string | null } }
+      assert.equal(fresh.transcript.active, true)
+      assert.equal(fresh.transcript.stoppedReason, null)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

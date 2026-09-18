@@ -349,6 +349,8 @@ export interface TranscriptManifest {
   }
   /** v3.0: task_mode indicator from harness status */
   taskMode?: 'code' | 'iterate' | null
+  /** Why the run ended: converged / max_rounds_reached / aborted_by_validation. */
+  stoppedReason?: string | null
 }
 
 // ─── v3.0: Quality Gate ──────────────────────────────────────────────────────

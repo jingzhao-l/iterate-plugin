@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { iterateDir } from "../paths.js";
 import { writeJsonAtomic } from "../atomic-fs.js";
+import { hashString } from "./fix.js";
 const DEFENSE_EVENTS_FILE = 'defense-events.json';
 /** Valid defense event types (must stay in sync with DefenseEventType). */
 const VALID_EVENT_TYPES = new Set([
@@ -46,16 +47,20 @@ const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
  * `timestamp`/`round`/`description`/`defense`/`outcome`/`severity` — readers
  * (list sort by timestamp, render label selection) must never crash or emit
  * NaN for those. Returns null when the entry is not an object or has no usable
- * `type`; otherwise fills every required field with a safe default.
+ * `type`; otherwise fills every required field with a safe default. An event
+ * missing its `id` gets a DETERMINISTIC id derived from its content and
+ * position (never a random one) so a read→write cycle cannot silently churn
+ * ids on every mutation.
  */
-function normalizeEvent(raw) {
+function normalizeEvent(raw, index) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw))
         return null;
     const e = raw;
     if (typeof e.type !== 'string' || !VALID_EVENT_TYPES.has(e.type))
         return null;
+    const derivedId = `def-${hashString(`${index}|${String(e.timestamp ?? '')}|${e.type}|${String(e.description ?? '')}|${String(e.defense ?? '')}`)}`;
     return {
-        id: typeof e.id === 'string' && e.id ? e.id : `def-${Math.random().toString(36).slice(2, 8)}`,
+        id: typeof e.id === 'string' && e.id ? e.id : derivedId,
         timestamp: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : new Date().toISOString(),
         round: typeof e.round === 'number' && Number.isFinite(e.round) ? Math.floor(e.round) : 0,
         type: e.type,
@@ -82,7 +87,7 @@ export function readDefenseEvents(projectRoot) {
         const parsed = JSON.parse(content);
         if (parsed && Array.isArray(parsed.events)) {
             const events = parsed.events
-                .map(normalizeEvent)
+                .map((raw, i) => normalizeEvent(raw, i))
                 .filter((e) => e !== null);
             const counts = computeCounts(events);
             return {
@@ -140,11 +145,13 @@ export function clearDefenseEvents(projectRoot) {
 }
 /** Add a defense event to the stream. */
 export function addDefenseEvent(stream, event) {
-    const id = `def-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Spread the caller-shaped event FIRST so the store-generated `id` and
+    // `timestamp` always win — a caller-supplied id/timestamp must never
+    // override the stream's own identity fields.
     const newEvent = {
-        id,
-        timestamp: new Date().toISOString(),
         ...event,
+        id: `def-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
     };
     // Always recompute from the events array instead of mutating a possibly
     // stale/malformed persisted `counts` object — guarantees the stream counts

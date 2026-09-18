@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import yaml from 'js-yaml';
 import { resolveProjectRootForExec } from "../config-loader.js";
@@ -10,6 +10,8 @@ const PERSONALIZATION_KEY = 'personalization';
 const KNOWN_INTENTIONAL_KEY = 'known_intentional';
 /** Max entries per single `apply` call. */
 const MAX_ENTRIES = 500;
+/** How many timestamped config backups are retained (older ones are removed). */
+export const MAX_TRIAGE_BACKUPS = 5;
 /** Whole-file marker line (matches review.ts filterKnownIntentional semantics). */
 const WHOLE_FILE_LINE = 0;
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
@@ -148,6 +150,33 @@ export function readKnownIntentional(config) {
 export function backupSuffix(now = new Date()) {
     return now.toISOString().replace(/[:.]/g, '-');
 }
+/**
+ * Bound the timestamped config backups: after a fresh one is written, delete
+ * every older `config.bak-*` file beyond the newest `keep`. Best-effort — a
+ * filesystem failure here must never fail the apply that just succeeded
+ * (backups are a safety net, not a requirement).
+ * @returns the absolute paths of the backups that were removed.
+ */
+export function pruneOldConfigBackups(configPath, keep = MAX_TRIAGE_BACKUPS) {
+    const removed = [];
+    try {
+        const dir = dirname(configPath);
+        const prefix = `${basename(configPath)}.bak-`;
+        const matches = readdirSync(dir)
+            .filter((f) => f.startsWith(prefix))
+            .sort();
+        // Keep the newest `keep`; remove everything older.
+        const doomed = matches.slice(0, Math.max(0, matches.length - keep));
+        for (const f of doomed) {
+            rmSync(join(dir, f), { force: true });
+            removed.push(join(dir, f));
+        }
+    }
+    catch {
+        // Best-effort cleanup — never surface a cleanup failure.
+    }
+    return removed;
+}
 // ─── File I/O ───────────────────────────────────────────────────────────────
 /** Load the raw config object (empty when the file is missing). */
 function readConfigFile(configPath) {
@@ -213,6 +242,10 @@ function applyEntries(projectRoot, incoming) {
             error: `Failed to write config: ${String(err)}${rollbackError}`,
         };
     }
+    // Success: bound the accumulation of timestamped backups so a long-lived
+    // project never collects an unbounded pile of config snapshots.
+    if (backupPath)
+        pruneOldConfigBackups(configPath);
     return { ok: true, added, skipped, count: merged.length, configPath, backupPath };
 }
 /**

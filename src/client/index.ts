@@ -244,6 +244,8 @@ interface ObsManifest {
   timeline?: ObsEntry[]
   nudge?: ObsNudge | null
   approval?: ObsApproval
+  /** Why the run ended: converged / max_rounds_reached / aborted_by_validation. */
+  stoppedReason?: string | null
 }
 
 // ─── Quality command center data types (v3.1+; mirrors src/types.ts) ────────
@@ -735,6 +737,24 @@ function severityLabel(severity: string | undefined): string {
   return SEVERITY_LABEL[coerceSeverity(severity)]
 }
 
+/** Human label for WHY a finished run stopped (transcript manifest). */
+function stoppedReasonLabel(reason: string | null | undefined): string {
+  switch (reason) {
+    case 'converged': return '已结束 · 已收敛（无新发现）'
+    case 'max_rounds_reached': return '已结束 · 达到轮数上限'
+    case 'aborted_by_validation': return '已结束 · 验证失败后回滚停止'
+    case 'aborted_by_config': return '已结束 · 验证命令不在白名单（配置需修复）'
+    default: return reason ? `已结束 · ${reason}` : '已结束'
+  }
+}
+
+/** Badge text for the run's live/finished state, annotated with the stop reason. */
+function runStatusText(live: boolean, manifest: ObsManifest | null | undefined): string {
+  if (live) return '运行中'
+  const reason = manifest && typeof manifest.stoppedReason === 'string' ? manifest.stoppedReason : ''
+  return reason ? stoppedReasonLabel(reason) : '已结束'
+}
+
 /** Resolve the slots service: prefer the typed `ctx.slots`, fall back to `ctx.get`. */
 function readSlots(ctx: ClientContext): SlotsService | undefined {
   if (ctx && ctx.slots && typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
@@ -940,7 +960,7 @@ function ConvergenceDashboard(props: SlotProps) {
         title: transcript.active === true
           ? `当前处于「${phase}」阶段（运行中）`
           : `最近一次执行停留在「${phase}」阶段（已结束）`,
-      }, `${phase} · ${transcript.active === true ? '运行中' : '已结束'}`)
+      }, `${phase} · ${runStatusText(transcript.active === true, transcript)}`)
     : null
 
   // v3.0: task_mode indicator (code/iterate)
@@ -2224,7 +2244,7 @@ function ObservatoryPanel(props: SlotProps) {
     return React.createElement('div', { className: 'iterate-obs-block' },
       React.createElement('div', { className: 'iterate-obs-block-head' },
         React.createElement('span', {}, '运行控制台'),
-        React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, live ? '运行中' : '已结束'),
+        React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, runStatusText(live, manifest)),
         React.createElement('span', { className: 'iterate-obs-head-meta' }, `批准策略：${policyLabel}`),
       ),
       React.createElement('div', { className: 'iterate-obs-block-body' },
@@ -2731,7 +2751,7 @@ function ObservatoryPanel(props: SlotProps) {
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'obs', className: 'iterate-obs' },
     React.createElement('div', { className: 'iterate-obs-head', 'data-closed': open ? undefined : '', onClick: () => setOpen((v) => !v) },
       React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
-      React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, live ? '运行中' : '已结束'),
+      React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, runStatusText(live, manifest)),
       React.createElement('span', { className: 'iterate-obs-head-meta' }, headMeta || 'runtime'),
       React.createElement('button', {
         className: 'iterate-btn', 'data-ghost': '',

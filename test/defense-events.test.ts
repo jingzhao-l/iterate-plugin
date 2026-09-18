@@ -8,8 +8,13 @@ import { registerDefenseEventsTool } from '../src/tools/defense-events.ts'
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+  isConcurrencySafe: (args: unknown) => boolean
 } {
-  let def: { execute: (a: unknown, e: unknown) => Promise<unknown>; output: { render: (a: unknown, v: unknown) => unknown } } | null = null
+  let def: {
+    execute: (a: unknown, e: unknown) => Promise<unknown>
+    output: { render: (a: unknown, v: unknown) => unknown }
+    isConcurrencySafe?: (a: unknown) => boolean
+  } | null = null
   registerDefenseEventsTool({
     tools: { register: (d: never) => { def = d as typeof def } },
   } as never)
@@ -18,6 +23,7 @@ function captureTool(): {
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
+    isConcurrencySafe: (args) => (def!.isConcurrencySafe?.(args) ?? false),
   }
 }
 
@@ -275,5 +281,16 @@ describe('iterate_defense_events record', () => {
     } finally {
       cleanup()
     }
+  })
+})
+
+describe('iterate_defense_events concurrency safety', () => {
+  it('excludes every write shape (record + clear) from the parallel dispatch group', () => {
+    const tool = captureTool()
+    assert.equal(tool.isConcurrencySafe({ operation: 'list' }), true)
+    assert.equal(tool.isConcurrencySafe({ operation: 'counts' }), true)
+    assert.equal(tool.isConcurrencySafe({}), true) // default = list
+    assert.equal(tool.isConcurrencySafe({ operation: 'record' }), false)
+    assert.equal(tool.isConcurrencySafe({ operation: 'clear' }), false)
   })
 })

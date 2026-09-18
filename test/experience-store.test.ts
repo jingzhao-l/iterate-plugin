@@ -68,6 +68,37 @@ describe('upsertExperience', () => {
     assert.equal(hit.bank.totalHits, 2)
   })
 
+  it('an explicit-id update replaces the editable fields (documented contract)', () => {
+    const { bank } = upsertExperience(emptyBank(), input())
+    const id = bank.entries[0]!.id
+    const updated = upsertExperience(bank, {
+      ...input({ description: 'a newer, better description', verifiedFix: 'a deeper fix', severity: 'critical' }),
+      id,
+    })
+    assert.equal(updated.added, false)
+    const entry = updated.bank.entries[0]!
+    assert.equal(entry.id, id)
+    assert.equal(entry.description, 'a newer, better description')
+    assert.equal(entry.verifiedFix, 'a deeper fix')
+    assert.equal(entry.severity, 'critical')
+    assert.equal(entry.hitCount, 2) // update also counts as a hit
+  })
+
+  it('forged hit metadata never wins on a fresh add', () => {
+    const { bank, added } = upsertExperience(emptyBank(), {
+      ...input({ id: 'fresh', timestamp: '2000-01-01T00:00:00.000Z', hitCount: 999, lastHitAt: '2000-01-01T00:00:00.000Z' }),
+    } as never)
+    // A caller-supplied id on a brand-new entry is the documented
+    // "update a specific entry via add" contract and is honored — but the
+    // store-owned hit metadata always wins.
+    assert.equal(added, true)
+    const entry = bank.entries[0]!
+    assert.equal(entry.id, 'fresh')
+    assert.notEqual(entry.timestamp, '2000-01-01T00:00:00.000Z')
+    assert.equal(entry.hitCount, 1)
+    assert.notEqual(entry.lastHitAt, '2000-01-01T00:00:00.000Z')
+  })
+
   it('never mutates the input bank', () => {
     const bank = emptyBank()
     const before = JSON.stringify(bank)
@@ -224,5 +255,47 @@ describe('readExperienceBank normalization', () => {
     assert.equal(mixed.length, 1)
     // Tag filter with missing tags array does not throw.
     assert.equal(searchExperienceEntries(entries, '', { tags: ['x'] }).length, 0)
+  })
+
+  it('derives a DETERMINISTIC id for hand-edited entries missing one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-exp-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      const write = (entries: unknown[]) =>
+        writeFileSync(join(dir, '.iterate', 'experience.json'), JSON.stringify({ entries }), 'utf-8')
+      const raw = [
+        { dimension: 'correctness', pattern: 'p3', description: 'd3', verifiedFix: 'f3', findingSummary: 's3' },
+        { dimension: 'security', pattern: 'p4', description: 'd4', verifiedFix: 'f4', findingSummary: 's4' },
+      ]
+      write(raw)
+      const first = readExperienceBank(dir)
+      // Missing ids were derived — deterministic and unique.
+      assert.match(first.entries[0]!.id, /^exp-/)
+      assert.notEqual(first.entries[0]!.id, first.entries[1]!.id)
+      // A second read produces the SAME ids (no random churn on every read).
+      const second = readExperienceBank(dir)
+      assert.equal(second.entries[0]!.id, first.entries[0]!.id)
+      assert.equal(second.entries[1]!.id, first.entries[1]!.id)
+      // The in-memory upsert is a pure merge — nothing touched the file yet.
+      const { bank, added } = upsertExperience(second, input())
+      assert.equal(added, true)
+      assert.equal(bank.entries.length, 3) // 2 on disk + 1 new in memory
+      writeExperienceBank(dir, bank)
+      const fourth = readExperienceBank(dir)
+      assert.equal(fourth.entries.length, 3)
+      // The originally hand-edited entries keep their derived ids across a
+      // persist cycle (and the new entry carries its own stable id).
+      const byIdStable = second.entries.every((e, i) => e.id === fourth.entries[i]!.id)
+      assert.equal(byIdStable, true)
+      assert.match(fourth.entries[2]!.id, /^exp-/)
+      assert.notEqual(fourth.entries[2]!.id, second.entries[0]!.id)
+      assert.notEqual(fourth.entries[2]!.id, second.entries[1]!.id)
+      // Re-reading the persisted bank stays fully deterministic.
+      const fifth = readExperienceBank(dir)
+      assert.equal(fifth.entries[0]!.id, second.entries[0]!.id)
+      assert.equal(fifth.entries[2]!.id, fourth.entries[2]!.id)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

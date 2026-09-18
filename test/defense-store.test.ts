@@ -70,6 +70,23 @@ describe('addDefenseEvent', () => {
     assert.equal(next.events.length, 1)
     assert.deepEqual(next.counts, emptyStream().counts)
   })
+
+  it('never lets a caller-supplied id/timestamp override the stream identity', () => {
+    const forged = addDefenseEvent(emptyStream(), {
+      id: 'forged-id',
+      timestamp: '2000-01-01T00:00:00.000Z',
+      round: 1,
+      type: 'rollback',
+      description: 'd',
+      defense: 'def',
+      outcome: 'o',
+      severity: 'high',
+    } as never as DefenseEvent)
+    const entry = forged.events[0]!
+    assert.notEqual(entry.id, 'forged-id')
+    assert.match(entry.id, /^def-/)
+    assert.notEqual(entry.timestamp, '2000-01-01T00:00:00.000Z')
+  })
 })
 
 describe('computeCounts', () => {
@@ -184,6 +201,29 @@ describe('readDefenseEvents', () => {
       assert.equal(stream.events.length, 1)
       assert.equal(stream.counts.precondition_failed, 1)
       assert.equal(Object.values(stream.counts).every((n) => Number.isFinite(n)), true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('derives a DETERMINISTIC id for hand-edited events missing one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      const write = (events: unknown[]) =>
+        writeFileSync(join(dir, '.iterate', 'defense-events.json'), JSON.stringify({ events }), 'utf-8')
+      const raw = [
+        { type: 'rollback', round: 1, description: 'd1', defense: 'f1', outcome: 'o1', severity: 'high' },
+        { type: 'rollback', round: 2, description: 'd2', defense: 'f2', outcome: 'o2', severity: 'medium' },
+      ]
+      write(raw)
+      const first = readDefenseEvents(dir)
+      assert.match(first.events[0]!.id, /^def-/)
+      assert.notEqual(first.events[0]!.id, first.events[1]!.id)
+      // Second read produces identical ids (no random churn per read).
+      const second = readDefenseEvents(dir)
+      assert.equal(second.events[0]!.id, first.events[0]!.id)
+      assert.equal(second.events[1]!.id, first.events[1]!.id)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

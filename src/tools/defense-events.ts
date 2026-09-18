@@ -91,9 +91,13 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
   ctx.tools.register(
     defineTool({
       name: 'iterate_defense_events',
-      // List/counts never write; only `record` persists an event → read shapes
-      // join a parallel dispatch group.
-      isConcurrencySafe: (args) => (args as { operation?: unknown }).operation !== 'record',
+      // List/counts never write; `record` persists an event and `clear` removes
+      // the persisted stream, so only the read shapes may join a parallel
+      // dispatch group.
+      isConcurrencySafe: (args) => {
+        const op = (args as { operation?: unknown }).operation
+        return op !== 'record' && op !== 'clear'
+      },
       description:
         'Query, record, or clear defense events: precondition failures, rollbacks, invariant violations, ' +
         'and assumption falsifications. ' +

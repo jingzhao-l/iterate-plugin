@@ -160,6 +160,7 @@ export function registerTranscriptTool(ctx: {
           description: 'For `capture`: array of applied fixes [{id, file, round, summary, linesAdded, linesRemoved, success}].',
         },
         refReadFiles: { type: 'json', description: 'For `capture`: flat array of all read files across rounds (optional).' },
+        stoppedReason: { type: 'string', description: 'For `capture`: why the run ended — "converged" | "max_rounds_reached" | "aborted_by_validation". When omitted, derived from the convergence trend (trailing 0 = converged, otherwise = max_rounds_reached once a round ran).' },
         text: { type: 'string', description: 'For `nudge`: steering text to set (or null to clear).' },
         path: { type: 'string', description: 'Project root directory (default: current working directory).' },
       },
@@ -231,13 +232,24 @@ export function registerTranscriptTool(ctx: {
           }
           // Rehydrating a parsed-but-malformed manifest (e.g. `rounds: [null]`
           // or a non-object) must never crash the nudge — degrade to a fresh
-          // builder so the steering text still lands.
+          // builder so the steering text still lands. The fallback must keep
+          // the ORIGINAL run identity (mode/taskMode/goal/maxRounds) so a
+          // stray malformed field can never silently rewrite a dry-run run
+          // into a `normal` one.
+          const fallbackOpts = {
+            project: projectRoot,
+            mode: (manifest?.mode === 'dry-run' || manifest?.mode === 'normal' ? manifest.mode : null) as 'dry-run' | 'normal' | null,
+            taskMode: (manifest?.taskMode === 'code' || manifest?.taskMode === 'iterate' ? manifest.taskMode : null) as 'code' | 'iterate' | null,
+            approval,
+            goal: typeof manifest?.goal === 'string' ? manifest.goal : '',
+            maxRounds: typeof manifest?.maxRounds === 'number' ? manifest.maxRounds : 0,
+          }
           let builder: ReviewTranscriptBuilder
           if (manifest) {
             try {
               builder = rehydrateBuilder(manifest, approval)
             } catch {
-              builder = new ReviewTranscriptBuilder({ project: projectRoot, mode: 'normal', approval })
+              builder = new ReviewTranscriptBuilder(fallbackOpts)
             }
           } else {
             builder = new ReviewTranscriptBuilder({ project: projectRoot, mode: 'normal', approval })
@@ -305,9 +317,18 @@ export function registerTranscriptTool(ctx: {
             if (record) builder.fix(record)
           }
         }
-        // Convergence "found nothing → settled" marker when the trend ends on 0.
+        // End state: an explicit stoppedReason wins; otherwise derive it from
+        // the trend. A run that settled closes as "converged"; a run that did
+        // real work but never trended to 0 closes as "max_rounds_reached";
+        // a capture with no rounds stays "active" (nothing recorded yet).
+        const explicitReason =
+          typeof args.stoppedReason === 'string' && args.stoppedReason.trim()
+            ? args.stoppedReason.trim()
+            : ''
         const last = convergence[convergence.length - 1]
-        if (convergence.length > 0 && last === 0) builder.finish()
+        if (explicitReason) builder.finish(explicitReason)
+        else if (convergence.length > 0 && last === 0) builder.finish('converged')
+        else if (roundsExecuted > 0) builder.finish('max_rounds_reached')
 
         const persisted = await persistChecked(file, builder.serialize())
         if (!persisted.ok) {
@@ -353,7 +374,7 @@ function rehydrateBuilder(manifest: TranscriptManifest, approval: 'ask' | 'deny'
   if (Array.isArray(manifest.fixes)) for (const fx of manifest.fixes) builder.fix(fx as TranscriptFix)
   if (Array.isArray(manifest.timeline)) for (const e of manifest.timeline) builder.decision(e)
   builder.setNudge(manifest.nudge?.text ?? null)
-  if (!manifest.active) builder.finish()
+  if (!manifest.active) builder.finish(manifest.stoppedReason ?? undefined)
   return builder
 }
 
