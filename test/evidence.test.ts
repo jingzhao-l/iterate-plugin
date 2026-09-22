@@ -122,6 +122,25 @@ describe('verifyFinding', () => {
     const none = verifyFinding(root, { file: 'src/a.ts', line: 1 })
     assert.equal(none.readVerified, undefined)
   })
+
+  it('null / non-object findings fail closed as file_not_found (never throws)', () => {
+    const root = realRepo()
+    for (const bad of [null, undefined, 'text', 7, [] as unknown]) {
+      const res = verifyFinding(root, bad as never)
+      assert.equal(res.verified, false)
+      assert.equal(res.error, 'file_not_found')
+      assert.equal(res.file, '')
+    }
+  })
+
+  it('a non-string file fails closed without ERR_INVALID_ARG_TYPE', () => {
+    const root = realRepo()
+    for (const badFile of [123, {}, ['src', 'a.ts']]) {
+      const res = verifyFinding(root, { file: badFile } as never)
+      assert.equal(res.verified, false)
+      assert.equal(res.error, 'file_not_found')
+    }
+  })
 })
 
 describe('verifyFindings / evidencePassed / evidenceViolations / evidenceToPlain', () => {

@@ -12,7 +12,10 @@ export function loadConfig(projectRoot: string): IterateConfig | null {
   try {
     const content = readFileSync(join(projectRoot, 'iterate.config.yaml'), 'utf-8')
     const parsed = yaml.load(content) as Record<string, unknown>
-    if (!parsed || typeof parsed !== 'object') return null
+    // A YAML sequence root (e.g. a list of findings or a `- foo` file) must
+    // not masquerade as a config object — treating it as one would merge its
+    // indices into the config (config bomb). Reject it, not coerce it.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
     return parsed as unknown as IterateConfig
   } catch {
     return null
@@ -158,7 +161,7 @@ export function flattenCommands(
  */
 export function validateConfig(config: unknown): string[] {
   const errors: string[] = []
-  if (!config || typeof config !== 'object') {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
     errors.push('root')
     return errors
   }
@@ -206,7 +209,9 @@ export type ProjectRootResult = { ok: true; root: string } | { ok: false; reason
  *      the DSH runtime injects per-session env into tool sub-processes).
  */
 export function resolveProjectRoot(input?: string, sessionCwd?: string): ProjectRootResult {
-  const raw = (input ?? '').trim()
+  // A non-string input (number, array, …) from a hostile tool invocation must
+  // be treated as "no explicit path" instead of crashing on `.trim()`.
+  const raw = (typeof input === 'string' ? input : '').trim()
   // A NUL byte can never name a real path and makes `resolve()` (and every
   // downstream fs call) throw — treat it as unsafe input, not a throw path.
   if (raw.includes('\0')) {

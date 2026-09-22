@@ -891,6 +891,32 @@ describe('transcript live bridge', () => {
     assert.equal(junk.taskMode, null)
   })
 
+  it('normalizeTranscript passes stoppedReason through so the observatory badge renders it', () => {
+    // Regression: normalizeTranscript dropped `stoppedReason`, so the
+    // observatory badge always fell back to a bare "已结束" instead of the
+    // actual stop reason (converged / max_rounds_reached / aborted_by_*).
+    const conv = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      stoppedReason: 'converged',
+    }) as unknown as { stoppedReason: string | null }
+    assert.equal(conv.stoppedReason, 'converged')
+
+    const config = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      stoppedReason: 'aborted_by_config',
+    }) as unknown as { stoppedReason: string | null }
+    assert.equal(config.stoppedReason, 'aborted_by_config')
+
+    // Absent / null / empty values all normalize to null (badge shows "已结束").
+    const missing = normalizeTranscript(makeTranscriptManifest()) as unknown as { stoppedReason: string | null }
+    assert.equal(missing.stoppedReason, null)
+    const empty = normalizeTranscript({
+      ...makeTranscriptManifest(),
+      stoppedReason: '',
+    }) as unknown as { stoppedReason: string | null }
+    assert.equal(empty.stoppedReason, null)
+  })
+
   it('scanSessionForQualityGate returns the latest normalized snapshot (reverse chronological)', () => {
     const session = {
       toolCalls: [

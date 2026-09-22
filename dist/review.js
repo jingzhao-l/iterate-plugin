@@ -28,19 +28,20 @@ export const SEVERITY_RANK = {
 export function sortFindings(findings) {
     return [...findings].sort((a, b) => {
         // Guard against an out-of-spec severity string (e.g. from a model that
-        // bypassed the schema): treat it as the least severe so NaN never enters
-        // the comparator and ordering stays deterministic.
-        const rankA = SEVERITY_RANK[a.severity] ?? SEVERITY_RANK.low;
-        const rankB = SEVERITY_RANK[b.severity] ?? SEVERITY_RANK.low;
+        // bypassed the schema) AND against a null list element (model-authored
+        // JSON): treat both as the least severe so NaN never enters the
+        // comparator and ordering stays deterministic.
+        const rankA = SEVERITY_RANK[a?.severity] ?? SEVERITY_RANK.low;
+        const rankB = SEVERITY_RANK[b?.severity] ?? SEVERITY_RANK.low;
         const bySeverity = rankA - rankB;
         if (bySeverity !== 0)
             return bySeverity;
         // Defensive coercion: `file`/`line` can be wrong-typed when schema
         // validation is disabled — String()/Number() keep the comparator total.
-        const byFile = String(a.file ?? '').localeCompare(String(b.file ?? ''));
+        const byFile = String(a?.file ?? '').localeCompare(String(b?.file ?? ''));
         if (byFile !== 0)
             return byFile;
-        return (Number(a.line) || 0) - (Number(b.line) || 0);
+        return (Number(a?.line) || 0) - (Number(b?.line) || 0);
     });
 }
 /** Normalize a summary so near-identical duplicates collapse to one key. */

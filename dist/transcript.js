@@ -54,6 +54,20 @@ function clampStringList(source, cap) {
     }
     return out;
 }
+/**
+ * Deep-clone a decision-timeline payload so it is decoupled from the caller's
+ * live object. structuredClone is available in every supported Node release;
+ * on the off chance it is missing, fall back to a JSON round-trip (decision
+ * payloads are JSON-serializable by construction).
+ */
+function cloneDecisionData(data) {
+    try {
+        return structuredClone(data);
+    }
+    catch {
+        return JSON.parse(JSON.stringify(data));
+    }
+}
 /** Normalize a single finding, dropping malformed entries. */
 function normalizeFinding(input) {
     if (!input || typeof input !== 'object')
@@ -81,12 +95,23 @@ function normalizeFinding(input) {
         acknowledged: typeof f.acknowledged === 'boolean' ? f.acknowledged : undefined,
     };
 }
+/**
+ * Append one raw finding to a thread's list, bound to MAX_FINDINGS_PER_THREAD
+ * with NEWEST-WINS eviction (drop the oldest findings once the cap is hit).
+ * A single oversized fixer agent could otherwise OOM the client with an
+ * unbounded finding dump inside one thread.
+ */
+function pushThreadFinding(thread, raw) {
+    thread.findings.push(raw);
+    if (thread.findings.length > MAX_FINDINGS_PER_THREAD) {
+        thread.findings.splice(0, thread.findings.length - MAX_FINDINGS_PER_THREAD);
+    }
+}
 /** Merge a report snapshot's findings/readFiles into a thread by dimension. */
 function mergeReportIntoThread(thread, findings, readFiles) {
     for (const raw of findings) {
-        const f = normalizeFinding(raw);
-        if (f)
-            thread.findings.push(raw);
+        if (normalizeFinding(raw))
+            pushThreadFinding(thread, raw);
     }
     for (const r of readFiles ?? []) {
         if (typeof r === 'string')
@@ -111,6 +136,7 @@ export class ReviewTranscriptBuilder {
     rounds = [];
     convergence = [];
     globalFindings = [];
+    globalSeenKeys = new Set();
     fixes = [];
     checkpoint = null;
     timeline = [];
@@ -237,12 +263,11 @@ export class ReviewTranscriptBuilder {
             for (const raw of findings) {
                 const f = normalizeFinding(raw);
                 if (f) {
-                    thread.findings.push(raw);
-                    this.globalFindings.push(f);
+                    pushThreadFinding(thread, raw);
+                    this.addGlobal(f);
                 }
             }
         }
-        this.reevaluateGlobal();
         this.touch();
     }
     /** Merge a round-level report snapshot (findings + readFiles) into a thread. */
@@ -255,9 +280,8 @@ export class ReviewTranscriptBuilder {
         for (const raw of findings) {
             const f = normalizeFinding(raw);
             if (f)
-                this.globalFindings.push(f);
+                this.addGlobal(f);
         }
-        this.reevaluateGlobal();
         this.touch();
     }
     // ─── Convergence (F2) ───────────────────────────────────────────────────
@@ -337,8 +361,12 @@ export class ReviewTranscriptBuilder {
                 ? Math.floor(entry.round)
                 : this.round,
             type,
-            data: entry.data && typeof entry.data === 'object'
-                ? entry.data
+            data: entry.data && typeof entry.data === 'object' && !Array.isArray(entry.data)
+                // Deep clone so a caller mutating its own object later can never
+                // alias into the timeline (serialize would then emit the mutated
+                // values instead of what was actually decided). Decision-log payloads
+                // are small JSON, so the clone cost is negligible.
+                ? cloneDecisionData(entry.data)
                 : {},
         });
         if (this.timeline.length > MAX_TIMELINE) {
@@ -385,9 +413,9 @@ export class ReviewTranscriptBuilder {
             maxRounds: this.maxRounds,
             rounds,
             convergence: this.convergence,
-            findings: this.globalFindings.length > MAX_FINDINGS_TOTAL
-                ? this.globalFindings.slice(0, MAX_FINDINGS_TOTAL)
-                : this.globalFindings,
+            // addGlobal maintains the newest-wins cap incrementally, so the array is
+            // already ≤ MAX_FINDINGS_TOTAL — no post-hoc slice needed.
+            findings: this.globalFindings,
             fixes: this.fixes,
             checkpoint: this.checkpoint,
             timeline: this.timeline,
@@ -416,25 +444,23 @@ export class ReviewTranscriptBuilder {
     threadCount(live) {
         return live.threads.length;
     }
-    /** Recompute the global finding list from per-thread findings (dedup). */
-    reevaluateGlobal() {
-        // Rebuild from threads to derive a deterministic global list.
-        this.globalFindings.length = 0;
-        const seen = new Set();
-        for (const r of this.rounds) {
-            for (const t of r.threads) {
-                for (const raw of t.findings) {
-                    const f = normalizeFinding(raw);
-                    if (!f)
-                        continue;
-                    const key = `${f.file}\u0000${f.line ?? 0}\u0000${f.dimension}\u0000${f.summary}`;
-                    if (seen.has(key))
-                        continue;
-                    seen.add(key);
-                    this.globalFindings.push(f);
-                    if (this.globalFindings.length >= MAX_FINDINGS_TOTAL)
-                        return;
-                }
+    /**
+     * Insert one deduplicated finding into the compact global list.
+     * NEWEST-WINS: when the global cap (MAX_FINDINGS_TOTAL) is hit, the oldest
+     * kept finding is evicted so fresh, still-relevant findings survive — this
+     * is the documented contract. Amortized O(1): dedupe via a seen-key set and
+     * eviction is one `shift` per overflow insert.
+     */
+    addGlobal(f) {
+        const key = `${f.file}\u0000${f.line ?? 0}\u0000${f.dimension}\u0000${f.summary}`;
+        if (this.globalSeenKeys.has(key))
+            return;
+        this.globalSeenKeys.add(key);
+        this.globalFindings.push(f);
+        if (this.globalFindings.length > MAX_FINDINGS_TOTAL) {
+            const evicted = this.globalFindings.shift();
+            if (evicted) {
+                this.globalSeenKeys.delete(`${evicted.file}\u0000${evicted.line ?? 0}\u0000${evicted.dimension}\u0000${evicted.summary}`);
             }
         }
     }

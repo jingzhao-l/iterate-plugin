@@ -122,6 +122,21 @@ describe('validateConfigUpdates', () => {
     assert.match(errors.join('; '), /human-controlled/)
   })
 
+  it('rejects absurdly large numeric fields (config bomb guard)', () => {
+    const errors = validateConfigUpdates({
+      max_rounds: 1_000_000,
+      atomic: { max_lines: 1_000_000, max_adjacent_methods: 1_000_000 },
+    } as unknown as Record<string, unknown>)
+    assert.ok(errors.some((e) => e.includes('max_rounds')))
+    assert.ok(errors.some((e) => e.includes('atomic.max_lines')))
+    assert.ok(errors.some((e) => e.includes('atomic.max_adjacent_methods')))
+    // The valid boundary values are still accepted.
+    assert.deepEqual(
+      validateConfigUpdates({ max_rounds: 100, atomic: { max_lines: 10000, max_adjacent_methods: 200 } }),
+      [],
+    )
+  })
+
   it('rejects a malformed observatory block', () => {
     assert.ok(validateConfigUpdates({ observatory: 'x' }).some((e) => e.includes('observatory')))
     assert.ok(validateConfigUpdates({ observatory: { capture: 'yes' } }).some((e) => e.includes('observatory.capture')))
@@ -191,6 +206,17 @@ describe('readRawConfig / writeConfigFile', () => {
     }
   })
 
+  it('readRawConfig refuses a YAML array root (list config bomb)', () => {
+    // `- goal: "g"` parses as a sequence, not a mapping — writing over it
+    // would destroy data, so the read must reject it like any malformed file.
+    const { dir, cleanup } = tempProject('- goal: "g"')
+    try {
+      assert.throws(() => readRawConfig(join(dir, CONFIG_FILE)), /not a valid YAML mapping/)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('writeConfigFile creates a new file without a backup', () => {
     const { dir, cleanup } = tempProject()
     try {
@@ -212,6 +238,24 @@ describe('readRawConfig / writeConfigFile', () => {
       assert.equal(readFileSync(res.backupPath, 'utf-8'), MINIMAL_CONFIG)
       const backups = readdirSync(dir).filter((f) => f.startsWith('iterate.config.yaml.bak-'))
       assert.equal(backups.length, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('bounds the accumulated backup pile after many successful writes', () => {
+    const { dir, cleanup } = tempProject(MINIMAL_CONFIG)
+    try {
+      for (let i = 0; i < 12; i += 1) {
+        const res = writeConfigFile(dir, { goal: `g${i}` })
+        assert.equal(res.ok, true)
+      }
+      const backups = readdirSync(dir).filter((f) => f.startsWith('iterate.config.yaml.bak-'))
+      // Every write keeps at most MAX_CONFIG_BACKUPS snapshots — a long-lived
+      // project never collects an unbounded pile of config backups.
+      assert.ok(backups.length <= 5, `expected ≤ 5 backups, got ${backups.length}`)
+      const newest = backups.slice().sort().at(-1)
+      assert.ok(newest, 'at least one backup exists')
     } finally {
       cleanup()
     }

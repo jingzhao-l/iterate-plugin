@@ -5,6 +5,99 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.5] - 2026-09-22
+
+### Changed
+
+- **Upgraded DSH runtime deps to `0.1.6-alpha.2`** — `@deepseek-ai/dsh-tools` /
+  `@deepseek-ai/dsh-util-values` (deps) and `@deepseek-ai/dsh-jobs`
+  (devDep, `^0.1.6-alpha.2`) plus `@deepseek-ai/dsh-agent` /
+  `@deepseek-ai/dsh-session` (devDeps) moved from `0.1.6-alpha.1` to
+  `0.1.6-alpha.2`. Diff vs alpha.1 is non-breaking for the plugin (tool/agent/
+  jobs types untouched; dsh-util-values only adds `WeakMapWithValues`;
+  dsh-session only adds a `workspace/changes` event type this plugin does not
+  consume). `dsh.compatibility.dshReleases` now declares
+  `0.1.6-alpha.2: compatible`.
+
+### Fixed
+
+- **Decision-log cross-process rewrite race (F19)** — the prune rewrite
+  (temp + atomic rename) could silently discard an audit line appended by a
+  concurrent process whose fd was bound to the pre-rename inode. `append` and
+  the prune rewrite now serialize on a tiny advisory lock file
+  (`.iterate/.decision-log.lock`, exclusive-create + pid stamp + stale steal
+  with `process.kill(pid,0)` liveness and mtime timeout, `Atomics.wait`
+  backoff). Contention timeouts degrade to "proceed unlocked" — never a crash —
+  and the lock file is not swept by `iterate_prune` (guards a live append).
+- **Decision-log append count no longer re-reads the whole file per append
+  (F10)** — a size/count cache keyed by log path collapses the count to a +1
+  when the file is byte-identical to our last append; falls back to a full
+  re-count only when stale. Large sessions no longer pay an O(n) re-read per
+  audit write.
+- **Audit-trail write failures are surfaced, not dropped (F2)** — `iterate_fix`
+  and `iterate_rollback` now return a `warning` field carrying a decision-log
+  append failure (the mutation still succeeds); `iterate_prune` pushes it into
+  `result.errors`. A silent audit miss can no longer masquerade as recorded.
+- **Content-identical no-op fixes are rejected (F1)** — a fixer that re-sends
+  the file unchanged (same `added===0 && removed===0`) now fails with
+  "no changes … apply a real edit" instead of burning a backup, a write, and a
+  registry/success record; `force:true` does NOT bypass the guard, and the check
+  sits after the "already fixed this run" registry check so duplicate resends
+  keep their existing message.
+- **Hostile-input hardening (F12 and friends)** — YAML **array roots** are
+  rejected everywhere a mapping is expected (`loadConfig` /
+  `validateConfig` returns `['root']`, `config-write readRawConfig`, triage
+  `readConfigFile`) so a `- foo` list never masquerades as a config object;
+  `resolveProjectRoot` treats a non-string `path` input as "no explicit path"
+  (no crash on `.trim()`); `verifyFinding` fails closed as `file_not_found` for
+  null/non-object findings and non-string `file` (no ERR_INVALID_ARG_TYPE, and
+  an empty '' resolves to the root so it is reported as not-found rather than
+  line_out_of_range); `sortFindings`, `meta-review` dimension scan and final
+  report all tolerate null list elements.
+- **`normalizePath` no longer folds a leading `../..` traversal into a bare
+  filename** — consecutive leading `..` segments are preserved (mirrors Python
+  `os.path.normpath`), so `../../evil.ts` stays scoped OUT of a changed-only
+  review inventory instead of leaking in as `evil.ts`.
+- **NUL-mode git scope no longer corrupts whitespace filenames** — `git diff
+  --name-only -z` emits exact names, so `parseChangedFiles` drops the `.trim()`
+  in NUL mode; a name that legitimately starts/ends with a space survives.
+  `runGit`/`resolveChangedFiles` also accept an optional `AbortSignal`.
+- **Atomic writes clean up temp files on write failure too** — `writeTextAtomic`
+  / `writeTextAtomicAsync` previously only cleaned the temp when the *rename*
+  failed; a failing `writeFileSync`/`writeFile` now also removes the partial
+  temp before propagating.
+- **Config numeric bounds + backup accumulation bound** — `iterate_config`
+  rejects absurd `max_rounds` (>100), `atomic.max_lines` (>10000) and
+  `atomic.max_adjacent_methods` (>200) as a config-bomb guard; each successful
+  demonstrated write prunes to the newest 5 `iterate.config.yaml.bak-*`
+  snapshots so a long-lived project never collects an unbounded backup pile.
+- **Live feed appends are serialized in-process** — the byte-cap trim
+  (read+rewrite+append) is a read-modify-write; concurrent `tools/result`
+  captures could interleave and one rewrite would drop the other's fresh line.
+  Appends now chain on one module-level promise queue.
+- **Transcript finding caps are enforced with newest-wins eviction** — per-thread
+  findings cap at `MAX_FINDINGS_PER_THREAD` (100) and the global list at
+  `MAX_FINDINGS_TOTAL` (2000), both dropping the OLDEST entries, matching the
+  documented "newest wins" contract instead of the previous rebuild that could
+  keep stale oldest findings. Decision-timeline payloads are deep-cloned on
+  ingest so a caller mutating its own object can never alias into the manifest.
+- **`ctx.jobs` reads are Proxy-safe** — the dsh plugin context can be a Proxy
+  whose `jobs` getter throws when no registry is present; `runWithJob` now
+  degrades to plain execution instead of crashing the tool call.
+- **Named-file injection in the fixer prompt** — file paths interpolated into
+  the built `iterate_fix` / `iterate_diff` instructions are now
+  `JSON.stringify`-quoted instead of hard-quoted, so a path containing a quote
+  or backslash can no longer break out of the instruction text.
+
+### Fixed (UX parity)
+
+- **Observatory `stoppedReason` badge now renders the stop reason** —
+  `lib/parse.js normalizeTranscript` dropped `stoppedReason` on the floor, so a
+  run that converged / hit the round cap / aborted showed a bare "已结束". It is
+  now carried through to the client badge label (converged / max_rounds_reached
+  / aborted_by_validation / aborted_by_config), matching the 3.5.4
+  stopped-reason feature's intent.
+
 ## [3.5.4] - 2026-09-18
 
 ### Changed

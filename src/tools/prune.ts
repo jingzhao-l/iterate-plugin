@@ -30,7 +30,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 import { writeTextAtomic, writeJsonAtomic } from '../atomic-fs.ts'
-import { readDecisionEntries, appendDecisionEntry } from './decision-log.ts'
+import { readDecisionEntries, appendDecisionEntry, acquireLogLock } from './decision-log.ts'
 import { readRegistry, removeRecord, recomputeRoundCounts } from './fix.ts'
 import { readExperienceBank, writeExperienceBank } from './experience-store.ts'
 import { readDefenseEvents, writeDefenseEvents } from './defense-store.ts'
@@ -264,23 +264,32 @@ export function inspectPrune(
  */
 function rewriteDecisionLogKeepingRecent(projectRoot: string, cutoff: string): { deleted: number; error?: string } {
   const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl')
-  for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
-    try {
-      const entries = readDecisionEntries(projectRoot)
-      const kept = entries.filter((e) => e.timestamp >= cutoff)
-      const deleted = entries.length - kept.length
-      if (deleted === 0) return { deleted: 0 }
-      writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n')
-      // A concurrent appender may have landed new lines after our read. If the
-      // log grew during the write window, re-read and prune again instead of
-      // accepting a lost audit trail.
-      const after = readDecisionEntries(projectRoot)
-      if (after.length <= kept.length) return { deleted }
-    } catch (err) {
-      return { deleted: 0, error: `failed to rewrite decision log: ${String(err)}` }
+  // Take the cross-process log lock for the ENTIRE loop: with the mutex held,
+  // no concurrent appender can slip a fresh line into the read-before-rewrite
+  // window, so the first attempt is nearly always the only one. (The retry
+  // loop stays as defense-in-depth for the lock-unavailable path.)
+  const release = acquireLogLock(projectRoot)
+  try {
+    for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
+      try {
+        const entries = readDecisionEntries(projectRoot)
+        const kept = entries.filter((e) => e.timestamp >= cutoff)
+        const deleted = entries.length - kept.length
+        if (deleted === 0) return { deleted: 0 }
+        writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n')
+        // A concurrent appender (cross-process, lock-unavailable path) may have
+        // landed new lines after our read. If the log grew during the write
+        // window, re-read and prune again instead of accepting a lost audit trail.
+        const after = readDecisionEntries(projectRoot)
+        if (after.length <= kept.length) return { deleted }
+      } catch (err) {
+        return { deleted: 0, error: `failed to rewrite decision log: ${String(err)}` }
+      }
     }
+    return { deleted: 0, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` }
+  } finally {
+    release()
   }
-  return { deleted: 0, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` }
 }
 
 /**
@@ -507,8 +516,10 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
 
         const result = executePrune(projectRoot, retainDays, report)
 
-        // Log the prune to the decision log.
-        appendDecisionEntry(projectRoot, {
+        // Log the prune to the decision log. The mutations already happened, so
+        // a failed log append is reported via `errors` — a silent audit miss
+        // (F2) must never pretend every deletion was recorded.
+        const logRes = appendDecisionEntry(projectRoot, {
           timestamp: new Date().toISOString(),
           round: 0,
           type: 'decision',
@@ -523,6 +534,7 @@ export function registerPruneTool(ctx: { tools: { register: (def: ReturnType<typ
             deletedDefenseEvents: result.deletedDefenseEvents,
           },
         })
+        if (logRes.error) result.errors.push(logRes.error)
 
         return {
           ok: true,

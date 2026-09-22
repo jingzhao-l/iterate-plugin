@@ -21,6 +21,13 @@ describe('parseChangedFiles', () => {
     assert.deepEqual(out, ['src/a.ts', 'src/b.ts', 'tests/c.test.ts'])
   })
 
+  it('preserves leading/trailing whitespace in NUL mode (no trim corruption)', () => {
+    // git -z emits exact names; trimming would corrupt a name that legitimately
+    // starts or ends with a space (git fully supports such names).
+    const out = parseChangedFiles('  spaced.ts\0tail space.ts \0src/a.ts\0')
+    assert.deepEqual(out, ['  spaced.ts', 'tail space.ts ', 'src/a.ts'])
+  })
+
   it('falls back to newline-split when no NUL is present', () => {
     const out = parseChangedFiles('src/a.ts\nsrc/b.ts\n')
     assert.deepEqual(out, ['src/a.ts', 'src/b.ts'])

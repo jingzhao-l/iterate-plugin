@@ -54,11 +54,19 @@ function tempPathFor(filePath: string): string {
  */
 export function writeTextAtomic(filePath: string, data: string): void {
   const tmp = tempPathFor(filePath)
-  writeFileSync(tmp, data, 'utf-8')
+  try {
+    writeFileSync(tmp, data, 'utf-8')
+  } catch (err) {
+    // The write itself failed (disk full, permission, …): the temp file may
+    // already be partially written, so remove it before propagating — a
+    // failed write must never litter the directory either.
+    cleanupTemp(tmp)
+    throw err
+  }
   try {
     renameSync(tmp, filePath)
   } catch (err) {
-    // Best-effort temp cleanup so a failed write never litters the directory.
+    // Best-effort temp cleanup so a failed rename never litters the directory.
     cleanupTemp(tmp)
     throw err
   }
@@ -67,11 +75,19 @@ export function writeTextAtomic(filePath: string, data: string): void {
 /** Async variant of {@link writeTextAtomic} (same temp naming convention). */
 export async function writeTextAtomicAsync(filePath: string, data: string): Promise<void> {
   const tmp = tempPathFor(filePath)
-  await writeFile(tmp, data, 'utf-8')
+  try {
+    await writeFile(tmp, data, 'utf-8')
+  } catch (err) {
+    // The write itself failed (disk full, permission, …): the temp file may
+    // already be partially written, so remove it before propagating — a
+    // failed write must never litter the directory either.
+    await cleanupTempAsync(tmp)
+    throw err
+  }
   try {
     await rename(tmp, filePath)
   } catch (err) {
-    // Best-effort temp cleanup so a failed write never litters the directory.
+    // Best-effort temp cleanup so a failed rename never litters the directory.
     await cleanupTempAsync(tmp)
     throw err
   }

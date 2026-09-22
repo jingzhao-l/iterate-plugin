@@ -184,7 +184,7 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
       `byDimension sums to ${dimSum}, but totalFindings is ${total}.`,
     )
   }
-  const invalidDim = findings.find((f) => !dimensions.includes(f?.dimension))
+  const invalidDim = findings.find((f) => !!f && !dimensions.includes(f?.dimension))
   if (invalidDim) {
     add(
       'DIMENSION_UNKNOWN',
@@ -364,7 +364,7 @@ export function buildFinalReviewReport(
           // surfaced it (best-effort; report rounds carry it).
           for (const r of report.rounds ?? []) {
             const matched = (r.findings ?? []).some(
-              (fnd) => fnd.file === violation.file && fnd.line === violation.line,
+              (fnd) => !!fnd && fnd?.file === violation.file && fnd?.line === violation.line,
             )
             if (matched) {
               roundHint = ` (round ${r.round})`

@@ -89,8 +89,35 @@ export function verifyLineBounds(line, text) {
 }
 /** Verify a single finding's location against the real filesystem. */
 export function verifyFinding(root, input, opts = {}) {
-    const relFile = input.file ?? '';
+    // A null element / non-object finding (hostile or model-authored JSON) must
+    // be reported as poisoned evidence, never crash `path.resolve` downstream.
+    if (!input || typeof input !== 'object') {
+        return {
+            file: '',
+            line: null,
+            lineTotal: null,
+            resolvedPath: null,
+            verified: false,
+            error: 'file_not_found',
+        };
+    }
+    // A non-string `file` (number, object, …) would make `resolve` throw
+    // ERR_INVALID_ARG_TYPE — coerce to "" so it fails closed as not-found.
+    const relFile = typeof input.file === 'string' ? input.file : '';
     const line = typeof input.line === 'number' ? input.line : null;
+    // "" resolves to the project ROOT (resolve(root, '') === root), which then
+    // trips the not-a-regular-file branch as `line_out_of_range` — but there is
+    // no file reference at all. Report it as `file_not_found` upfront.
+    if (relFile === '') {
+        return {
+            file: '',
+            line,
+            lineTotal: null,
+            resolvedPath: null,
+            verified: false,
+            error: 'file_not_found',
+        };
+    }
     const resolved = resolveWithin(root, relFile);
     if (resolved === null || !existsSync(resolved)) {
         return {

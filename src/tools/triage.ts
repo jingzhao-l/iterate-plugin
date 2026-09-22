@@ -208,8 +208,9 @@ function readConfigFile(configPath: string): Record<string, unknown> {
   if (!existsSync(configPath)) return {}
   const content = readFileSync(configPath, 'utf-8')
   const parsed = yaml.load(content)
-  if (!parsed || typeof parsed !== 'object') {
-    // A config that exists but is not a YAML mapping must NOT be silently
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    // A config that exists but is NOT a YAML mapping (including a YAML list,
+    // which `typeof [] === 'object'` alone would accept) must NOT be silently
     // treated as empty: writing over it would destroy user data. Callers
     // surface this as an error and refuse to write.
     throw new Error('existing iterate.config.yaml is not a valid YAML mapping')

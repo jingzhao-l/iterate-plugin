@@ -36,6 +36,45 @@ export const LIVE_MAX_BYTES = 64 * 1024;
 export function liveFilePath(projectRoot) {
     return join(projectRoot, '.iterate', 'transcript-live.ndjson');
 }
+/**
+ * Module-level in-process queue serializing live-feed writes. The trim path
+ * (read → rewrite → append) is a read-modify-write: two concurrent tool
+ * results could interleave and one's rewrite would silently drop the other's
+ * freshly-appended line. Chaining every append onto one tail makes the whole
+ * read+rewrite+append atomic within the process (the only realistic mode for
+ * the plugin); cross-process racing remains a theoretical hazard, but the
+ * cap-trim makes a lost line a cosmetic issue, not a correctness one.
+ */
+let liveWriteQueue = Promise.resolve();
+function enqueueLiveWrite(task) {
+    const next = liveWriteQueue.then(task, task);
+    liveWriteQueue = next.catch(() => { });
+    return next;
+}
+/** Append one activity record to the project's live feed (byte-capped). */
+export function appendLive(projectRoot, entry) {
+    return enqueueLiveWrite(async () => {
+        const file = liveFilePath(projectRoot);
+        const line = JSON.stringify(entry) + '\n';
+        await mkdir(join(projectRoot, '.iterate'), { recursive: true });
+        // Amortized O(1): only read+rewrite when the file has grown past the cap.
+        try {
+            const st = await stat(file).catch(() => null);
+            if (st && st.size > LIVE_MAX_BYTES) {
+                const raw = await readFile(file, 'utf-8');
+                const lines = raw.split('\n').filter(Boolean);
+                const tail = lines.slice(-LIVE_MAX_ENTRIES);
+                // Atomic rewrite (unique temp + rename) so a crash mid-trim never
+                // truncates the live feed; the temp file is prunable by iterate_prune.
+                await writeTextAtomicAsync(file, tail.join('\n') + '\n');
+            }
+            await appendFile(file, line, 'utf-8');
+        }
+        catch {
+            // Fire-and-forget: never let live capture break a tool call.
+        }
+    });
+}
 /** Resolve the project root a tool execution belongs to, if any. */
 function projectRootOf(exec) {
     const cwd = exec.agent?.session?.header?.cwd;
@@ -94,28 +133,6 @@ export function classifyTool(name, args, projectRoot) {
     if (!target)
         target = name;
     return { ts: new Date().toISOString(), type, tool: name, target };
-}
-/** Append one activity record to the project's live feed (byte-capped). */
-export async function appendLive(projectRoot, entry) {
-    const file = liveFilePath(projectRoot);
-    const line = JSON.stringify(entry) + '\n';
-    await mkdir(join(projectRoot, '.iterate'), { recursive: true });
-    // Amortized O(1): only read+rewrite when the file has grown past the cap.
-    try {
-        const st = await stat(file).catch(() => null);
-        if (st && st.size > LIVE_MAX_BYTES) {
-            const raw = await readFile(file, 'utf-8');
-            const lines = raw.split('\n').filter(Boolean);
-            const tail = lines.slice(-LIVE_MAX_ENTRIES);
-            // Atomic rewrite (unique temp + rename) so a crash mid-trim never
-            // truncates the live feed; the temp file is prunable by iterate_prune.
-            await writeTextAtomicAsync(file, tail.join('\n') + '\n');
-        }
-        await appendFile(file, line, 'utf-8');
-    }
-    catch {
-        // Fire-and-forget: never let live capture break a tool call.
-    }
 }
 /** Read the live feed (newest first), capped at the last LIVE_MAX_ENTRIES. */
 export async function readLive(projectRoot) {

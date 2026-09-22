@@ -40,6 +40,20 @@ interface JobsLike {
 }
 
 /**
+ * Read `ctx.jobs` defensively: the dsh plugin context can be a Proxy whose
+ * `jobs` getter throws (or is missing) when no job registry is present. A
+ * Proxy throw on property access must degrade to "no jobs", never crash the
+ * tool execution we are about to wrap.
+ */
+function safeJobs(ctx: unknown): JobsLike | undefined {
+  try {
+    return (ctx as { jobs?: JobsLike } | undefined)?.jobs
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Run `fn` wrapped in a dsh background job, settling it completed/failed
  * with the execution's outcome. When the host exposes no job registry (or
  * refuses the start), `fn` runs untouched and `null` is returned — the Job
@@ -57,7 +71,7 @@ export async function runWithJob<T>(
   label: string,
   fn: () => Promise<T> | T,
 ): Promise<{ result: T; jobId: string | null }> {
-  const jobs = (ctx as { jobs?: JobsLike } | undefined)?.jobs
+  const jobs = safeJobs(ctx)
   if (!jobs || typeof jobs.start !== 'function') {
     return { result: await fn(), jobId: null }
   }

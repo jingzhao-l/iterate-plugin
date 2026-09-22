@@ -108,6 +108,18 @@ describe('loadConfig / loadEffectiveConfig', () => {
     }
   })
 
+  it('loadConfig rejects a YAML array root (list config bomb)', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      // `- goal: x` is a sequence — coercing it to a config object would
+      // merge its indices into the config (an effective bomb).
+      writeConfig(dir, '- goal: "x"\n- goal: "y"\n')
+      assert.equal(loadConfig(dir), null)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('loadEffectiveConfig returns defaults when no project config exists', () => {
     const { dir, cleanup } = tempDir()
     try {
@@ -181,6 +193,13 @@ describe('validateConfig', () => {
     assert.deepEqual(validateConfig(null), ['root'])
   })
 
+  it('reports root for a YAML-array-shaped config (never coerces)', () => {
+    // typeof [] === 'object', so without the guard this would produce nested
+    // "goals" instead of failing closed.
+    assert.deepEqual(validateConfig([] as unknown as IterateConfig), ['root'])
+    assert.deepEqual(validateConfig('text' as unknown as IterateConfig), ['root'])
+  })
+
   it('reports missing required fields', () => {
     const errors = validateConfig({})
     assert.ok(errors.includes('goal'))
@@ -221,5 +240,16 @@ describe('resolveProjectRoot', () => {
     // '/etc/../../..' normalizes to '/', which must be refused.
     const res = resolveProjectRoot('/etc/../../..')
     assert.equal(res.ok, false)
+  })
+
+  it('treats a non-string path input as "no explicit path" (never crashes)', () => {
+    // A hostile/hand-rolled call can pass a number or array — the resolver
+    // must fall back to cwd instead of throwing on `.trim()`.
+    const res = resolveProjectRoot(123 as unknown as string)
+    assert.equal(res.ok, true)
+    if (res.ok) assert.equal(res.root, process.cwd())
+    const arr = resolveProjectRoot(['/tmp'] as unknown as string)
+    assert.equal(arr.ok, true)
+    if (arr.ok) assert.equal(arr.root, process.cwd())
   })
 })

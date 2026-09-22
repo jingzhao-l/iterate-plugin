@@ -10,8 +10,8 @@
  * config, always back up before writing, roll back on failure.
  */
 
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import yaml from 'js-yaml'
 import { writeTextAtomic } from './atomic-fs.ts'
 
@@ -21,6 +21,46 @@ export const CONFIG_FILE = 'iterate.config.yaml'
 /** Backup suffix helper (filesystem-safe timestamp). */
 export function configBackupSuffix(now = new Date()): string {
   return now.toISOString().replace(/[:.]/g, '-')
+}
+
+/** Upper bound on configurable iteration rounds (config bomb guard). */
+export const MAX_MAX_ROUNDS = 100
+
+/** Upper bound on `atomic.max_lines` (a single fix never needs more). */
+export const MAX_ATOMIC_MAX_LINES = 10_000
+
+/** Upper bound on `atomic.max_adjacent_methods`. */
+export const MAX_MAX_ADJACENT_METHODS = 200
+
+/** Keep at most this many timestamped config backups (older ones are removed). */
+export const MAX_CONFIG_BACKUPS = 5
+
+/**
+ * Bound the timestamped config backups: after a fresh one is written, delete
+ * every older `config.bak-*` file beyond the newest `keep`. Best-effort — a
+ * filesystem failure here must never fail the write that just succeeded.
+ * @returns the absolute paths of the backups that were removed.
+ */
+export function pruneOldConfigBackups(
+  configPath: string,
+  keep = MAX_CONFIG_BACKUPS,
+): string[] {
+  const removed: string[] = []
+  try {
+    const dir = dirname(configPath)
+    const prefix = `${basename(configPath)}.bak-`
+    const matches = existsSync(dir)
+      ? readdirSync(dir).filter((f) => f.startsWith(prefix)).sort()
+      : []
+    const doomed = matches.slice(0, Math.max(0, matches.length - keep))
+    for (const f of doomed) {
+      rmSync(join(dir, f), { force: true })
+      removed.push(join(dir, f))
+    }
+  } catch {
+    // Best-effort cleanup — never surface a cleanup failure.
+  }
+  return removed
 }
 
 /**
@@ -45,8 +85,11 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
     }
   }
   if ('max_rounds' in updates) {
-    if (typeof updates.max_rounds !== 'number' || !Number.isInteger(updates.max_rounds) || updates.max_rounds < 1) {
-      errors.push('updates.max_rounds must be a positive integer')
+    if (
+      typeof updates.max_rounds !== 'number' || !Number.isInteger(updates.max_rounds) ||
+      updates.max_rounds < 1 || updates.max_rounds > MAX_MAX_ROUNDS
+    ) {
+      errors.push(`updates.max_rounds must be an integer between 1 and ${MAX_MAX_ROUNDS}`)
     }
   }
   if ('review' in updates) {
@@ -62,11 +105,11 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
     if (!a || typeof a !== 'object') {
       errors.push('updates.atomic must be an object')
     } else {
-      if (a.max_lines !== undefined && (typeof a.max_lines !== 'number' || !Number.isInteger(a.max_lines) || a.max_lines < 1)) {
-        errors.push('updates.atomic.max_lines must be a positive integer')
+      if (a.max_lines !== undefined && (typeof a.max_lines !== 'number' || !Number.isInteger(a.max_lines) || a.max_lines < 1 || a.max_lines > MAX_ATOMIC_MAX_LINES)) {
+        errors.push(`updates.atomic.max_lines must be an integer between 1 and ${MAX_ATOMIC_MAX_LINES}`)
       }
-      if (a.max_adjacent_methods !== undefined && (typeof a.max_adjacent_methods !== 'number' || a.max_adjacent_methods < 0)) {
-        errors.push('updates.atomic.max_adjacent_methods must be a non-negative number')
+      if (a.max_adjacent_methods !== undefined && (typeof a.max_adjacent_methods !== 'number' || a.max_adjacent_methods < 0 || a.max_adjacent_methods > MAX_MAX_ADJACENT_METHODS)) {
+        errors.push(`updates.atomic.max_adjacent_methods must be a number between 0 and ${MAX_MAX_ADJACENT_METHODS}`)
       }
     }
   }
@@ -168,7 +211,10 @@ export function readRawConfig(configPath: string): Record<string, unknown> {
   } catch {
     throw new Error('existing iterate.config.yaml is not a valid YAML mapping')
   }
-  if (!parsed || typeof parsed !== 'object') {
+  // A YAML sequence root (array) must not masquerade as a config object —
+  // `typeof [] === 'object'`, so the presence check alone would accept a
+  // config file that is actually a list. Writing over it would destroy data.
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('existing iterate.config.yaml is not a valid YAML mapping')
   }
   return parsed as Record<string, unknown>
@@ -206,6 +252,10 @@ export function writeConfigFile(
     }
     return { ok: false, error: `failed to write config: ${String(err)}${rollbackError}` }
   }
+
+  // Success: bound the accumulation of timestamped backups so a long-lived
+  // project never collects an unbounded pile of config snapshots.
+  if (backupPath) pruneOldConfigBackups(configPath)
 
   return { ok: true, backupPath }
 }

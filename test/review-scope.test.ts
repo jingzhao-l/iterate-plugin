@@ -149,6 +149,18 @@ describe('collectScopeFiles', () => {
     assert.deepEqual(files, ['src/a.ts', 'src/z.py'])
   })
 
+  it('does NOT fold a leading ../.. traversal into a bare filename', () => {
+    const root = makeTree()
+    // `../../evil.ts` must stay scoped OUT: the old normalizePath folded it
+    // into the single segment `evil.ts`, which no longer starts with '..' and
+    // therefore leaked into the inventory undetected.
+    const files = collectScopeFiles(root, {
+      scope: 'changed-only',
+      changedFiles: ['src/a.ts', '../../evil.ts', 'a/../../b.ts'],
+    })
+    assert.deepEqual(files, ['src/a.ts'])
+  })
+
   it('returns nothing when a changed-only scope has no files', () => {
     const root = makeTree()
     assert.deepEqual(collectScopeFiles(root, { scope: 'changed-only' }), [])

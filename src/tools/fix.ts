@@ -366,6 +366,7 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
             linesRemoved: { type: 'integer' },
             diffSummary: { type: 'string' },
             backupPath: { type: 'string' },
+            warning: { type: 'string' },
             error: { type: 'string' },
           },
         },
@@ -456,6 +457,17 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
           return { ok: false, error: `finding already fixed this run (id: ${id})`, id }
         }
 
+        // No-op guard: content-identical "fixes" (e.g. a fixer that re-sent the
+        // file unchanged) must never burn a backup, a write, or a registry/success
+        // record. Placed after the registry check so a re-sent fix of an id that
+        // was ALREADY fixed is still reported as "already fixed this run".
+        if (added === 0 && removed === 0) {
+          return {
+            ok: false,
+            error: `no changes: the supplied content for ${file} is identical to the current content — apply a real edit`,
+          }
+        }
+
         const target = resolveProjectFile(projectRoot, file)
         if (!target.ok) return { ok: false, error: target.reason }
 
@@ -528,13 +540,16 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
           return { ok: false, error: `failed to write fix registry: ${String(err)} (file restored from backup)` }
         }
 
-        appendDecisionEntry(projectRoot, {
+        const logRes = appendDecisionEntry(projectRoot, {
           timestamp,
           round: args.round,
           type: 'atomic_fix',
           data: { id, file, finding: finding.summary, linesAdded: added, linesRemoved: removed },
         })
 
+        // The fix itself succeeded, but a decision-log write failure would leave
+        // the audit trail incomplete — surface it (warning, not fatal) so the
+        // model/UI knows the record was not persisted.
         return {
           ok: true,
           id,
@@ -544,6 +559,7 @@ export function registerFixTool(ctx: { tools: { register: (def: ReturnType<typeo
           linesRemoved: removed,
           diffSummary: record.diffSummary,
           backupPath,
+          ...(logRes.error ? { warning: logRes.error } : {}),
         }
         })
         return result
@@ -710,6 +726,7 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
             ok: { type: 'boolean', required: true },
             id: { type: 'string' },
             file: { type: 'string' },
+            warning: { type: 'string' },
             error: { type: 'string' },
           },
         },
@@ -749,7 +766,7 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
           return { ok: false, error: `failed to update fix registry: ${String(err)}` }
         }
 
-        appendDecisionEntry(projectRoot, {
+        const logRes = appendDecisionEntry(projectRoot, {
           timestamp: new Date().toISOString(),
           round: record.round,
           type: 'revert',
@@ -762,7 +779,12 @@ export function registerRollbackTool(ctx: { tools: { register: (def: ReturnType<
         // rollback flow.
         await markFixRolledBackInTranscript(projectRoot, id)
 
-        return { ok: true, id, file: record.finding.file }
+        return {
+          ok: true,
+          id,
+          file: record.finding.file,
+          ...(logRes.error ? { warning: logRes.error } : {}),
+        }
       },
     }),
   )

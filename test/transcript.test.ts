@@ -132,6 +132,56 @@ describe('ReviewTranscriptBuilder', () => {
     assert.equal(thread.messages[thread.messages.length - 1], 'msg-99')
   })
 
+  it('caps per-thread findings at 100, keeping the NEWEST (drop the oldest)', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b.begin()
+    b.roundStart(1)
+    b.reviewerStart('correctness')
+    for (let i = 0; i < 120; i += 1) {
+      b.reviewerFindings([finding({ summary: `finding-${i}` })])
+    }
+    const thread = b.serialize().rounds[0]!.threads[0]!
+    assert.equal(thread.findings.length, 100)
+    // Newest 100 survive: i = 20..119.
+    assert.equal(thread.findings[0]!.summary, 'finding-20')
+    assert.equal(thread.findings[thread.findings.length - 1]!.summary, 'finding-119')
+  })
+
+  it('global findings dedupe by key and evict the OLDEST past the 2000 cap (newest wins)', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b.begin()
+    b.roundStart(1)
+    b.reviewerStart('correctness')
+    for (let i = 0; i < 2005; i += 1) {
+      b.reviewerFindings([finding({ file: `src/f-${i}.ts`, line: 3, summary: `sum-${i}` })])
+    }
+    const findings = b.serialize().findings
+    assert.equal(findings.length, 2000)
+    // The newest findings are retained; the oldest (f-0..f-4) were evicted.
+    assert.equal(findings[0]!.file, 'src/f-5.ts')
+    assert.equal(findings[findings.length - 1]!.file, 'src/f-2004.ts')
+    // Duplicate inserts across threads collapse into one global entry.
+    const b2 = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b2.begin()
+    b2.roundStart(1)
+    b2.reviewerStart('correctness')
+    b2.reviewerFindings([finding({ summary: 'dup' })])
+    b2.reviewerStart('security')
+    b2.reviewerFindings([finding({ summary: 'dup' })]) // same key as above
+    assert.equal(b2.serialize().findings.length, 1)
+  })
+
+  it('decision() snapshots a copy of the data so later caller mutation cannot alias', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    const payload = { action: 'prune', deleted: 1, nested: { a: 1 } }
+    b.decision({ type: 'decision', round: 1, data: payload })
+    payload.deleted = 999
+    ;(payload.nested as { a: number }).a = 42
+    const timelineData = b.serialize().timeline[0]!.data as Record<string, unknown>
+    assert.equal(timelineData.deleted, 1)
+    assert.deepEqual(timelineData.nested, { a: 1 })
+  })
+
   it('uses -1 placeholders when convergence rounds are filled out of order', () => {
     const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
     b.snapshotConvergence(3, 7)

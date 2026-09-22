@@ -1,4 +1,14 @@
-import { appendFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs'
+import {
+  appendFileSync,
+  readFileSync,
+  mkdirSync,
+  existsSync,
+  openSync,
+  writeSync,
+  closeSync,
+  unlinkSync,
+  statSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -7,6 +17,109 @@ import type { DecisionLogEntry } from '../types.ts'
 
 const LOG_DIR = '.iterate'
 const LOG_FILE = 'decision-log.jsonl'
+
+// ─── Cross-process log mutex ────────────────────────────────────────────────
+//
+// The prune rewrite (temp + atomic rename) can silently discard an audit line
+// from a CONCURRENT appender whose fd was opened against the pre-rename inode:
+// the appender writes to the unlinked inode, the post-rewrite re-read sees a
+// "stable" file, and the fresh entry is lost. In-process safety is guaranteed
+// by synchronous I/O, but a second plugin process appending to the same
+// project realises the race. The log is serialized with a tiny advisory lock
+// file (exclusive create, pid stamped, stale-stealable) so `append` and the
+// prune rewrite mutually exclude across processes. Best-effort: contention
+// timeouts degrade to "proceed unlocked" (the bounded retry loop in prune.ts
+// stays as defense-in-depth), never to a crash.
+
+const LOCK_FILE = '.decision-log.lock'
+const LOCK_WAIT_MS = 5000
+const LOCK_STALE_MS = 10000
+const LOCK_POLL_MS = 25
+
+/** True when a pid refers to a live process (or we lack permission to tell). */
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** Synchronous busy-wait sleep (Atomics.wait is a reliable sleep in Node). */
+function sleepSync(ms: number): void {
+  const sab = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(sab, 0, 0, ms)
+}
+
+/**
+ * Acquire the decision-log lock for `projectRoot`.
+ * Returns a release function (always callable; a no-op when the lock could
+ * not be taken — never wedge an append behind a vanished holder).
+ */
+export function acquireLogLock(projectRoot: string): () => void {
+  const dir = join(projectRoot, LOG_DIR)
+  if (!existsSync(dir)) {
+    try {
+      mkdirSync(dir, { recursive: true })
+    } catch {
+      return () => {}
+    }
+  }
+  const lockPath = join(dir, LOCK_FILE)
+  const start = Date.now()
+  for (;;) {
+    let fd: number | null = null
+    try {
+      fd = openSync(lockPath, 'wx')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return () => {}
+      // Lock exists — steal it when the owner is gone or the lock is ancient.
+      let stale = false
+      try {
+        const st = statSync(lockPath)
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) stale = true
+        else {
+          const pid = Number(readFileSync(lockPath, 'utf-8'))
+          if (!processAlive(pid)) stale = true
+        }
+      } catch {
+        stale = true // unreadable/vanishing lock → retry as stale
+      }
+      if (stale) {
+        try { unlinkSync(lockPath) } catch { /* another holder stole it */ }
+        continue
+      }
+      if (Date.now() - start > LOCK_WAIT_MS) return () => {}
+      sleepSync(LOCK_POLL_MS)
+      continue
+    }
+    // Owned the lock: stamp the holder pid, then release once on return.
+    try { writeSync(fd, String(process.pid)) } catch { /* pid stamp is advisory */ }
+    try { closeSync(fd) } catch { /* best-effort */ }
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      try { unlinkSync(lockPath) } catch { /* already gone */ }
+    }
+  }
+}
+
+// ─── Entry-count cache (avoid an O(n) full re-read per append) ─────────────
+
+const entryCountCache = new Map<string, { size: number; count: number }>()
+
+/** Line-count the log file from scratch (entries = non-empty JSON lines). */
+function recountEntries(filePath: string): number {
+  try {
+    const content = readFileSync(filePath, 'utf-8')
+    return content.split('\n').filter((l) => l.trim().length > 0).length
+  } catch {
+    return 1
+  }
+}
 
 /** All valid DecisionLogEntry `type` values (must stay in sync with Types). */
 const VALID_ENTRY_TYPES = new Set<DecisionLogEntry['type']>([
@@ -57,23 +170,30 @@ function logPath(projectRoot: string): string {
  * miss without failing the mutation they already performed.
  */
 export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry): { count: number; path: string; error?: string } {
-  let filePath: string
+  // Serialize with the cross-process log lock so an append can never interleave
+  // with a prune rewrite (which renames the file under us).
+  const release = acquireLogLock(projectRoot)
   try {
-    filePath = logPath(projectRoot)
-    const line = JSON.stringify(entry) + '\n'
-    appendFileSync(filePath, line, 'utf-8')
-  } catch (err) {
-    return { count: 0, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` }
+    const filePath = logPath(projectRoot)
+    try {
+      const line = JSON.stringify(entry) + '\n'
+      const prevSize = existsSync(filePath) ? statSync(filePath).size : 0
+      appendFileSync(filePath, line, 'utf-8')
+      // Count entries via the size/count cache: when nothing else changed the
+      // file since our last append (same byte size), count is just +1 — no full
+      // re-read. Falls back to a full re-count whenever the cache is stale.
+      const cached = entryCountCache.get(filePath)
+      const count = cached && cached.size === prevSize
+        ? cached.count + 1
+        : recountEntries(filePath)
+      entryCountCache.set(filePath, { size: existsSync(filePath) ? statSync(filePath).size : prevSize, count })
+      return { count, path: filePath }
+    } catch (err) {
+      return { count: 0, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` }
+    }
+  } finally {
+    release()
   }
-  // Count entries
-  let count = 0
-  try {
-    const content = readFileSync(filePath, 'utf-8')
-    count = content.split('\n').filter((l) => l.trim().length > 0).length
-  } catch {
-    count = 1
-  }
-  return { count, path: filePath }
 }
 
 /**

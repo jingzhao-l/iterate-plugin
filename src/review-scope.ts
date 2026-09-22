@@ -72,8 +72,12 @@ function normalizePath(path: string): string {
   for (const part of cleaned.split(SEP)) {
     if (part === '' || part === '.') continue
     if (part === '..') {
-      if (parts.length > 0) parts.pop()
-      else parts.push(part) // no root segment to pop — keep the leading '..'
+      // Mirrors Python `os.path.normpath`: a leading `..` is preserved and a
+      // second `..` is NEVER collapsed into a bare `/` away — otherwise a
+      // traversal like `../../evil` folds into the single segment `evil` and
+      // the escape becomes undetectable downstream.
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') parts.pop()
+      else parts.push(part)
       continue
     }
     parts.push(part)

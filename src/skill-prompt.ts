@@ -357,10 +357,10 @@ for (let r = startRound; r <= maxRounds; r++) {
     const byFile = {}
     atomic.forEach(f => { (byFile[f.file] = byFile[f.file] || []).push(f) })
     const fixRes = await parallel(Object.keys(byFile).map(file => () => agent(
-      'Apply the fixes for ' + file + ' using iterate_fix. For EACH finding in this list, ' +
+      'Apply the fixes for ' + JSON.stringify(file) + ' using iterate_fix. For EACH finding in this list, ' +
       'read the current file, compute the edited full content (change <= ' + atomicMaxLines + ' lines), and call ' +
-      'iterate_fix({ file: "' + file + '", content: <full new file content>, finding: <that finding>, round: ' + r + ' }). ' +
-      'Apply the findings IN ORDER. After all fixes, call iterate_diff({ file: "' + file + '" }) to verify the accumulated diff and ' +
+      'iterate_fix({ file: ' + JSON.stringify(file) + ', content: <full new file content>, finding: <that finding>, round: ' + r + ' }). ' +
+      'Apply the findings IN ORDER. After all fixes, call iterate_diff({ file: ' + JSON.stringify(file) + ' }) to verify the accumulated diff and ' +
       'read its line statistics (lines added/removed). ' +
       'Findings: ' + JSON.stringify(byFile[file]) + '. Return the array of {id, ok, error, file, linesAdded, linesRemoved} per iterate_fix call ' +
       '(id/ok required; put the file-wide line stats from iterate_diff on each record, or on the last record and 0 elsewhere).',

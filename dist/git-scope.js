@@ -89,7 +89,10 @@ function decodeQuotedPath(content) {
 }
 export function parseChangedFiles(stdout) {
     if (stdout.includes('\0')) {
-        return stdout.split('\0').map((s) => s.trim()).filter((s) => s.length > 0);
+        // NUL mode: git emits exact names with no surrounding whitespace, so any
+        // trim would CORRUPT a filename that legitimately starts/ends with spaces
+        // (git supports such names). Split and drop only the trailing empty entry.
+        return stdout.split('\0').filter((s) => s.length > 0);
     }
     return stdout
         .split('\n')
@@ -147,9 +150,15 @@ export function decideScope(changedFiles) {
  * Uses execFile (no shell), so a model-controlled branch name can never be
  * interpreted as shell syntax.
  */
-export function runGit(args, cwd) {
+export function runGit(args, cwd, opts = {}) {
     return new Promise((resolve) => {
-        execFile('git', args, { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env, PAGER: 'cat' } }, (error, stdout, stderr) => {
+        execFile('git', args, {
+            cwd,
+            timeout: 30_000,
+            maxBuffer: 10 * 1024 * 1024,
+            env: { ...process.env, PAGER: 'cat' },
+            signal: opts.signal,
+        }, (error, stdout, stderr) => {
             const exitCode = error ? (typeof error.code === 'number' ? error.code : 1) : 0;
             resolve({ ok: exitCode === 0, stdout: stdout ?? '', stderr: stderr ?? '', exitCode });
         });
@@ -161,7 +170,7 @@ export function runGit(args, cwd) {
  * `full`-scope result with `error` set — the reviewer must never crash the
  * plan because git is unavailable.
  */
-export async function resolveChangedFiles(root, targetBranch) {
+export async function resolveChangedFiles(root, targetBranch, opts = {}) {
     // Option-injection guard: a branch name starting with '-' would be parsed by
     // git as an option (e.g. --output=...), not a ref. Reject it outright.
     if (typeof targetBranch !== 'string' || targetBranch.trim() === '' || targetBranch.startsWith('-')) {
@@ -174,7 +183,7 @@ export async function resolveChangedFiles(root, targetBranch) {
     }
     // -z: NUL-delimited names — machine-safe for any filename (spaces, quotes,
     // non-ASCII), and never confused with option-like content.
-    const { ok, stdout, stderr } = await runGit(['diff', '--name-only', '-z', targetBranch, '--'], root);
+    const { ok, stdout, stderr } = await runGit(['diff', '--name-only', '-z', targetBranch, '--'], root, opts);
     if (!ok) {
         const reason = stderr.trim() || `git diff --name-only -z ${targetBranch} failed`;
         return { scope: 'full', changedFiles: [], fallbackToFull: true, error: reason };

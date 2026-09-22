@@ -14,7 +14,7 @@ import {
   sweepDefenseEvents,
   MAX_EXPERIENCE_ENTRIES,
 } from '../src/tools/prune.ts'
-import { appendDecisionEntry } from '../src/tools/decision-log.ts'
+import { appendDecisionEntry, readDecisionEntries } from '../src/tools/decision-log.ts'
 import { emptyRegistry, upsertRecord } from '../src/tools/fix.ts'
 import { readExperienceBank, writeExperienceBank } from '../src/tools/experience-store.ts'
 import { readDefenseEvents, writeDefenseEvents } from '../src/tools/defense-store.ts'
@@ -289,6 +289,10 @@ describe('isPrunableTemp', () => {
     assert.equal(isPrunableTemp('.foo.tmpx'), false)
     assert.equal(isPrunableTemp('backups'), false)
   })
+
+  it('never sweeps the decision-log lock file (it may guard a live append in flight)', () => {
+    assert.equal(isPrunableTemp('.decision-log.lock'), false)
+  })
 })
 
 // ─── stray temp file sweep (inspect + execute) ──────────────────────────────
@@ -394,6 +398,44 @@ describe('iterate_prune tool', () => {
     cleanup()
   })
 
+  it('concurrent-appender lock is stolen when its holder is dead, so prune still runs', async () => {
+    const { dir, cleanup } = tempProject()
+    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+    // Simulate a crashed second process that left its lock behind (dead pid).
+    writeFileSync(join(iterateDir(dir), '.decision-log.lock'), '99999999', 'utf-8')
+    const tool = captureTool()
+    const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
+    assert.equal(out.ok, true)
+    const result = out.result as { deletedLogEntries: number; errors: string[] }
+    assert.equal(result.deletedLogEntries, 1)
+    assert.deepEqual(result.errors, [])
+    // The lock is gone (released by the rewrite) and no stale lock is left sweeping.
+    assert.equal(existsSync(join(iterateDir(dir), '.decision-log.lock')), false)
+    cleanup()
+  })
+
+  it('surfaces a failed prune decision-log append in result.errors (F2)', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      // decision-log.jsonl is a DIRECTORY → appending the prune audit entry
+      // fails with EISDIR. The deletions still happen, but the audit miss must
+      // be reported, never silently swallowed.
+      mkdirSync(join(dir, '.iterate', 'decision-log.jsonl'), { recursive: true })
+      writeFileSync(checkpointPath(dir), '{}', 'utf-8')
+      const tool = captureTool()
+      const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
+      assert.equal(out.ok, true)
+      const result = out.result as { deletedCheckpoint: boolean; errors: string[] }
+      assert.equal(result.deletedCheckpoint, true)
+      assert.ok(
+        result.errors.some((e) => e.includes('failed to append decision log')),
+        `expected an append error in ${JSON.stringify(result.errors)}`,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
   it('render shows dry-run guidance', async () => {
     const { dir, cleanup } = tempProject()
     const tool = captureTool()
@@ -409,6 +451,25 @@ describe('iterate_prune tool', () => {
     const out = (await tool.execute({ path: '/' })) as Record<string, unknown>
     assert.equal(out.ok, false)
     assert.equal(typeof out.error, 'string')
+  })
+})
+
+// ─── decision-log cross-process lock (F19) ──────────────────────────────────
+
+describe('decision-log lock', () => {
+  it('appendDecisionEntry steals a stale lock left by a dead holder', () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(iterateDir(dir), { recursive: true })
+    // A crashed process's lock: pid 99999999 does not exist, so it is stale
+    // and must be stolen rather than wedging future appends for 5s.
+    writeFileSync(join(iterateDir(dir), '.decision-log.lock'), '99999999', 'utf-8')
+    const res = appendDecisionEntry(dir, entry({ type: 'decision', data: { ok: true } }))
+    assert.equal(res.error, undefined)
+    assert.equal(res.count, 1)
+    assert.equal(readDecisionEntries(dir).length, 1)
+    // The lock was released cleanly after the append.
+    assert.equal(existsSync(join(iterateDir(dir), '.decision-log.lock')), false)
+    cleanup()
   })
 })
 

@@ -90,7 +90,10 @@ function decodeQuotedPath(content: string): string {
 
 export function parseChangedFiles(stdout: string): string[] {
   if (stdout.includes('\0')) {
-    return stdout.split('\0').map((s) => s.trim()).filter((s) => s.length > 0)
+    // NUL mode: git emits exact names with no surrounding whitespace, so any
+    // trim would CORRUPT a filename that legitimately starts/ends with spaces
+    // (git supports such names). Split and drop only the trailing empty entry.
+    return stdout.split('\0').filter((s) => s.length > 0)
   }
   return stdout
     .split('\n')
@@ -152,12 +155,19 @@ export function decideScope(changedFiles: string[]): {
 export function runGit(
   args: string[],
   cwd: string,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     execFile(
       'git',
       args,
-      { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env, PAGER: 'cat' } },
+      {
+        cwd,
+        timeout: 30_000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, PAGER: 'cat' },
+        signal: opts.signal,
+      },
       (error, stdout, stderr) => {
         const exitCode = error ? (typeof error.code === 'number' ? error.code : 1) : 0
         resolve({ ok: exitCode === 0, stdout: stdout ?? '', stderr: stderr ?? '', exitCode })
@@ -175,6 +185,7 @@ export function runGit(
 export async function resolveChangedFiles(
   root: string,
   targetBranch: string,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<GitScopeResult> {
   // Option-injection guard: a branch name starting with '-' would be parsed by
   // git as an option (e.g. --output=...), not a ref. Reject it outright.
@@ -188,7 +199,7 @@ export async function resolveChangedFiles(
   }
   // -z: NUL-delimited names — machine-safe for any filename (spaces, quotes,
   // non-ASCII), and never confused with option-like content.
-  const { ok, stdout, stderr } = await runGit(['diff', '--name-only', '-z', targetBranch, '--'], root)
+  const { ok, stdout, stderr } = await runGit(['diff', '--name-only', '-z', targetBranch, '--'], root, opts)
   if (!ok) {
     const reason = stderr.trim() || `git diff --name-only -z ${targetBranch} failed`
     return { scope: 'full', changedFiles: [], fallbackToFull: true, error: reason }

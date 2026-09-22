@@ -99,7 +99,7 @@ export function metaReviewReport(report) {
     if (dimSum !== total) {
         add('DIMENSION_SUM', 'high', 'byDimension counts do not sum to totalFindings', `byDimension sums to ${dimSum}, but totalFindings is ${total}.`);
     }
-    const invalidDim = findings.find((f) => !dimensions.includes(f?.dimension));
+    const invalidDim = findings.find((f) => !!f && !dimensions.includes(f?.dimension));
     if (invalidDim) {
         add('DIMENSION_UNKNOWN', 'medium', `Finding references unknown dimension "${invalidDim.dimension}"`, `dimension "${invalidDim.dimension}" is not in report.dimensions ` +
             `(${dimensions.join(', ') || 'none'}).`);
@@ -227,7 +227,7 @@ export function buildFinalReviewReport(report, opts = {}) {
                     // Try to attribute the poisoned finding to the round that first
                     // surfaced it (best-effort; report rounds carry it).
                     for (const r of report.rounds ?? []) {
-                        const matched = (r.findings ?? []).some((fnd) => fnd.file === violation.file && fnd.line === violation.line);
+                        const matched = (r.findings ?? []).some((fnd) => !!fnd && fnd?.file === violation.file && fnd?.line === violation.line);
                         if (matched) {
                             roundHint = ` (round ${r.round})`;
                             break;

@@ -17,6 +17,20 @@
  *   updates), so these jobs are completion records, not control channels.
  */
 /**
+ * Read `ctx.jobs` defensively: the dsh plugin context can be a Proxy whose
+ * `jobs` getter throws (or is missing) when no job registry is present. A
+ * Proxy throw on property access must degrade to "no jobs", never crash the
+ * tool execution we are about to wrap.
+ */
+function safeJobs(ctx) {
+    try {
+        return ctx?.jobs;
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
  * Run `fn` wrapped in a dsh background job, settling it completed/failed
  * with the execution's outcome. When the host exposes no job registry (or
  * refuses the start), `fn` runs untouched and `null` is returned — the Job
@@ -29,7 +43,7 @@
  * @returns the registry-issued job id, or `null` when unavailable.
  */
 export async function runWithJob(ctx, kind, label, fn) {
-    const jobs = ctx?.jobs;
+    const jobs = safeJobs(ctx);
     if (!jobs || typeof jobs.start !== 'function') {
         return { result: await fn(), jobId: null };
     }

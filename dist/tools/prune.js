@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
 import { writeTextAtomic, writeJsonAtomic } from "../atomic-fs.js";
-import { readDecisionEntries, appendDecisionEntry } from "./decision-log.js";
+import { readDecisionEntries, appendDecisionEntry, acquireLogLock } from "./decision-log.js";
 import { readRegistry, recomputeRoundCounts } from "./fix.js";
 import { readExperienceBank, writeExperienceBank } from "./experience-store.js";
 import { readDefenseEvents, writeDefenseEvents } from "./defense-store.js";
@@ -234,26 +234,36 @@ export function inspectPrune(projectRoot, retainDays) {
  */
 function rewriteDecisionLogKeepingRecent(projectRoot, cutoff) {
     const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl');
-    for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
-        try {
-            const entries = readDecisionEntries(projectRoot);
-            const kept = entries.filter((e) => e.timestamp >= cutoff);
-            const deleted = entries.length - kept.length;
-            if (deleted === 0)
-                return { deleted: 0 };
-            writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n');
-            // A concurrent appender may have landed new lines after our read. If the
-            // log grew during the write window, re-read and prune again instead of
-            // accepting a lost audit trail.
-            const after = readDecisionEntries(projectRoot);
-            if (after.length <= kept.length)
-                return { deleted };
+    // Take the cross-process log lock for the ENTIRE loop: with the mutex held,
+    // no concurrent appender can slip a fresh line into the read-before-rewrite
+    // window, so the first attempt is nearly always the only one. (The retry
+    // loop stays as defense-in-depth for the lock-unavailable path.)
+    const release = acquireLogLock(projectRoot);
+    try {
+        for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
+            try {
+                const entries = readDecisionEntries(projectRoot);
+                const kept = entries.filter((e) => e.timestamp >= cutoff);
+                const deleted = entries.length - kept.length;
+                if (deleted === 0)
+                    return { deleted: 0 };
+                writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n');
+                // A concurrent appender (cross-process, lock-unavailable path) may have
+                // landed new lines after our read. If the log grew during the write
+                // window, re-read and prune again instead of accepting a lost audit trail.
+                const after = readDecisionEntries(projectRoot);
+                if (after.length <= kept.length)
+                    return { deleted };
+            }
+            catch (err) {
+                return { deleted: 0, error: `failed to rewrite decision log: ${String(err)}` };
+            }
         }
-        catch (err) {
-            return { deleted: 0, error: `failed to rewrite decision log: ${String(err)}` };
-        }
+        return { deleted: 0, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` };
     }
-    return { deleted: 0, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` };
+    finally {
+        release();
+    }
 }
 /**
  * Execute the prune: apply every cleanable item reported by `inspectPrune`.
@@ -459,8 +469,10 @@ export function registerPruneTool(ctx) {
                 };
             }
             const result = executePrune(projectRoot, retainDays, report);
-            // Log the prune to the decision log.
-            appendDecisionEntry(projectRoot, {
+            // Log the prune to the decision log. The mutations already happened, so
+            // a failed log append is reported via `errors` — a silent audit miss
+            // (F2) must never pretend every deletion was recorded.
+            const logRes = appendDecisionEntry(projectRoot, {
                 timestamp: new Date().toISOString(),
                 round: 0,
                 type: 'decision',
@@ -475,6 +487,8 @@ export function registerPruneTool(ctx) {
                     deletedDefenseEvents: result.deletedDefenseEvents,
                 },
             });
+            if (logRes.error)
+                result.errors.push(logRes.error);
             return {
                 ok: true,
                 dryRun: false,

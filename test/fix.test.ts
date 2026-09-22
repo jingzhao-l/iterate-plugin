@@ -464,6 +464,49 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
     }
   })
 
+  it('rejects a content-identical no-op fix without touching any state', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      // Sending the CURRENT content back must not create a backup, a registry
+      // record, a decision-log entry, or rewrite the file — and force:true
+      // must NOT let a non-edit masquerade as a fix.
+      const res = (await fix({ file: 'src/app.ts', content: ORIGINAL, finding: finding(), round: 1, path: dir })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /no changes/)
+      const forced = (await fix({ file: 'src/app.ts', content: ORIGINAL, finding: finding(), round: 1, path: dir, force: true })) as Record<string, unknown>
+      assert.equal(forced.ok, false)
+      assert.match(String(forced.error), /no changes/)
+      // Nothing was written: no .iterate artifacts and the file is untouched.
+      assert.equal(existsSync(join(dir, '.iterate', 'fixes')), false)
+      assert.equal(existsSync(join(dir, '.iterate', 'decision-log.jsonl')), false)
+      assert.equal(readFileSync(join(dir, 'src/app.ts'), 'utf-8'), ORIGINAL)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('surfaces a decision-log append failure as a warning (fix + rollback)', async () => {
+    const [fix, rollback] = captureTools([registerFixTool, registerRollbackTool]) as [Tool, Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      // A DIRECTORY at decision-log.jsonl makes every append fail with EISDIR,
+      // forcing the F2 path: the mutation still succeeds but the audit miss is
+      // surfaced instead of dropped.
+      mkdirSync(join(dir, '.iterate', 'decision-log.jsonl'), { recursive: true })
+      const fixRes = (await fix({ file: 'src/app.ts', content: FIXED, finding: finding(), round: 1, path: dir })) as Record<string, unknown>
+      assert.equal(fixRes.ok, true)
+      assert.match(String(fixRes.warning), /failed to append decision log/)
+      const rbRes = (await rollback({ id: String(fixRes.id), path: dir })) as Record<string, unknown>
+      assert.equal(rbRes.ok, true)
+      assert.match(String(rbRes.warning), /failed to append decision log/)
+      // The file was still restored even though the audit write failed.
+      assert.equal(readFileSync(join(dir, 'src/app.ts'), 'utf-8'), ORIGINAL)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('validates inputs: missing file / content / round / finding', async () => {
     const [fix] = captureTools([registerFixTool]) as [Tool]
     const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
