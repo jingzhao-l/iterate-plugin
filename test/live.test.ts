@@ -14,6 +14,7 @@ import {
   readLive,
   liveFilePath,
   LIVE_MAX_ENTRIES,
+  registerLiveCapture,
   type LiveActivityEntry,
 } from '../src/live.ts'
 
@@ -123,4 +124,53 @@ test('readLive: tolerates a malformed line without throwing', async () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('registerLiveCapture: wires the tools/result hook onto the live feed', async () => {
+  let captured: unknown = null
+  const ctx = {
+    on: (_ev: string, fn: (exec: unknown) => void) => {
+      captured = fn
+      return () => { captured = null }
+    },
+  }
+  registerLiveCapture(ctx as never)
+  assert.equal(typeof captured, 'function', 'tools/result handler must be registered')
+  const invoke = captured as (exec: { name: string; arguments?: unknown; agent?: unknown }) => void
+
+  const root = freshRoot()
+  try {
+    invoke({
+      name: 'iterate_review',
+      arguments: { operation: 'aggregate' },
+      agent: { session: { header: { cwd: root } } },
+    })
+    // Fire-and-forget append — poll until it lands.
+    let live: LiveActivityEntry[] = []
+    for (let i = 0; i < 100 && live.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 25))
+      live = await readLive(root)
+    }
+    assert.equal(live.length, 1)
+    assert.equal(live[0]?.type, 'review')
+    assert.equal(live[0]?.target, 'aggregate')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('registerLiveCapture: tools/result without a resolvable cwd is a no-op', async () => {
+  let captured: unknown = null
+  const ctx = {
+    on: (_ev: string, fn: (exec: unknown) => void) => {
+      captured = fn
+      return () => { captured = null }
+    },
+  }
+  registerLiveCapture(ctx as never)
+  assert.equal(typeof captured, 'function')
+  const invoke = captured as (exec: { name: string; arguments?: unknown; agent?: unknown }) => void
+  // No session cwd → projectRootOf returns null → nothing appended, no throw.
+  invoke({ name: 'iterate_fix', arguments: { file: 'src/a.ts' } })
+  assert.ok(true)
 })

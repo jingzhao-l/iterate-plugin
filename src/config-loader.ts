@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import yaml from 'js-yaml'
@@ -217,7 +217,25 @@ export function resolveProjectRoot(input?: string, sessionCwd?: string): Project
   if (raw.includes('\0')) {
     return { ok: false, reason: 'Refusing project root containing NUL bytes.' }
   }
-  const root = raw ? resolve(raw) : resolve(effectiveCwd(sessionCwd))
+  const rootLexical = raw ? resolve(raw) : resolve(effectiveCwd(sessionCwd))
+  // Collapse symlinks (documented contract: "collapsing `..` and symlinks") —
+  // a path through a symlinked directory must resolve to its REAL location so
+  // two aliases of the same project share one `.iterate/` state, and tools can
+  // never read outside the resolved root via a link. Only when the path
+  // exists: a not-yet-created target (dirs created through the tools) keeps
+  // the lexical path so the caller can still write into it. The filesystem
+  // root check runs against the NORMALIZED path, so a symlink to `/` is
+  // refused too.
+  let root = rootLexical
+  try {
+    if (existsSync(rootLexical)) {
+      const real = realpathSync(rootLexical)
+      if (real) root = real
+    }
+  } catch {
+    // realpath can throw on a broken link or a permission fence — keep the
+    // lexical path (existing behavior) rather than failing the resolution.
+  }
   if (!root || root === sep) {
     return { ok: false, reason: 'Refusing filesystem root as project root.' }
   }

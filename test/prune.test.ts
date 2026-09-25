@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, readdirSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -207,12 +207,16 @@ describe('inspectPrune', () => {
 // ─── executePrune ────────────────────────────────────────────────────────────
 
 describe('executePrune', () => {
-  it('deletes old log entries, checkpoint, stale backups', () => {
+  it('deletes old log entries, stale checkpoint, stale backups', () => {
     const { dir, cleanup } = tempProject()
     appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
     appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: {} }))
     mkdirSync(iterateDir(dir), { recursive: true })
+    // A checkpoint is only pruned when STALE — age its mtime past retainDays so
+    // it counts as leftover from an abandoned run rather than a fresh resume
+    // point. (A fresh checkpoint must survive a prune; see the test below.)
     writeFileSync(checkpointPath(dir), '{}', 'utf-8')
+    utimesSync(checkpointPath(dir), new Date(Date.now() - 60 * 86400000), new Date(Date.now() - 60 * 86400000))
     mkdirSync(fixesDir(dir), { recursive: true })
     writeFileSync(join(fixesDir(dir), 'fix-dead_2026-08-17T00-00-00-000Z.bak'), 'x', 'utf-8')
     const registry = upsertRecord(emptyRegistry(), record({ id: 'fix-live' }))
@@ -235,6 +239,21 @@ describe('executePrune', () => {
     cleanup()
   })
 
+  it('keeps a fresh checkpoint (resume point) and reports it as not stale', () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(iterateDir(dir), { recursive: true })
+    writeFileSync(checkpointPath(dir), '{}', 'utf-8') // written NOW → fresh
+
+    const report = inspectPrune(dir, 30)
+    assert.equal(report.hasCheckpoint, true)
+    assert.equal(report.checkpointStale, false)
+
+    const result = executePrune(dir, 30, report)
+    assert.equal(result.deletedCheckpoint, false)
+    assert.equal(existsSync(checkpointPath(dir)), true)
+    cleanup()
+  })
+
   it('collects errors instead of swallowing them', () => {
     const { dir, cleanup } = tempProject()
     // Make the fixes directory un-deletable by pointing a stale backup at a
@@ -242,6 +261,7 @@ describe('executePrune', () => {
     const report = {
       oldLogEntries: 0,
       hasCheckpoint: false,
+      checkpointStale: false,
       staleBackups: ['nope/fix-dead_2026-08-17T00-00-00-000Z.bak'],
       staleTemps: [] as string[],
       emptyRounds: [] as number[],
@@ -422,6 +442,8 @@ describe('iterate_prune tool', () => {
       // be reported, never silently swallowed.
       mkdirSync(join(dir, '.iterate', 'decision-log.jsonl'), { recursive: true })
       writeFileSync(checkpointPath(dir), '{}', 'utf-8')
+      // Age the checkpoint so it counts as stale (only stale checkpoints are pruned).
+      utimesSync(checkpointPath(dir), new Date(Date.now() - 60 * 86400000), new Date(Date.now() - 60 * 86400000))
       const tool = captureTool()
       const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
       assert.equal(out.ok, true)

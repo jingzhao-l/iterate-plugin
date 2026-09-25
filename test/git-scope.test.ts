@@ -9,6 +9,7 @@ import {
   filterExistingFiles,
   decideScope,
   resolveChangedFiles,
+  runGit,
 } from '../src/git-scope.ts'
 
 describe('parseChangedFiles', () => {
@@ -185,5 +186,37 @@ describe('resolveChangedFiles', () => {
     assert.equal(result.changedFiles.includes('untracked.ts'), false)
     assert.equal(result.fallbackToFull, false)
     assert.equal(result.error, undefined)
+  })
+})
+
+describe('runGit', () => {
+  it('runs a successful git command and surfaces stdout', async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'git-scope-'))
+    try {
+      const env = { ...process.env, PAGER: 'cat' }
+      execFileSync('git', ['init', '-q'], { cwd: root, env })
+    } catch {
+      t.skip('git is not available in the test environment')
+      return
+    }
+    const result = await runGit(['status', '--porcelain'], root)
+    assert.equal(result.ok, true)
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.stderr, '')
+    assert.equal(typeof result.stdout, 'string')
+  })
+
+  it('reports a non-zero exit code without throwing (no shell interpretation)', async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'git-scope-'))
+    try {
+      const env = { ...process.env, PAGER: 'cat' }
+      execFileSync('git', ['init', '-q'], { cwd: root, env })
+    } catch {
+      t.skip('git is not available in the test environment')
+      return
+    }
+    const result = await runGit(['status', '--porcelain', '--received-does-not-exist-flag'], root)
+    assert.equal(result.ok, false)
+    assert.ok(result.exitCode !== 0, 'usage error must be a non-zero exit code')
   })
 })

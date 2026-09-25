@@ -489,6 +489,29 @@ describe('buildReviewPlan', () => {
     }
   })
 
+  it('carries reasoning_effort on the plan and into every reviewer prompt', () => {
+    const configured = { ...baseConfig, reasoning_effort: 'high' as const }
+    const plan = buildReviewPlan({ config: configured, mode: 'normal', maxReviewRounds: 3 })
+    assert.equal(plan.reasoningEffort, 'high')
+    for (const d of plan.dimensions) {
+      assert.match(d.reviewerPrompt, /Reasoning effort for this review pass: high\./)
+    }
+  })
+
+  it('reports a null reasoning_effort when unset and omits the directive', () => {
+    const plan = buildReviewPlan({ config: baseConfig, mode: 'normal', maxReviewRounds: 3 })
+    assert.equal(plan.reasoningEffort, null)
+    for (const d of plan.dimensions) {
+      assert.ok(!d.reviewerPrompt.includes('Reasoning effort for this review pass'))
+    }
+  })
+
+  it('ignores an out-of-range reasoning_effort value defensively', () => {
+    const bad = { ...baseConfig, reasoning_effort: 'ultra' as unknown as IterateConfig['reasoning_effort'] }
+    const plan = buildReviewPlan({ config: bad, mode: 'normal', maxReviewRounds: 3 })
+    assert.equal(plan.reasoningEffort, null)
+  })
+
   it('degrades gracefully when config.dimensions is not an array', () => {
     const bad = { ...baseConfig, dimensions: 'not-an-array' as unknown as string[] }
     const plan = buildReviewPlan({ config: bad, mode: 'dry-run', maxReviewRounds: 3 })

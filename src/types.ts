@@ -18,9 +18,12 @@ export interface IterateConfig {
   }
   /**
    * LLM reasoning effort for review passes ('low' | 'medium' | 'high').
-   * Absent → follow the provider default. The harness forwards it into the
-   * OpenAI-compatible request body; the plugin surfaces it in the settings
-   * panel and review plan (dsh 0.1.1-rc.7+ exposes the same 'low' effort).
+   * Absent → follow the provider default. Accepted by `iterate_config` write
+   * validation (config-write), exposed in the settings guide, and carried on
+   * the review plan (`buildReviewPlan.reasoningEffort`, plus an effort
+   * directive injected into every reviewer prompt) so the orchestrating
+   * harness can honor it per reviewer subagent. The plugin itself never reads
+   * or modifies the provider request body.
    */
   reasoning_effort?: 'low' | 'medium' | 'high'
   reviewer: {
@@ -226,7 +229,9 @@ export interface IterationStatus {
   findingsCount: number
   totalDecisionLogEntries: number
   hasCheckpoint: boolean
-  /** True when a checkpoint is present — i.e. the previous run was interrupted before finishing. */
+  /** True when a checkpoint is present AND no decision-log entry is newer than
+   *  it — i.e. the previous run left a checkpoint and nothing has logged since
+   *  (a live run that saved progress keeps `interrupted=false`). */
   interrupted: boolean
   /** How many times the current checkpoint has already been resumed. */
   resumeCount: number

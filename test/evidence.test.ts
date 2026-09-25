@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -140,6 +140,52 @@ describe('verifyFinding', () => {
       assert.equal(res.verified, false)
       assert.equal(res.error, 'file_not_found')
     }
+  })
+
+  it('accepts a symlink pointing to a real file inside the project root', () => {
+    const root = realRepo()
+    writeFileSync(join(root, 'real.ts'), 'one\ntwo\nthree\n')
+    symlinkSync(join(root, 'real.ts'), join(root, 'link.ts'))
+    const res = verifyFinding(root, { file: 'link.ts', line: 2 })
+    assert.equal(res.verified, true)
+    assert.equal(res.error, undefined)
+    // resolvedPath is the lexical in-root path reported by the verifier; it
+    // realpaths to the symlink target (a real file inside the project root).
+    assert.equal(res.resolvedPath, join(root, 'link.ts'))
+    assert.equal(realpathSync(join(root, 'link.ts')), realpathSync(join(root, 'real.ts')))
+    assert.equal(res.lineTotal, 3)
+  })
+
+  it('treats a broken symlink (missing target) as file_not_found', () => {
+    const root = realRepo()
+    symlinkSync(join(root, 'ghost.ts'), join(root, 'broken.ts'))
+    const res = verifyFinding(root, { file: 'broken.ts', line: 1 })
+    assert.equal(res.verified, false)
+    assert.equal(res.error, 'file_not_found')
+  })
+
+  it('reports lineTotal 0 and rejects a line-1 finding on an empty file', () => {
+    const root = realRepo()
+    writeFileSync(join(root, 'empty.ts'), '')
+    const res = verifyFinding(root, { file: 'empty.ts', line: 1 })
+    assert.equal(res.verified, false)
+    assert.equal(res.error, 'line_out_of_range')
+    assert.equal(res.lineTotal, 0)
+    // Whole-file findings against the empty file stay bounds-valid.
+    const whole = verifyFinding(root, { file: 'empty.ts', line: 0 })
+    assert.equal(whole.verified, true)
+    assert.equal(whole.lineTotal, 0)
+  })
+
+  it('treats an oversized file as not line-addressable without throwing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'evidence-big-'))
+    const big = Buffer.alloc(10 * 1024 * 1024 + 1, 0x61)
+    writeFileSync(join(root, 'huge.ts'), big)
+    const res = verifyFinding(root, { file: 'huge.ts', line: 1 })
+    assert.equal(res.verified, false)
+    assert.equal(res.error, 'line_out_of_range')
+    assert.equal(res.lineTotal, null)
+    assert.equal(res.resolvedPath, join(root, 'huge.ts'))
   })
 })
 

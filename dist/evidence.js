@@ -83,7 +83,11 @@ export function verifyLineBounds(line, text) {
     if (line === undefined || line === null || line === WHOLE_FILE_LINE) {
         return { inBounds: true, lineTotal };
     }
-    if (line < 1)
+    // Only a positive INTEGER is a valid line anchor. A fractional line (e.g.
+    // 3.7 from a bypassed schema) or a negative value is out of bounds — a
+    // fractional line "within" the file would otherwise be accepted and poison
+    // the evidence trail with a location nothing can jump to.
+    if (line < 1 || !Number.isInteger(line))
         return { inBounds: false, lineTotal };
     return { inBounds: line <= lineTotal, lineTotal };
 }

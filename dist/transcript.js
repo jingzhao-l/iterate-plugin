@@ -82,7 +82,9 @@ function normalizeFinding(input) {
     const severity = sev === 'critical' || sev === 'high' || sev === 'medium' || sev === 'low'
         ? sev
         : 'low';
-    const line = typeof f.line === 'number' && Number.isFinite(f.line) ? f.line : 0;
+    // Only a non-negative integer is a real line anchor; a fractional/malformed
+    // value (e.g. 3.7 from a bypassed schema) must not leak into the manifest.
+    const line = typeof f.line === 'number' && Number.isInteger(f.line) && f.line >= 0 ? f.line : 0;
     return {
         dimension,
         file,
@@ -219,7 +221,9 @@ export class ReviewTranscriptBuilder {
         const att = typeof attempt === 'number' && Number.isFinite(attempt) ? Math.floor(attempt) : 1;
         this.roundStart(this.round);
         const live = this.rounds[this.round - 1];
-        if (live && this.threadCount(live) < MAX_THREADS_PER_ROUND) {
+        if (!live)
+            return;
+        if (this.threadCount(live) < MAX_THREADS_PER_ROUND) {
             live.threads.push({
                 dimension: dim || 'review',
                 attempt: att > 0 ? att : 1,
@@ -228,6 +232,78 @@ export class ReviewTranscriptBuilder {
                 findings: [],
             });
         }
+        else {
+            // Thread cap reached: route the extra dimension/retry into ONE shared
+            // "other" overflow thread instead of silently dropping it. A dropped
+            // reviewerStart used to leave `currentThread()` pointing at the PREVIOUS
+            // dimension's thread, so its findings were mis-attributed to that
+            // dimension. The overflow thread stays bounded (at most ONE extra thread
+            // per round) while keeping over-cap findings attributable to "other".
+            let overflow = live.threads.find((t) => t.dimension === 'other');
+            if (!overflow) {
+                overflow = {
+                    dimension: 'other',
+                    attempt: att > 0 ? att : 1,
+                    messages: [],
+                    readFiles: [],
+                    findings: [],
+                };
+                live.threads.push(overflow);
+            }
+        }
+        this.touch();
+    }
+    /**
+     * Restore ONE persisted thread during rehydration, preserving the message
+     * ARRAY boundaries (a rehydrated manifest is re-serialized on the next nudge
+     * edit, so collapsed messages would silently rewrite the evidence) and the
+     * thread's own dimension (never merging it into a previous dimension's
+     * thread). Bypasses the live per-round cap — the manifest already enforced
+     * it at capture time — but every restored field is hard-bounded so a hostile
+     * hand-edited manifest can never blow up memory.
+     */
+    restoreThread(round, thread) {
+        const r = typeof round === 'number' && Number.isFinite(round)
+            ? Math.min(Math.floor(round), MAX_ROUNDS)
+            : 1;
+        this.roundStart(r);
+        const live = this.rounds[this.round - 1];
+        if (!live)
+            return;
+        if (!thread || typeof thread !== 'object')
+            return;
+        // Hostile-manifest guard: keep the live hard bound (with headroom for the
+        // single overflow thread) and newest-first truncate beyond it.
+        if (live.threads.length >= MAX_THREADS_PER_ROUND * 2 + 1)
+            return;
+        const dim = typeof thread.dimension === 'string' && thread.dimension.trim()
+            ? thread.dimension.trim()
+            : 'review';
+        const att = typeof thread.attempt === 'number' && Number.isFinite(thread.attempt)
+            ? Math.floor(thread.attempt)
+            : 1;
+        const t = {
+            dimension: dim,
+            attempt: att > 0 ? att : 1,
+            messages: [],
+            readFiles: [],
+            findings: [],
+        };
+        const messages = Array.isArray(thread.messages) ? thread.messages : [];
+        for (const m of messages.slice(0, MAX_MESSAGES_PER_THREAD)) {
+            if (typeof m === 'string' && m.trim())
+                t.messages.push(m);
+        }
+        if (Array.isArray(thread.readFiles)) {
+            t.readFiles.push(...dedupePaths(thread.readFiles));
+        }
+        if (Array.isArray(thread.findings)) {
+            for (const f of thread.findings) {
+                if (normalizeFinding(f))
+                    pushThreadFinding(t, f);
+            }
+        }
+        live.threads.push(t);
         this.touch();
     }
     /** Append narration (assistant text) to the current reviewer thread. */

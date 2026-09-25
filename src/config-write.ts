@@ -32,6 +32,9 @@ export const MAX_ATOMIC_MAX_LINES = 10_000
 /** Upper bound on `atomic.max_adjacent_methods`. */
 export const MAX_MAX_ADJACENT_METHODS = 200
 
+/** Upper bound on `reviewer.scope_chunk_size` (files per reviewer task batch). */
+export const MAX_SCOPE_CHUNK_SIZE = 1000
+
 /** Keep at most this many timestamped config backups (older ones are removed). */
 export const MAX_CONFIG_BACKUPS = 5
 
@@ -90,6 +93,35 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
       updates.max_rounds < 1 || updates.max_rounds > MAX_MAX_ROUNDS
     ) {
       errors.push(`updates.max_rounds must be an integer between 1 and ${MAX_MAX_ROUNDS}`)
+    }
+  }
+  if ('reasoning_effort' in updates) {
+    if (
+      updates.reasoning_effort !== undefined &&
+      updates.reasoning_effort !== 'low' &&
+      updates.reasoning_effort !== 'medium' &&
+      updates.reasoning_effort !== 'high'
+    ) {
+      errors.push('updates.reasoning_effort must be "low", "medium", or "high"')
+    }
+  }
+  if ('reviewer' in updates) {
+    const rv = updates.reviewer as Record<string, unknown> | undefined
+    if (!rv || typeof rv !== 'object') {
+      errors.push('updates.reviewer must be an object')
+    } else {
+      for (const boolKey of ['output_schema_validation', 'evidence_validation', 'coverage_validation'] as const) {
+        if (rv[boolKey] !== undefined && typeof rv[boolKey] !== 'boolean') {
+          errors.push(`updates.reviewer.${boolKey} must be a boolean`)
+        }
+      }
+      if (
+        rv.scope_chunk_size !== undefined &&
+        (typeof rv.scope_chunk_size !== 'number' || !Number.isInteger(rv.scope_chunk_size) ||
+          rv.scope_chunk_size < 1 || rv.scope_chunk_size > MAX_SCOPE_CHUNK_SIZE)
+      ) {
+        errors.push(`updates.reviewer.scope_chunk_size must be an integer between 1 and ${MAX_SCOPE_CHUNK_SIZE}`)
+      }
     }
   }
   if ('review' in updates) {

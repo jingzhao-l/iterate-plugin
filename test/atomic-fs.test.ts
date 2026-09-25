@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { writeTextAtomic, writeTextAtomicAsync } from '../src/atomic-fs.ts'
+import { writeTextAtomic, writeTextAtomicAsync, writeJsonAtomic } from '../src/atomic-fs.ts'
 
 function tempDir(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'iterate-atomic-fs-test-'))
@@ -70,6 +70,38 @@ describe('writeTextAtomicAsync', () => {
     try {
       mkdirSync(join(dir, 'target-dir'))
       await assert.rejects(() => writeTextAtomicAsync(join(dir, 'target-dir'), 'x'))
+      assert.deepEqual(tempsIn(dir), [])
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('writeJsonAtomic', () => {
+  it('writes a parseable 2-space-indented JSON file with no temp litter', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const value = { a: 1, nested: { list: [null, true, 'x'], n: 1.5 } }
+      const file = join(dir, 'state.json')
+      writeJsonAtomic(file, value)
+      const raw = readFileSync(file, 'utf-8')
+      assert.deepEqual(JSON.parse(raw), value)
+      assert.ok(raw.includes('\n  "a": 1'), 'expected 2-space indentation, got: ' + raw)
+      assert.deepEqual(tempsIn(dir), [])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('overwrites an existing file atomically (previous content never survives)', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const file = join(dir, 'state.json')
+      writeJsonAtomic(file, { v: 'old' })
+      writeJsonAtomic(file, { v: 'new', n: 42 })
+      const parsed = JSON.parse(readFileSync(file, 'utf-8')) as { v: string; n: number }
+      assert.equal(parsed.v, 'new')
+      assert.equal(parsed.n, 42)
       assert.deepEqual(tempsIn(dir), [])
     } finally {
       cleanup()

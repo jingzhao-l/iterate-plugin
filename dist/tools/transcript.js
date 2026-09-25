@@ -148,7 +148,7 @@ export function registerTranscriptTool(ctx) {
                 description: 'For `capture`: array of applied fixes [{id, file, round, summary, linesAdded, linesRemoved, success}].',
             },
             refReadFiles: { type: 'json', description: 'For `capture`: flat array of all read files across rounds (optional).' },
-            stoppedReason: { type: 'string', description: 'For `capture`: why the run ended — "converged" | "max_rounds_reached" | "aborted_by_validation". When omitted, derived from the convergence trend (trailing 0 = converged, otherwise = max_rounds_reached once a round ran).' },
+            stoppedReason: { type: 'string', description: 'For `capture`: why the run ended — "converged" | "max_rounds_reached" | "aborted_by_validation" | "aborted_by_config" | "schema_invalid" | "no_usable_reviewer_output" | "inconclusive". When omitted, derived from the convergence trend (trailing 0 = converged, otherwise = max_rounds_reached once a round ran).' },
             text: { type: 'string', description: 'For `nudge`: steering text to set (or null to clear).' },
             path: { type: 'string', description: 'Project root directory (default: current working directory).' },
         },
@@ -344,13 +344,24 @@ function rehydrateBuilder(manifest, approval) {
         maxRounds: manifest.maxRounds,
     });
     for (const r of Array.isArray(manifest.rounds) ? manifest.rounds : []) {
+        // A malformed/null round row must be skipped, never a throw (the caller
+        // wraps rehydrate in a fallback, but preserving sibling rows is better).
+        if (!r || typeof r !== 'object')
+            continue;
         builder.roundStart(r.round, manifest.maxRounds);
         for (const t of Array.isArray(r.threads) ? r.threads : []) {
-            builder.reviewerStart(t.dimension || 'review', t.attempt || 1);
-            builder.reviewerMessage((t.messages ?? []).join('\n'));
-            builder.reviewerRead(t.readFiles ?? []);
-            for (const f of t.findings ?? [])
-                builder.reviewerFindings([f]);
+            // restoreThread (not reviewerStart + reviewerMessage(join)) preserves the
+            // message ARRAY boundaries and the thread's own dimension: rehydration
+            // previously collapsed each thread's messages into one string and, once a
+            // round hit the per-round thread cap, silently DROPPED the extra threads
+            // / mis-merged their findings into the previous dimension's thread.
+            builder.restoreThread(r.round, {
+                dimension: t.dimension,
+                attempt: t.attempt,
+                messages: t.messages,
+                readFiles: t.readFiles,
+                findings: t.findings,
+            });
         }
     }
     for (let idx = 0; idx < (manifest.convergence ?? []).length; idx += 1) {

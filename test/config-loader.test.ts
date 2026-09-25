@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -11,6 +11,7 @@ import {
   loadEffectiveConfig,
   mergeConfig,
   resolveProjectRoot,
+  resolveProjectRootForExec,
   validateConfig,
 } from '../src/config-loader.ts'
 import type { IterateConfig } from '../src/types.ts'
@@ -217,11 +218,14 @@ describe('validateConfig', () => {
 })
 
 describe('resolveProjectRoot', () => {
-  it('resolves a caller-supplied absolute path untouched', () => {
+  it('resolves a caller-supplied absolute path to its real location', () => {
     const { dir } = tempDir()
     const res = resolveProjectRoot(dir)
     assert.equal(res.ok, true)
-    if (res.ok) assert.equal(res.root, dir)
+    // Symlinks are collapsed so two aliases of the same project share one
+    // .iterate/ state: on macOS /var -> /private/var, so the tmpdir above may
+    // be rewritten to its real path even though the caller passed a plain path.
+    if (res.ok) assert.equal(res.root, realpathSync(dir))
   })
 
   it('falls back to the current working directory when path is empty', () => {
@@ -251,5 +255,32 @@ describe('resolveProjectRoot', () => {
     const arr = resolveProjectRoot(['/tmp'] as unknown as string)
     assert.equal(arr.ok, true)
     if (arr.ok) assert.equal(arr.root, process.cwd())
+  })
+})
+
+describe('resolveProjectRootForExec', () => {
+  it('takes the explicit path when present', () => {
+    const { dir } = tempDir()
+    const exec = { agent: { session: { header: { cwd: '/elsewhere' } } } }
+    const res = resolveProjectRootForExec(exec, dir)
+    assert.equal(res.ok, true)
+    if (res.ok) assert.equal(res.root, realpathSync(dir))
+  })
+
+  it('falls back to the session cwd when no path is given', () => {
+    const { dir } = tempDir()
+    const exec = { agent: { session: { header: { cwd: dir } } } }
+    const res = resolveProjectRootForExec(exec)
+    assert.equal(res.ok, true)
+    if (res.ok) assert.equal(res.root, realpathSync(dir))
+  })
+
+  it('never crashes on a null/empty exec', () => {
+    const res = resolveProjectRootForExec(undefined)
+    assert.equal(res.ok, true)
+    if (res.ok) assert.equal(res.root, process.cwd())
+    const res2 = resolveProjectRootForExec({})
+    assert.equal(res2.ok, true)
+    if (res2.ok) assert.equal(res2.root, process.cwd())
   })
 })

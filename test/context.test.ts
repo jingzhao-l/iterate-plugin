@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync, realpathSyn
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, it } from 'node:test'
-import { findSkillMd, findSkillRoot, isAllowedSkillDir, normalizeAttachment, normalizeAttachments, registerContextTool } from '../src/tools/context.ts'
+import { findSkillMd, findSkillRoot, isAllowedSkillDir, normalizeAttachment, normalizeAttachments, renderAttachment, registerContextTool } from '../src/tools/context.ts'
 
 /** Create a temp tree and return its root plus a cleanup fn. */
 function tempTree(): { root: string; cleanup: () => void } {
@@ -178,6 +178,26 @@ describe('normalizeAttachments', () => {
     // Once the cap is hit, the loop stops and reports a single drop notice.
     assert.equal(res.errors.length, 1)
     assert.match(res.errors[0] as string, /capped/)
+  })
+})
+
+describe('renderAttachment', () => {
+  it('renders every optional field joined by separators', () => {
+    const text = renderAttachment(
+      { name: 'shot.png', mediaType: 'image/png', width: 1280, height: 800, note: 'broken layout' },
+      0,
+    )
+    assert.equal(text, '[1] · shot.png · image/png · 1280x800 · broken layout')
+  })
+
+  it('degrades to just the index for an empty attachment', () => {
+    assert.equal(renderAttachment({}, 2), '[3]')
+  })
+
+  it('omits a lone dimension when the other one is missing', () => {
+    const text = renderAttachment({ mediaType: 'image/webp', width: 640 }, 1)
+    assert.equal(text, '[2] · image/webp')
+    assert.ok(!text.includes('640'))
   })
 })
 

@@ -177,9 +177,17 @@ export function computeStatus(input: {
     findingsCount: Array.isArray(checkpoint?.findings) ? checkpoint.findings.length : 0,
     totalDecisionLogEntries: entries.length,
     hasCheckpoint: checkpoint !== null,
-    // A checkpoint left on disk means the previous run was interrupted before
-    // it could clear it — this is the durable "interruption" signal.
-    interrupted: checkpoint !== null,
+    // A checkpoint left on disk is the durable "the run did not finish" signal
+    // — EXCEPT when a decision-log entry is NEWER than the checkpoint: the
+    // workflow saves a checkpoint at the end of each round (right after that
+    // round's review_result log), so a live run proceeding past its last
+    // checkpoint would otherwise be flagged as "interrupted" for its whole
+    // duration. A fresh checkpoint (or no log at all) is genuinely leftover.
+    interrupted:
+      checkpoint !== null &&
+      !(lastEntry != null &&
+        checkpoint.updatedAt &&
+        (Date.parse(checkpoint.updatedAt) || 0) >= (Date.parse(lastEntry.timestamp) || 0)),
     resumeCount: checkpoint?.resumeCount ?? 0,
     checkpoint,
     lastUpdated,
@@ -354,7 +362,7 @@ export function registerStatusTool(ctx: { tools: { register: (def: ReturnType<ty
             findingsCount: { type: 'integer' },
             totalDecisionLogEntries: { type: 'integer' },
             hasCheckpoint: { type: 'boolean' },
-            interrupted: { type: 'boolean', description: 'True when a checkpoint exists, meaning the previous run was interrupted before finishing.' },
+            interrupted: { type: 'boolean', description: 'True when a checkpoint exists and no decision-log entry is newer than it — the previous run left a checkpoint that nothing has resumed or progressed past.' },
             resumeCount: { type: 'integer', description: 'How many times the current checkpoint has already been resumed.' },
             lastUpdated: { oneOf: [{ type: 'string' }, { type: 'null' }] },
             qualityGate: { type: 'json', description: 'v3.0: persisted quality-gate snapshot (.iterate/quality-gate.json), when present.' },

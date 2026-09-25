@@ -5,6 +5,70 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.6] - 2026-09-25
+
+### Changed
+
+- **Upgraded DSH runtime deps to `0.1.7-rc.1`** — `@deepseek-ai/dsh-tools` /
+  `@deepseek-ai/dsh-util-values` (devDep sources) and `@deepseek-ai/cordis`
+  pinned to `4.0.4`; devDependencies `@deepseek-ai/dsh-agent` /
+  `@deepseek-ai/dsh-session` / `@deepseek-ai/dsh-jobs` moved to `0.1.7-rc.1`
+  (clean reinstall; `dshReleases` already declared
+  `0.1.7-alpha.1/alpha.2/rc.1: compatible`). **0.1.7 assessment**: the surfaces
+  the plugin consumes (defineTool schema, `tools/pre-execute` cancel + deny.info,
+  `tools/result`, `isConcurrencySafe`) are unchanged; the new 0.1.7 exports
+  (scope-filtered dispatch, `tools/around`/`guard`/`post`, PTC mode, JSON-schema
+  helpers, tools invariants) have no applicable plugin need this cycle — no
+  adoption required.
+
+### Added
+
+- **reasoning_effort reaches the review plan** — `buildReviewPlan` now carries
+  `reasoningEffort` (`'low' | 'medium' | 'high' | null`) derived from
+  `config.reasoning_effort`, and injects an effort directive
+  ("Reasoning effort for this review pass: …") into every dimension's reviewer
+  prompt so the orchestrator can honor it per reviewer subagent. The
+  configuration guide (`CONFIG_EDIT_FIELDS`) surfaces the key with a
+  `low/medium/high` hint, and `iterate_config` write validation already
+  accepted only those values. The plugin never touches the provider request
+  body directly.
+- **Chinese badges for the schema-retry stop reasons** — `stoppedReasonLabel`
+  moved to `lib/parse.js` (shared single source of truth between the client
+  observatory badge and Node tests) with labels for `inconclusive` /
+  `schema_invalid` / `no_usable_reviewer_output`; previously these rendered as
+  raw English in the badge.
+- **New unit tests**: `MAX_FIX_CONTENT_CHARS` guard (oversized content rejected
+  before any disk write), `registerLiveCapture` tools/result wiring, lock
+  release for the decision-log advisory lock, `iterate_decision_log` append/read
+  e2e, `resolveProjectRootForExec` tri-path, `runGit` success/failure, runCommand
+  spawn-failure non-throw, `stoppedReasonLabel` mappings,
+  `buildReviewPlan.reasoningEffort` carry-through + defensive out-of-range
+  value.
+
+### Fixed
+
+- **Step-3 review round-up (8 items)**: review fold of over-cap rounds into the
+  last slot; meta-review clamp for fold-round indexes; integer line normalization
+  in the transcript; `'other'` overflow thread for reviewer-start caps; restore
+  of dropped transcript threads on rehydrate; evidence line-number integer gate;
+  config-loader project-root realpath collapse (+ symlink-safe `resolveProjectRoot`
+  contract); prune checkpoint age gate — a FRESH checkpoint is a resume point and
+  is now kept (`checkpointStale`), stale ones are swept and reported
+  "yes (stale)"; checkpoint `interrupted` freshness semantics (exists but nothing
+  new in the decision log); decision-log/history order fix (doc corrected to
+  "newest window in chronological order", code unchanged); `iterate_config` write
+  validation branches for `reviewer` and `reasoning_effort`; schema-retry loop
+  fixes in the skill prompt (dry-run convergence gate, normal-mode
+  `schema_invalid` stop reason, bounded `maxRounds` pass-through).
+- **Theme listener cleanup (client)** — `registerThemeListener` tolerates a
+  `ctx.on` that returns no unsubscribe handle (`void | (() => void)`) instead of
+  misassigning a `void`; duplicate-definition removal ensured a single
+  `stoppedReasonLabel` source in the client source.
+- **Transcript/status docs now list the extended stop reasons** —
+  `iterate_transcript` `stoppedReason` description includes
+  `schema_invalid` / `no_usable_reviewer_output` / `inconclusive` /
+  `aborted_by_config`, matching what the skill prompt can emit.
+
 ## [3.5.5] - 2026-09-22
 
 ### Changed

@@ -52,6 +52,7 @@ import {
   filterTimelineEntries,
   serializeObservatoryExport,
   latestPhase,
+  stoppedReasonLabel,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -532,6 +533,12 @@ describe('completion & guidance helpers', () => {
     assert.match(guide, /iterate_config/)
   })
 
+  it('buildConfigEditGuide surfaces the reasoning_effort field', () => {
+    const guide = buildConfigEditGuide()
+    assert.match(guide, /reasoning_effort/)
+    assert.match(guide, /"low" \/ "medium" \/ "high"/)
+  })
+
   it('buildConfigEditInstruction serializes the desired update', () => {
     const text = buildConfigEditInstruction({ max_rounds: 5, dimensions: ['correctness'] })
     assert.match(text, /iterate_config/)
@@ -915,6 +922,24 @@ describe('transcript live bridge', () => {
       stoppedReason: '',
     }) as unknown as { stoppedReason: string | null }
     assert.equal(empty.stoppedReason, null)
+  })
+
+  it('stoppedReasonLabel renders a Chinese badge for every known stop reason', () => {
+    assert.match(stoppedReasonLabel('converged'), /已收敛/)
+    assert.match(stoppedReasonLabel('max_rounds_reached'), /轮数上限/)
+    assert.match(stoppedReasonLabel('aborted_by_validation'), /验证失败/)
+    assert.match(stoppedReasonLabel('aborted_by_config'), /白名单/)
+    // v3.5.5 schema-retry batch — these must NOT fall through to raw English.
+    assert.match(stoppedReasonLabel('schema_invalid'), /schema 校验失败/)
+    assert.match(stoppedReasonLabel('no_usable_reviewer_output'), /无可用审查输出/)
+    assert.match(stoppedReasonLabel('inconclusive'), /结论不明/)
+  })
+
+  it('stoppedReasonLabel falls back safely for unknown/no values', () => {
+    assert.equal(stoppedReasonLabel('some_other_reason'), '已结束 · some_other_reason')
+    assert.equal(stoppedReasonLabel(null), '已结束')
+    assert.equal(stoppedReasonLabel(undefined), '已结束')
+    assert.equal(stoppedReasonLabel(''), '已结束')
   })
 
   it('scanSessionForQualityGate returns the latest normalized snapshot (reverse chronological)', () => {

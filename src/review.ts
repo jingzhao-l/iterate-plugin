@@ -162,13 +162,17 @@ export function aggregateRounds(
   // Clamp the allocation bound so a hostile round number cannot OOM the tool.
   const effectiveMax = Math.min(maxRound, Math.max(1, roundCap * 2))
 
-  const findingsByRound: number[] = []
-  for (let r = 1; r <= effectiveMax; r++) {
-    let count = 0
-    for (const key of firstRoundByKey.keys()) {
-      if (firstRoundByKey.get(key) === r) count++
-    }
-    findingsByRound.push(count)
+  const findingsByRound: number[] = new Array(effectiveMax).fill(0)
+  for (const key of firstRoundByKey.keys()) {
+    const firstRound = firstRoundByKey.get(key) ?? 1
+    // Fold rounds BEYOND the allocation bound into the highest slot instead of
+    // dropping them: a finding first seen in an over-cap round was previously
+    // invisible to `findingsByRound`, so a run whose final rounds exceeded the
+    // cap looked "converged" even though a real round found new issues. Folding
+    // keeps the counts truthful (the sum still equals totalFindings) while the
+    // memory bound stays fixed.
+    const idx = Math.min(firstRound, effectiveMax) - 1
+    findingsByRound[idx] = (findingsByRound[idx] || 0) + 1
   }
 
   return { findings: dedupeFindings(merged), findingsByRound, firstRoundByKey }
@@ -282,8 +286,13 @@ export function buildReviewReport(input: {
   for (const r of filteredRounds) {
     if (typeof r.round === 'number' && r.round > lastRound) lastRound = r.round
   }
+  // `lastRound` can exceed the array length when over-cap rounds were FOLDED
+  // into the last slot (see aggregateRounds). Read the same clamped index
+  // computeConvergence uses, so a real over-cap round is never mis-read as 0
+  // new findings (which would falsely report "converged").
+  const idx = Math.min(lastRound, findingsByRound.length) - 1
   const lastRoundCount =
-    lastRound > 0 ? (findingsByRound[lastRound - 1] ?? 0) : 0
+    lastRound > 0 && idx >= 0 ? (findingsByRound[idx] ?? 0) : 0
   const converged = filteredRounds.length > 0 && lastRoundCount === 0
 
   // Attach the normal-mode fix count to the summary (dry-run leaves it absent).
@@ -630,6 +639,12 @@ export function reviewerTaskPrompt(input: {
    * every dimension reviewer inspects/considers them before judging.
    */
   attachments?: ReviewAttachment[]
+  /**
+   * Configured reasoning effort ('low' | 'medium' | 'high') to apply to this
+   * review pass. Injected as a directive so the harness can honor it when
+   * running each reviewer subagent. Omitted → follow the provider default.
+   */
+  effort?: 'low' | 'medium' | 'high'
 }): string {
   const parts: string[] = []
   parts.push(
@@ -637,6 +652,9 @@ export function reviewerTaskPrompt(input: {
     `Goal: ${input.goal}`,
     `Scope: ${input.scope === 'full' ? 'entire codebase' : 'changed files only'}.`,
   )
+  if (input.effort) {
+    parts.push(`Reasoning effort for this review pass: ${input.effort}.`)
+  }
   if (input.focus) {
     parts.push(`FOCUS: ${input.focus}`)
   }
@@ -744,6 +762,12 @@ export function buildReviewPlan(input: {
   fallbackToFull: boolean
   /** The attachments threaded into every reviewer prompt (empty when none). */
   attachments: ReviewAttachment[]
+  /**
+   * Configured reasoning effort carried on the plan for the orchestrator to
+   * honor (null when unset → provider default). Also injected as a directive
+   * into every dimension's reviewer prompt.
+   */
+  reasoningEffort: 'low' | 'medium' | 'high' | null
 } {
   // Defensive reads: a malformed config (e.g. `dimensions` as a non-array, or
   // `review`/`atomic` missing) must degrade to sane defaults instead of
@@ -751,6 +775,12 @@ export function buildReviewPlan(input: {
   const language = input.config.language === 'zh' ? 'Chinese (中文)' : 'English'
   const goal = input.config.goal ?? ''
   const configuredScope = input.config.review?.scope ?? 'full'
+  const reasoningEffort =
+    input.config.reasoning_effort === 'low' ||
+    input.config.reasoning_effort === 'medium' ||
+    input.config.reasoning_effort === 'high'
+      ? input.config.reasoning_effort
+      : null
   const dimensions = Array.isArray(input.config.dimensions) ? input.config.dimensions : []
   const maxLines = input.config.atomic?.max_lines ?? 20
   const changedFiles = Array.isArray(input.changedFiles) ? input.changedFiles : []
@@ -816,6 +846,7 @@ export function buildReviewPlan(input: {
           scopeFiles: batch,
           focus: focusMap.get(d),
           attachments,
+          effort: reasoningEffort ?? undefined,
         }),
         findingsSchema: findingsSchema(),
       })
@@ -832,5 +863,6 @@ export function buildReviewPlan(input: {
     changedFiles: effectiveChangedOnly ? changedFiles : [],
     fallbackToFull,
     attachments,
+    reasoningEffort,
   }
 }

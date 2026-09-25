@@ -84,7 +84,7 @@ export function registerHistoryTool(ctx) {
             },
             limit: {
                 type: 'integer',
-                description: `Max entries to return (default: ${DEFAULT_LIMIT}, cap: ${MAX_LIMIT}). Newest first.`,
+                description: `Max entries to return (default: ${DEFAULT_LIMIT}, cap: ${MAX_LIMIT}). Returns the newest window in chronological order.`,
             },
             path: {
                 type: 'string',

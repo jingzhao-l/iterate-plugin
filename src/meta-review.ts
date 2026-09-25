@@ -233,7 +233,11 @@ export function metaReviewReport(report: ReviewReport): MetaReviewResult {
       : null
   const lastRoundNew =
     lastRecordedRound !== null && lastRecordedRound > 0
-      ? Number(findingsByRound[lastRecordedRound - 1] ?? 0)
+      // Over-cap rounds are FOLDED by aggregateRounds into the final slot, so a
+      // reported round number may exceed the array length — read the SAME
+      // clamped index buildReviewReport/computeConvergence use, or a real
+      // over-cap round would be mis-read as 0 new (flag mismatch).
+      ? Number(findingsByRound[Math.min(lastRecordedRound, findingsByRound.length) - 1] ?? 0)
       : null
   const expectedConverged = lastRoundNew === 0
   if (report.convergence?.converged !== expectedConverged) {

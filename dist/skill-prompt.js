@@ -19,7 +19,7 @@ You have the iterate plugin installed, which registers these tools:
 - \`iterate_diff\` — show the accumulated diff for a fixed file (vs its original backup) or a per-file summary of all fixes
 - \`iterate_rollback\` — revert a fix by id: restore the file from its backup, remove the fix from the registry, log a \`revert\` entry. Use when a round's validation fails
 - \`iterate_checkpoint\` — save / load / clear an iteration checkpoint (\`.iterate/checkpoint.json\`) so a long run can resume where it left off
-- \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence, and whether the run was interrupted (a checkpoint left on disk means the previous run was interrupted and can be resumed)
+- \`iterate_status\` — summarize the current run: mode, round, fixes applied, architectural remaining, decision-log size, checkpoint presence, and whether the run was interrupted (a checkpoint on disk with no newer decision-log activity means the previous run was interrupted and can be resumed)
 - \`iterate_history\` — inspect the runtime state in detail: decision-log entries and applied fixes (optionally scoped to a round or a fixed file)
 - \`iterate_prune\` — remove stale runtime artifacts (\`.iterate/\` entries). Defaults to a read-only dry-run that reports what WOULD be removed; pass \`dryRun:false\` to actually prune.
 - \`iterate_transcript\` — runtime observatory file (\`.iterate/transcript.json\`). \`read\` fetches the persisted manifest including any steering \`nudge\` for this run's reviewers; \`capture\` (call once after the final report) persists the per-reviewer threads, convergence trend, findings, fixes, checkpoint, and timeline so the client observatory panel reflects the run; \`nudge\` sets/clears steering text the next round's reviewers read. Purely local, never touches source files.
@@ -80,6 +80,10 @@ const maxRounds = plan.maxReviewRounds
 const knownIntentional = (plan.knownIntentional || [])   // config personalization filter, applied in aggregate
 let known = []              // cumulative DEDUPED findings fed back to reviewers
 const rounds = []           // raw per-round findings
+// Tracks whether the LAST executed round produced usable reviewer output. A
+// round where every reviewer subagent failed (or output stayed schema-invalid
+// after retries) is INCONCLUSIVE — it must never make the run look converged.
+let lastRoundOk = true
 
 phase('transcript')
 // Read any steering nudge written (via iterate_transcript nudge) for this run's reviewers.
@@ -117,6 +121,12 @@ for (let r = 1; r <= maxRounds; r++) {
         JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.'
       return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
     }))
+    // A per-dimension reviewer subagent resolves \`null\` on child failure; the
+    // aggregate below would report an all-failed round as an empty round, and
+    // the convergence math would then read "0 new findings". An all-failed
+    // round is NOT a clean pass — it is inconclusive, so the convergence gate
+    // below refuses it before any "converged" signal fires.
+    const reviewersOk = raw.length > 0 ? raw.some(x => x !== null && typeof x === 'object') : true
     const thisRound = {
       round: r,
       findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])),
@@ -144,23 +154,30 @@ for (let r = 1; r <= maxRounds; r++) {
     // final summary can explain WHY the round was inconclusive.
     log('round ' + r + ' output STILL schema-invalid after 3 attempts — marking round inconclusive (NOT converged)')
   }
+  const roundUnusable = schemaInvalid || !reviewersOk
+  if (roundUnusable) lastRoundOk = false
   // Feed the DEDUPED + already-filtered set back (not raw findings) so the known
-  // list stays bounded and reviewers never see the same issue twice.
-  if (agg && agg.report && Array.isArray(agg.report.findings)) known = agg.report.findings
+  // list stays bounded and reviewers never see the same issue twice. Never feed
+  // an unusable round's empty result — it would erase the still-valid known list
+  // and let reviewers re-report everything next round.
+  if (!roundUnusable && agg && agg.report && Array.isArray(agg.report.findings)) known = agg.report.findings
   // A round counts as "converged" ONLY when the aggregate accepted it
-  // (schema-valid) AND it genuinely found zero NEW findings. If reviewers all
-  // failed or their output stayed schema-invalid after retries, the round is
-  // INCONCLUSIVE — never report an empty-but-broken round as converged (an
-  // invalid/failed round must fail the run, not masquerade as a clean pass).
-  if (!schemaInvalid) {
+  // (schema-valid) AND its reviewers actually returned output AND it genuinely
+  // found zero NEW findings. If reviewers all failed or their output stayed
+  // schema-invalid after retries, the round is INCONCLUSIVE — never report an
+  // empty-but-broken round as converged (an invalid/failed round would
+  // otherwise masquerade as a clean pass and stop the run early).
+  if (!roundUnusable && !schemaInvalid) {
     const newCount =
       agg && agg.report && agg.report.convergence
         ? agg.report.convergence.findingsByRound[r - 1]
         : thisRound.findings.length
     if (newCount === 0) {
       log('round ' + r + ' found 0 new findings — converged')
+      lastRoundOk = true
       break
     }
+    lastRoundOk = true
   }
 }
 
@@ -196,8 +213,13 @@ return {
   mode: 'dry-run',
   goal: report.goal,
   rounds: rounds.length,
-  converged: report.convergence.converged,
-  stoppedReason: report.convergence.stoppedReason,
+  // The aggregate's convergence flag is only trustworthy when the last round
+  // was usable — an all-failed/schema-invalid final round looks like "0 new"
+  // to the convergence math but is an inconclusive run, never a clean pass.
+  converged: report.convergence.converged && lastRoundOk,
+  stoppedReason: report.convergence.converged && !lastRoundOk
+    ? 'inconclusive'
+    : report.convergence.stoppedReason,
   findingsByRound: report.convergence.findingsByRound,
   totalFindings: report.summary.totalFindings,
   bySeverity: { critical: report.summary.critical, high: report.summary.high, medium: report.summary.medium, low: report.summary.low },
@@ -259,7 +281,7 @@ const configRes = await agent(
 const cfg = (configRes && configRes.config) ? configRes.config : null
 const atomicMaxLines = (cfg && cfg.atomic && cfg.atomic.max_lines) ? cfg.atomic.max_lines : 20
 const planRes = await agent(
-  'Call iterate_review({operation:"plan", mode:"normal", maxReviewRounds:' + (args.maxRounds || 3) + '}) and return the plan JSON.',
+  'Call iterate_review({operation:"plan", mode:"normal"' + (args.maxRounds ? ', maxReviewRounds:' + args.maxRounds : '') + '}) and return the plan JSON.',
   Object.assign({ label: 'review:plan' }, backend)
 )
 const plan = (planRes && planRes.plan) ? planRes.plan : null
@@ -273,6 +295,7 @@ const architectural = (checkpoint && Array.isArray(checkpoint.findings)) ? check
 let fixedCount = (checkpoint && typeof checkpoint.fixedCount === 'number') ? checkpoint.fixedCount : 0
 let converged = false
 let abortedByValidation = false
+let schemaFailed = false        // last round produced no usable reviewer output (schema-invalid after retries / all reviewers failed)
 let failedCommands = []
 let configErrors = []          // validation commands NOT in validation.commands (config gap, no rollback)
 const fixRecords = []        // observatory fix records collected round by round
@@ -315,6 +338,10 @@ for (let r = startRound; r <= maxRounds; r++) {
         '\\n Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.'
       return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
     }))
+    // ALL reviewers returning null (child failures) means this round produced
+    // no usable output — an empty aggregate must not read like a clean
+    // "nothing to fix" convergence. Gate the loop exit + convergence on it.
+    const reviewersOk = raw.length > 0 ? raw.some(x => x !== null && typeof x === 'object') : true
     const thisRound = {
       round: r,
       findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])),
@@ -338,10 +365,19 @@ for (let r = startRound; r <= maxRounds; r++) {
       log('retry ' + attempts + ': round ' + r + ' output failed schema validation — re-running reviewers with strict-JSON emphasis')
     }
   } while (schemaInvalid && attempts < 3)
-  if (schemaInvalid) {
-    // Bounded exit: never loop forever. Surface the failure so the run's
-    // final summary can explain WHY the round was inconclusive.
-    log('round ' + r + ' output STILL schema-invalid after 3 attempts — marking round inconclusive (NOT converged)')
+  if (schemaInvalid || !reviewersOk) {
+    // Bounded exit: never loop forever, and never let an all-failed/empty round
+    // read like a clean convergence. Stop the run WITHOUT applying fixes for
+    // this round, record the failure in the audit trail, and leave the
+    // checkpoint in place so a user/DM can resume or re-roll after fixing the
+    // reviewer configuration.
+    schemaFailed = true
+    log('round ' + r + ' produced NO usable reviewer output (schema-invalid after retries or all reviewers failed) — stopping run (NOT converged)')
+    await agent(
+      'Call iterate_decision_log({operation:"append", type:"round_failed", round:' + r + ', data:{reason:"' + (schemaInvalid ? 'schema_invalid' : 'no_usable_reviewer_output') + '", rolledBack:0}})',
+      Object.assign({ label: 'log:schemaFailed:r' + r }, backend)
+    )
+    break
   }
   const findings = (agg && agg.report && agg.report.findings) ? agg.report.findings : thisRound.findings
   const atomic = findings.filter(f => f.is_atomic === true)
@@ -475,7 +511,7 @@ const statusRes = await agent(
   { label: 'status:final' }
 )
 const status = (statusRes && statusRes.ok) ? statusRes : null
-if (!abortedByValidation) {
+if (!abortedByValidation && !schemaFailed) {
   // Iteration finished cleanly → clear the checkpoint so the next run starts fresh.
   await agent(
     'Call iterate_checkpoint({ operation: "clear" }) and return {ok, existed}.',
@@ -494,9 +530,11 @@ if (!abortedByValidation) {
     fixedCount: fixedCount,
     resumeCount: effectiveResumeCount,
   }
-  const stopReason = abortedByValidation
-    ? (configErrors.length > 0 ? 'aborted_by_config' : 'aborted_by_validation')
-    : (converged ? 'converged' : 'max_rounds_reached')
+  const stopReason = schemaFailed
+    ? 'schema_invalid'
+    : abortedByValidation
+      ? (configErrors.length > 0 ? 'aborted_by_config' : 'aborted_by_validation')
+      : (converged ? 'converged' : 'max_rounds_reached')
   await agent(
     'Call iterate_transcript({operation:"capture", mode:"normal", goal:' + JSON.stringify(plan.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + rounds.length + ', findingsByRound:' + JSON.stringify(rounds.map(rr => (rr.findings && rr.findings.length) ? rr.findings.length : 0)) + ', stoppedReason:"' + stopReason + '", fixes:' + JSON.stringify(fixRecords) + ', checkpoint:' + JSON.stringify(obsCheckpoint) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
     { label: 'transcript:capture' }
@@ -508,6 +546,7 @@ return {
   maxRounds: maxRounds,
   converged: converged,
   abortedByValidation: abortedByValidation,
+  schemaFailed: schemaFailed,
   failedCommands: failedCommands,
   configErrors: configErrors,
   stoppedReason: stopReason,
@@ -528,12 +567,12 @@ return {
 Key rules for normal mode:
 - Fixers are the ONLY agents allowed to write files, and they must go through \`iterate_fix\` — never edit files directly. That is what gives every change a backup, a diff, and a rollback path. Reviewers read only. Architectural findings are reported, never auto-fixed.
 - Aggregate the current round deterministically (\`report.findings\`) before fixing, so fixes act on deduped/filtered/sorted findings.
-- **Schema validation & retry**: when \`reviewer.output_schema_validation\` is on (default), retry the round's reviewers up to 2 times (3 attempts total) when \`aggregate\` reports \`schemaValidation\` valid=false for it, then re-aggregate. Never forward schema-invalid findings into \`iterate_fix\`. If the output is still schema-invalid after the 3rd attempt, mark the round inconclusive (never report it as a clean convergence).
+- **Schema validation & retry**: when \`reviewer.output_schema_validation\` is on (default), retry the round's reviewers up to 2 times (3 attempts total) when \`aggregate\` reports \`schemaValidation\` valid=false for it, then re-aggregate. Never forward schema-invalid findings into \`iterate_fix\`. If the output is still schema-invalid after the 3rd attempt — or every reviewer subagent failed outright (no usable output at all) — the round is INCONCLUSIVE: \`break\` the loop, log a \`round_failed\` entry, set \`schemaFailed = true\`, and report \`stoppedReason:"schema_invalid"\`/\`"no_usable_reviewer_output"\`. Never report an inconclusive round as a clean convergence, and keep the checkpoint so the run can be resumed after the reviewer configuration is fixed.
 - Apply atomic fixes **per file**: one fixer agent handles all findings for a given file serially (so the same file is never edited concurrently); different files are fixed in parallel.
 - **Resume**: load the checkpoint first; if a previous run left one, continue from \`checkpoint.round + 1\` (its \`fixedCount\` and deduped \`findings\` are carried forward).
 - **Validate after every round** of fixes; on ANY validation failure, roll back the round's fixes via \`iterate_rollback\` and stop (the checkpoint is left in place so the run can be resumed). EXCEPTION: \`iterate_validate\` returning \`allowed:false\` means the command is simply not in \`validation.commands\` — a config gap, not broken code. In that case abort WITHOUT rolling back the round's fixes and surface the missing command + file so the user can fix the trust list.
 - **Checkpoint after every round**; clear it only when the iteration completes cleanly.
-- Stop when a round produces nothing to fix (converged) or maxReviewRounds is reached.
+- Stop when a round produces nothing to fix (converged), maxReviewRounds is reached, validation aborts the run, or a round yields no usable reviewer output (\`stoppedReason:"schema_invalid"\`).
 - Every round, every rollback, and the final report go to the append-only decision log.
 - Close with \`iterate_status\` metrics and surface the convergence indicators (fixed count, remaining architectural count, abort reason) in the final summary.
 

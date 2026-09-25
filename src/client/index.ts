@@ -81,6 +81,7 @@ import {
   latestPhase,
   SEVERITY_LABEL,
   SEVERITY_COLOR,
+  stoppedReasonLabel,
 } from '../../lib/parse.js'
 
 // ─── Module contract ─────────────────────────────────────────────────────────
@@ -737,17 +738,6 @@ function severityLabel(severity: string | undefined): string {
   return SEVERITY_LABEL[coerceSeverity(severity)]
 }
 
-/** Human label for WHY a finished run stopped (transcript manifest). */
-function stoppedReasonLabel(reason: string | null | undefined): string {
-  switch (reason) {
-    case 'converged': return '已结束 · 已收敛（无新发现）'
-    case 'max_rounds_reached': return '已结束 · 达到轮数上限'
-    case 'aborted_by_validation': return '已结束 · 验证失败后回滚停止'
-    case 'aborted_by_config': return '已结束 · 验证命令不在白名单（配置需修复）'
-    default: return reason ? `已结束 · ${reason}` : '已结束'
-  }
-}
-
 /** Badge text for the run's live/finished state, annotated with the stop reason. */
 function runStatusText(live: boolean, manifest: ObsManifest | null | undefined): string {
   if (live) return '运行中'
@@ -785,6 +775,7 @@ let slotsSvc: SlotsService | undefined = undefined
 let themeSvc: ThemeService | undefined = undefined
 let storage: ReturnType<typeof createStorage> | null = null
 let themeDisposer: (() => void) | null = null
+let themeListener: (() => void) | null = null
 let themeEnabled = true
 const roundPulseListeners: Array<(payload: { round: number; converged: boolean }) => void> = []
 
@@ -811,6 +802,33 @@ function clearThemeSkin(): void {
   if (themeDisposer) {
     try { themeDisposer() } catch (err) { log('theme disposer failed', err) }
     themeDisposer = null
+  }
+}
+
+/**
+ * Register the theme/change hook exactly once per client lifecycle.
+ * The listener is tracked so a re-`apply()` (hot reload / re-mount) never
+ * stacks a second copy — every new registration first drops the previous
+ * one, and `ctx.effect` pairs it off when the client unmounts.
+ */
+function registerThemeListener(ctx: ClientContext): void {
+  if (typeof ctx.on !== 'function') return
+  if (themeListener) {
+    try { themeListener() } catch { /* noop */ }
+    themeListener = null
+  }
+  const off = ctx.on('theme/change', () => {
+    if (themeEnabled) applyThemeSkin()
+  })
+  // `ctx.on` may return void (no unsubscribe support) — only track a callback.
+  themeListener = typeof off === 'function' ? off : null
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => {
+      if (themeListener) {
+        try { themeListener() } catch { /* noop */ }
+        themeListener = null
+      }
+    })
   }
 }
 
@@ -2826,15 +2844,20 @@ export function apply(ctx: ClientContext): void {
   themeEnabled = savedTheme === null ? true : savedTheme === '1'
   if (themeEnabled) applyThemeSkin()
 
-  // 3. Inject styles (independent of slots / React availability).
+  // 3. Inject styles (independent of slots / React availability). Guarded so a
+  // re-`apply()` never appends a duplicate <style>: the tag is keyed by a
+  // `dataset.iterateLock` marker instead of relying on the CSS content.
   if (typeof document !== 'undefined' && document.createElement && document.head) {
-    const style = document.createElement('style')
-    style.dataset.plugin = PLUGIN_TAG
-    style.dataset.pluginCss = 'iterate-main'
-    style.textContent = ITERATE_CSS
-    document.head.appendChild(style)
-    if (typeof ctx.effect === 'function') {
-      ctx.effect(() => { try { style.remove() } catch { /* noop */ } })
+    if (!document.head.querySelector('style[data-iterate-lock="1"]')) {
+      const style = document.createElement('style')
+      style.dataset.iterateLock = '1'
+      style.dataset.plugin = PLUGIN_TAG
+      style.dataset.pluginCss = 'iterate-main'
+      style.textContent = ITERATE_CSS
+      document.head.appendChild(style)
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(() => { try { style.remove() } catch { /* noop */ } })
+      }
     }
   }
 
@@ -2889,9 +2912,7 @@ export function apply(ctx: ClientContext): void {
   }
 
   // 6: keep theme toggle state consistent across theme/change events.
-  if (typeof ctx.on === 'function') {
-    ctx.on('theme/change', () => {
-      if (themeEnabled) applyThemeSkin()
-    })
-  }
+  // Registered through registerThemeListener so repeated apply() and client
+  // unmounts never leak a second listener.
+  registerThemeListener(ctx)
 }

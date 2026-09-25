@@ -20,7 +20,9 @@ import {
   registerFixTool,
   registerDiffTool,
   registerRollbackTool,
+  MAX_FIX_CONTENT_CHARS,
 } from '../src/tools/fix.ts'
+import { fixBackupPath } from '../src/paths.ts'
 import { readDecisionEntries, readDecisionLogDetailed } from '../src/tools/decision-log.ts'
 import type { FixRegistry, ReviewFinding } from '../src/types.ts'
 
@@ -291,6 +293,26 @@ describe('resolveProjectFile', () => {
   })
 })
 
+// ─── fixBackupPath ──────────────────────────────────────────────────────────
+
+describe('fixBackupPath', () => {
+  it('produces <fixId>_<collapsed-timestamp>.bak under .iterate/fixes', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const path = fixBackupPath(dir, 'fix-abc', '2026-08-16T12:34:56.789Z')
+      assert.equal(path, join(dir, '.iterate', 'fixes', 'fix-abc_2026-08-16T12-34-56-789Z.bak'))
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sanitizes unsafe id characters and leaves dots out of the timestamp', () => {
+    const path = fixBackupPath('/proj', 'fix a/b', 'T00:00:00.000Z')
+    assert.equal(path, join('/proj', '.iterate', 'fixes', 'fix_a_b_T00-00-00-000Z.bak'))
+    assert.equal(path.includes(':'), false)
+  })
+})
+
 // ─── End-to-end tool execution ───────────────────────────────────────────────
 
 describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
@@ -391,6 +413,29 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
         path: dir,
       })) as Record<string, unknown>
       assert.equal(forced.ok, true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects content beyond MAX_FIX_CONTENT_CHARS before touching disk', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      const oversize = 'x'.repeat(MAX_FIX_CONTENT_CHARS + 1)
+      const res = (await fix({
+        file: 'src/app.ts',
+        content: oversize,
+        finding: finding(),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /character limit/)
+      // Nothing was written: no registry, no decision-log entry, file intact.
+      assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), ORIGINAL)
+      assert.deepEqual(readRegistry(dir), { rounds: [] })
+      assert.equal(readDecisionEntries(dir).filter((e) => e.type === 'atomic_fix').length, 0)
     } finally {
       cleanup()
     }

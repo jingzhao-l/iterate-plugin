@@ -23,7 +23,7 @@
  *   - dryRun=true by default — the caller must explicitly opt into deletion.
  *   - Each deletion is logged to the decision log (when not dry-run).
  */
-import { existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
@@ -143,8 +143,22 @@ export function inspectPrune(projectRoot, retainDays) {
     // 1. Decision-log entries older than retainDays.
     const entries = readDecisionEntries(projectRoot);
     const oldLogEntries = entries.filter((e) => e.timestamp < cutoff).length;
-    // 2. Checkpoint presence.
+    // 2. Checkpoint presence. A checkpoint is only STALE once it is older than
+    // retainDays — a fresh checkpoint means a run was interrupted recently and
+    // may still be resumed, so `hasCheckpoint` is kept as pure existence while
+    // `checkpointStale` decides whether a prune actually deletes it.
     const hasCheckpoint = existsSync(checkpointPath(projectRoot));
+    let checkpointStale = false;
+    if (hasCheckpoint) {
+        try {
+            const st = statSync(checkpointPath(projectRoot));
+            if (st && st.mtimeMs < Date.parse(cutoff))
+                checkpointStale = true;
+        }
+        catch {
+            checkpointStale = true; // unreadable mtime — treat as garbage / deletable
+        }
+    }
     // 3. Stale fix backups: .bak files whose fix-id prefix is not in the registry.
     const registry = readRegistry(projectRoot);
     const activeIds = new Set();
@@ -204,6 +218,7 @@ export function inspectPrune(projectRoot, retainDays) {
     return {
         oldLogEntries,
         hasCheckpoint,
+        checkpointStale,
         staleBackups,
         staleTemps,
         emptyRounds,
@@ -292,8 +307,10 @@ export function executePrune(projectRoot, retainDays, report) {
         if (error)
             result.errors.push(error);
     }
-    // 2. Remove checkpoint.
-    if (report.hasCheckpoint) {
+    // 2. Remove checkpoint — ONLY when it is actually stale (older than
+    // retainDays). A fresh checkpoint is a live resume point for a recently
+    // interrupted run; pruning it would silently destroy the ability to resume.
+    if (report.checkpointStale) {
         try {
             rmSync(checkpointPath(projectRoot), { force: true });
             result.deletedCheckpoint = true;
@@ -422,7 +439,7 @@ export function registerPruneTool(ctx) {
                     const lines = [
                         `[dry-run] prune report (retainDays=${value.retainDays}):`,
                         `  Decision-log entries to remove: ${report?.oldLogEntries ?? '?'} (of ${report?.totalLogEntries ?? '?'})`,
-                        `  Checkpoint to delete: ${report?.hasCheckpoint ? 'yes' : 'none'}`,
+                        `  Checkpoint to delete: ${report?.checkpointStale ? 'yes (stale)' : report?.hasCheckpoint ? 'no (fresh — resume point, kept)' : 'none'}`,
                         `  Stale backups to delete: ${report?.staleBackups?.length ?? 0}`,
                         `  Stray temp files to delete: ${report?.staleTemps?.length ?? 0}`,
                         `  Empty rounds to trim: ${report?.emptyRounds?.length ?? 0}`,
