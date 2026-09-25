@@ -30,7 +30,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 import { writeTextAtomic, writeJsonAtomic } from '../atomic-fs.ts'
-import { readDecisionEntries, appendDecisionEntry, acquireLogLock } from './decision-log.ts'
+import { readDecisionEntries, appendDecisionEntry, acquireLogLock, invalidateLogCountCache } from './decision-log.ts'
 import { readRegistry, removeRecord, recomputeRoundCounts } from './fix.ts'
 import { readExperienceBank, writeExperienceBank } from './experience-store.ts'
 import { readDefenseEvents, writeDefenseEvents } from './defense-store.ts'
@@ -291,6 +291,12 @@ function rewriteDecisionLogKeepingRecent(projectRoot: string, cutoff: string): {
         const deleted = entries.length - kept.length
         if (deleted === 0) return { deleted: 0 }
         writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n')
+        // The append-side entry-count cache is keyed by path and assumes "same
+        // byte size ⇒ same count"; the rename above replaced the file with a
+        // different number of entries, so drop the stale cache or the next
+        // append can report a wrong entryCount when the sizes coincidentally
+        // match.
+        invalidateLogCountCache(logPath)
         // A concurrent appender (cross-process, lock-unavailable path) may have
         // landed new lines after our read. If the log grew during the write
         // window, re-read and prune again instead of accepting a lost audit trail.

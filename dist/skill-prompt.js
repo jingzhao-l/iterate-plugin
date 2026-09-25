@@ -84,6 +84,9 @@ const rounds = []           // raw per-round findings
 // round where every reviewer subagent failed (or output stayed schema-invalid
 // after retries) is INCONCLUSIVE — it must never make the run look converged.
 let lastRoundOk = true
+// Slot index of the current round within this run's rounds array. A resumed
+// run starts at startRound > 1, so the round NUMBER is not a valid array index.
+let roundSlot = -1
 
 phase('transcript')
 // Read any steering nudge written (via iterate_transcript nudge) for this run's reviewers.
@@ -96,9 +99,14 @@ const steering = transRead && typeof transRead.nudge === 'string' && transRead.n
 phase('review')
 for (let r = 1; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — finding NEW issues only')
+  roundSlot = rounds.length
   let agg = null
   let schemaInvalid = false
   let attempts = 0
+  // Declared OUTSIDE the do-block: it is read after the retry loop exits, and a
+  // block-scoped const here raised ReferenceError at runtime (crashing both
+  // canonical workflows after the first round).
+  let reviewersOk = true
   do {
     attempts += 1
     // Schema validation retry: on the 2nd+ pass, nudge reviewers toward strict JSON.
@@ -126,7 +134,7 @@ for (let r = 1; r <= maxRounds; r++) {
     // the convergence math would then read "0 new findings". An all-failed
     // round is NOT a clean pass — it is inconclusive, so the convergence gate
     // below refuses it before any "converged" signal fires.
-    const reviewersOk = raw.length > 0 ? raw.some(x => x !== null && typeof x === 'object') : true
+    reviewersOk = raw.length > 0 ? raw.some(x => x !== null && typeof x === 'object') : true
     const thisRound = {
       round: r,
       findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])),
@@ -134,7 +142,7 @@ for (let r = 1; r <= maxRounds; r++) {
       // gate can compare self-reported reads against the assigned inventory.
       readFiles: [].concat(...raw.map(x => x && Array.isArray(x.readFiles) ? x.readFiles : [])),
     }
-    if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
+    if (roundSlot < rounds.length) rounds[roundSlot] = thisRound; else rounds.push(thisRound)
     // Deterministic aggregate: cross-round dedupe + known_intentional filter + severity sort.
     agg = await agent(
       'Call iterate_review({operation:"aggregate", mode:"dry-run", rounds:' + JSON.stringify(rounds) + ', maxReviewRounds:' + maxRounds + ', knownIntentional:' + JSON.stringify(knownIntentional) + '}) and return the report JSON.',
@@ -299,6 +307,12 @@ let schemaFailed = false        // last round produced no usable reviewer output
 let failedCommands = []
 let configErrors = []          // validation commands NOT in validation.commands (config gap, no rollback)
 const fixRecords = []        // observatory fix records collected round by round
+// Slot index of the current round within this run's rounds array. A resumed
+// run starts at startRound > 1, so the round NUMBER is not a valid array index.
+let roundSlot = -1
+// Highest round number actually executed by THIS run (carried so a resumed run
+// reports its true round, not the count of rounds it happened to run).
+let lastRound = startRound - 1
 
 // Read any steering nudge intended for this run's reviewers.
 const transRead = await agent(
@@ -310,6 +324,8 @@ const steering = transRead && typeof transRead.nudge === 'string' && transRead.n
 phase('loop')
 for (let r = startRound; r <= maxRounds; r++) {
   log('round ' + r + ' of ' + maxRounds + ' — review current state, fix atomics via iterate_fix, validate')
+  roundSlot = rounds.length
+  lastRound = r
   // Audit-trail: record the round start (SKILL.md Phase 4 requires per-round records).
   await agent(
     'Call iterate_decision_log({operation:"append", type:"round_start", round:' + r + ', data:{maxRounds:' + maxRounds + ', fixedSoFar:' + fixedCount + '}})',
@@ -318,6 +334,10 @@ for (let r = startRound; r <= maxRounds; r++) {
   let agg = null
   let schemaInvalid = false
   let attempts = 0
+  // Declared OUTSIDE the do-block: it is read after the retry loop exits, and a
+  // block-scoped const here raised ReferenceError at runtime (crashing both
+  // canonical workflows after the first round).
+  let reviewersOk = true
   do {
     attempts += 1
     // Schema validation retry: on the 2nd+ pass, nudge reviewers toward strict JSON.
@@ -341,13 +361,13 @@ for (let r = startRound; r <= maxRounds; r++) {
     // ALL reviewers returning null (child failures) means this round produced
     // no usable output — an empty aggregate must not read like a clean
     // "nothing to fix" convergence. Gate the loop exit + convergence on it.
-    const reviewersOk = raw.length > 0 ? raw.some(x => x !== null && typeof x === 'object') : true
+    reviewersOk = raw.length > 0 ? raw.some(x => x !== null && typeof x === 'object') : true
     const thisRound = {
       round: r,
       findings: [].concat(...raw.map(x => x && x.findings ? x.findings : [])),
       readFiles: [].concat(...raw.map(x => x && Array.isArray(x.readFiles) ? x.readFiles : [])),
     }
-    if (rounds.length >= r) rounds[r - 1] = thisRound; else rounds.push(thisRound)
+    if (roundSlot < rounds.length) rounds[roundSlot] = thisRound; else rounds.push(thisRound)
 
     // Deterministic dedupe / known_intentional filter / severity sort for this round.
     // \`fixedCount\` is threaded into the report summary so the client dashboard can
@@ -502,7 +522,7 @@ for (let r = startRound; r <= maxRounds; r++) {
 
 phase('report')
 await agent(
-  'Call iterate_decision_log({operation:"append", type:"report", round:' + rounds.length +
+  'Call iterate_decision_log({operation:"append", type:"report", round:' + lastRound +
   ', data:{mode:"normal", fixed:' + fixedCount + ', architectural:' + architectural.length + '}})',
   { label: 'report:log' }
 )
@@ -525,7 +545,7 @@ if (!abortedByValidation && !schemaFailed) {
   // would hide the very thing F5 is meant to resume. Reflect what is on disk.
   const obsCheckpoint = {
     mode: 'normal',
-    round: rounds.length,
+    round: lastRound,
     maxRounds: maxRounds,
     fixedCount: fixedCount,
     resumeCount: effectiveResumeCount,
@@ -536,13 +556,13 @@ if (!abortedByValidation && !schemaFailed) {
       ? (configErrors.length > 0 ? 'aborted_by_config' : 'aborted_by_validation')
       : (converged ? 'converged' : 'max_rounds_reached')
   await agent(
-    'Call iterate_transcript({operation:"capture", mode:"normal", goal:' + JSON.stringify(plan.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + rounds.length + ', findingsByRound:' + JSON.stringify(rounds.map(rr => (rr.findings && rr.findings.length) ? rr.findings.length : 0)) + ', stoppedReason:"' + stopReason + '", fixes:' + JSON.stringify(fixRecords) + ', checkpoint:' + JSON.stringify(obsCheckpoint) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
+    'Call iterate_transcript({operation:"capture", mode:"normal", goal:' + JSON.stringify(plan.goal) + ', maxRounds:' + maxRounds + ', roundsExecuted:' + lastRound + ', findingsByRound:' + JSON.stringify(rounds.map(rr => (rr.findings && rr.findings.length) ? rr.findings.length : 0)) + ', stoppedReason:"' + stopReason + '", fixes:' + JSON.stringify(fixRecords) + ', checkpoint:' + JSON.stringify(obsCheckpoint) + ', rounds:' + JSON.stringify(rounds.map(rr => ({ round: rr.round, findings: rr.findings, readFiles: rr.readFiles }))) + '}). Return {operation:"ok"}.',
     { label: 'transcript:capture' }
   )
 return {
   mode: 'normal',
   goal: plan.goal,
-  roundsExecuted: rounds.length,
+  roundsExecuted: lastRound,
   maxRounds: maxRounds,
   converged: converged,
   abortedByValidation: abortedByValidation,

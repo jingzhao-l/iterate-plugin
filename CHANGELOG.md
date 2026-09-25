@@ -5,6 +5,56 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.7] - 2026-09-25
+
+### Changed
+
+- **Upgraded DSH runtime deps to `0.1.7-rc.2`** — `@deepseek-ai/dsh-tools` /
+  `@deepseek-ai/dsh-util-values` (deps) and `@deepseek-ai/dsh-agent` /
+  `@deepseek-ai/dsh-session` / `@deepseek-ai/dsh-jobs` (devDeps) moved from
+  `0.1.7-rc.1` to `0.1.7-rc.2` (clean reinstall after removing the old
+  lockfile + node_modules, which otherwise hit ERESOLVE on the stale rc.1 pin).
+  `dsh.compatibility.dshReleases` now declares `0.1.7-rc.2: compatible`.
+  **0.1.7-rc.2 assessment**: the rc.1→rc.2 diff is purely additive and
+  non-breaking for the plugin — `dsh-tools` adds approval `ask.displayReason`
+  localization; `dsh-session` adds a `toolHistory()` method + tool-history
+  types. Neither surface is on the plugin's integration path (the approval gate
+  returns plain-string reasons and never calls `toolHistory`), so no adoption
+  is required.
+
+### Fixed
+
+- **Critical: both canonical workflow scripts crashed with a `ReferenceError`**
+  — the dry-run and normal-mode scripts in `src/skill-prompt.ts` declared
+  `const reviewersOk` INSIDE the `do { … }` block but read it after the retry
+  loop exited, so every run (dry-run AND normal) threw
+  `ReferenceError: reviewersOk is not defined` immediately after the first
+  review round. Verified by executing the extracted scripts in a `node:vm`
+  sandbox (both threw, the dry-run one at `const roundUnusable =
+  schemaInvalid || !reviewersOk`). The variable is now hoisted (`let
+  reviewersOk`) so the round-usable gate actually runs.
+- **Normal-mode resume round accounting** — the canonical script indexed
+  `rounds` with `rounds.length >= r` (fine from round 1, but wrong when
+  resuming a checkpoint at `startRound > 1`: a schema-retried round would be
+  pushed twice instead of replacing its slot, and `roundsExecuted` /
+  `obsCheckpoint.round` / the `report` round under-reported the true last
+  round). Replaced with a `roundSlot` cursor plus a `lastRound` counter so a
+  resumed run reports its real round number (e.g. resuming at round 4 that
+  converges immediately reports `roundsExecuted: 4`, not `1`).
+- **Decision-log entry-count cache staleness** — the append-side
+  `entryCountCache` (keyed by log path, assuming "same byte size ⇒ same entry
+  count") was never invalidated when `iterate_prune` rewrote the log via
+  temp+atomic-rename, so a rewrite landing on the same byte size would make the
+  next `append` report a wrong `entryCount`. Added
+  `invalidateLogCountCache()` and call it from the prune rewrite loop.
+- **New unit tests** (677 total, +6): runtime execution of both canonical
+  workflow scripts under a `node:vm` sandbox with stubbed `agent`/`parallel`
+  globals — dry-run converges, normal fresh run converges + clears the
+  checkpoint, a resumED run reports the true last round (the regression guard
+  for the accounting fix), and a schema-retry path re-runs without corrupting
+  round bookkeeping; plus a deterministic same-byte-size decision-log rewrite
+  cache regression test.
+
 ## [3.5.6] - 2026-09-25
 
 ### Changed

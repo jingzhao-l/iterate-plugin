@@ -122,6 +122,17 @@ function recountEntries(filePath) {
         return 1;
     }
 }
+/**
+ * Drop the cached entry count for a log file. The cache is keyed by the log
+ * path and assumes "same byte size ⇒ same entry count"; a prune rewrite
+ * (temp + atomic rename) replaces the file with a DIFFERENT number of entries,
+ * so only a stale-cache invalidation keeps the fast path honest. Without it, a
+ * rewrite that lands on the exact same byte size as the previous append would
+ * make the next append report a wrong `count`.
+ */
+export function invalidateLogCountCache(filePath) {
+    entryCountCache.delete(filePath);
+}
 /** All valid DecisionLogEntry `type` values (must stay in sync with Types). */
 const VALID_ENTRY_TYPES = new Set([
     'round_start',

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { acquireLogLock, registerDecisionLogTool } from '../src/tools/decision-log.ts'
-import { readDecisionEntries } from '../src/tools/decision-log.ts'
+import { acquireLogLock, registerDecisionLogTool, appendDecisionEntry, invalidateLogCountCache, readDecisionEntries } from '../src/tools/decision-log.ts'
+import { writeTextAtomic } from '../src/atomic-fs.ts'
 
 function tempProject(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'iterate-decision-log-test-'))
@@ -83,6 +83,56 @@ describe('acquireLogLock', () => {
       assert.ok(readFileSync(lockPath, 'utf-8').trim().length > 0, 'lock holds the owner pid')
       release()
       assert.equal(existsSync(lockPath), false)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('appendDecisionEntry entry-count cache', () => {
+  it('invalidates the cached count after a same-size rewrite so appends stay accurate', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const logFile = join(dir, '.iterate', 'decision-log.jsonl')
+
+      // Append one entry and let the cache warm (count=1).
+      const first = appendDecisionEntry(dir, {
+        timestamp: '2026-01-01T00:00:00.000Z',
+        round: 1,
+        type: 'decision',
+        data: { a: 'first' },
+      })
+      assert.equal(first.error, undefined)
+      assert.equal(first.count, 1)
+      const sizeAfterFirst = statSync(logFile).size
+
+      // Rewrite the log to a DIFFERENT number of entries with the EXACT same
+      // total byte size (the cache's "same size ⇒ same count" assumption).
+      const secondLine = '{"round":1,"type":"decision","data":{"b":"second"}}'
+      // Pad one valid JSON object with whitespace so total length matches.
+      const target = sizeAfterFirst - Buffer.byteLength(secondLine) - 2 // minus the \n separators
+      const padLead = '{"d":"'
+      const padTail = '"}'
+      const spaces = Math.max(0, target - Buffer.byteLength(padLead) - Buffer.byteLength(padTail))
+      const padded = padLead + ' '.repeat(spaces) + padTail
+      const rewritten = padded + '\n' + secondLine + '\n'
+      assert.equal(Buffer.byteLength(rewritten), sizeAfterFirst)
+      writeTextAtomic(logFile, rewritten)
+
+      // Without invalidation the next append would report 1 + 1 = 2 (stale);
+      // the invalidated path recounts and reports the true 2 + 1 = 3.
+      invalidateLogCountCache(logFile)
+      const second = appendDecisionEntry(dir, {
+        timestamp: '2026-01-01T00:00:00.001Z',
+        round: 2,
+        type: 'decision',
+        data: { c: 'third' },
+      })
+      assert.equal(second.error, undefined)
+      assert.equal(second.count, 3)
+      // The `count` reflects the full on-disk file: 2 rewritten lines + 1 append.
+      const nonEmptyLines = readFileSync(logFile, 'utf-8').split('\n').filter((l) => l.trim().length > 0).length
+      assert.equal(nonEmptyLines, 3)
     } finally {
       cleanup()
     }
