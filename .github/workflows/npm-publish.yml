@@ -1,0 +1,50 @@
+name: npm publish (iterate-plugin)
+
+# Publishes the iterate-plugin npm package from this (independent) repository.
+#
+# Provenance binding: the repository field in package.json must point at THIS
+# repo (jingzhao-l/iterate-plugin), otherwise `npm publish --provenance` reports
+# an origin inconsistent with the Trusted Publisher mapping:
+#
+#   package         -> repo(workflow file)
+#   iterate-plugin  -> jingzhao-l/iterate-plugin(.github/workflows/npm-publish.yml)
+#
+# The package already builds on publish via its prepublishOnly hooks
+# (`npm run build` + `npm run build:client`), so a bare `npm publish` produces
+# the full artifact.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read    # read the tagged tree; writes nothing back
+  id-token: write   # OIDC token for `npm publish --provenance`
+
+concurrency:
+  group: npm-publish-iterate-plugin
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref_name }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
