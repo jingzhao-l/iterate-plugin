@@ -38,13 +38,27 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+          # Node 20 ships npm 10, which predates OIDC trusted publishing
+          # (added in npm 11.5.1); Node 20 also went EOL in 2026-04. Do NOT
+          # pass `registry-url`: setup-node writes an unconditional
+          # `_authToken=${NODE_AUTH_TOKEN}` line, and an unset secret resolves
+          # to an *empty* token that makes npm raise ENEEDAUTH before it ever
+          # attempts the OIDC exchange.
+          node-version: "24"
 
       - name: Install dependencies
         run: npm ci
 
       - name: Publish with provenance
-        run: npm publish --provenance --access public
+        run: |
+          npm install -g npm@^11.5.1
+          echo "npm $(npm --version) on node $(node --version)"
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN present; authenticating with the token."
+            npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          else
+            echo "NPM_TOKEN unset; relying on OIDC trusted publishing."
+          fi
+          npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
