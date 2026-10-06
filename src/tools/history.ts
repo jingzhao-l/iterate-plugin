@@ -30,18 +30,30 @@ export function clampHistoryLimit(limit: number | undefined): number {
  * Filter + cap decision-log entries. Pure, unit-tested.
  * Returns the newest `limit` matching entries plus the total match count
  * (before the cap), so callers can tell when the result was truncated.
+ *
+ * `round` keeps only entries logged for that round; `file` keeps only entries
+ * whose `data.file` names that fixed file. Invalid `round`/`file` inputs are
+ * ignored (same convention as `type`/`since`), never treated as a match-nothing
+ * filter by accident.
  */
 export function filterDecisionEntries(
   entries: DecisionLogEntry[],
-  opts: { type?: unknown; since?: unknown; limit?: unknown },
+  opts: { type?: unknown; since?: unknown; limit?: unknown; round?: unknown; file?: unknown },
 ): { entries: DecisionLogEntry[]; filteredCount: number; limit: number } {
   const type = typeof opts.type === 'string' && opts.type ? opts.type : undefined
   const since = typeof opts.since === 'string' && opts.since ? opts.since : undefined
+  const round =
+    typeof opts.round === 'number' && Number.isInteger(opts.round) && opts.round >= 0
+      ? opts.round
+      : undefined
+  const file = typeof opts.file === 'string' && opts.file ? opts.file : undefined
   const limit = clampHistoryLimit(opts.limit as number | undefined)
 
   const matching = (Array.isArray(entries) ? entries : []).filter((e) => {
     if (type && e.type !== type) return false
     if (since && e.timestamp <= since) return false
+    if (round !== undefined && e.round !== round) return false
+    if (file && (!e.data || e.data.file !== file)) return false
     return true
   })
   return {
@@ -51,20 +63,53 @@ export function filterDecisionEntries(
   }
 }
 
-/** Per-round fix counts + totals from a fix registry. Pure, unit-tested. */
-export function summarizeFixRegistry(registry: FixRegistry): {
+/**
+ * Per-round fix counts + totals from a fix registry. Pure, unit-tested.
+ *
+ * `opts.round` narrows the view to one round. `opts.file` narrows each round to
+ * the records that fixed that file: the stored per-round counts cover every
+ * file and cannot be subsetted, so a file-scoped summary RECOMPUTES the counts
+ * from the kept records (mirroring `recomputeRoundCounts`), and rounds left
+ * without any matching record are dropped entirely — an all-zero placeholder
+ * round would falsely suggest the file was touched that round.
+ */
+export function summarizeFixRegistry(
+  registry: FixRegistry,
+  opts: { round?: unknown; file?: unknown } = {},
+): {
   totalFixed: number
   totalFailed: number
   roundCount: number
   rounds: { round: number; fixedCount: number; failedCount: number }[]
 } {
-  const rounds = (registry.rounds ?? []).map((r) => ({
-    round: r.round,
-    // Coerce defensively so a hand-edited registry round missing either count
-    // can never propagate NaN into the integer output fields.
-    fixedCount: Number(r.fixedCount) || 0,
-    failedCount: Number(r.failedCount) || 0,
-  }))
+  const roundFilter =
+    typeof opts.round === 'number' && Number.isInteger(opts.round) && opts.round >= 0
+      ? opts.round
+      : undefined
+  const fileFilter = typeof opts.file === 'string' && opts.file ? opts.file : undefined
+
+  const rounds = (registry.rounds ?? [])
+    .filter((r) => roundFilter === undefined || r.round === roundFilter)
+    .flatMap((r) => {
+      if (fileFilter === undefined) {
+        // Coerce defensively so a hand-edited registry round missing either count
+        // can never propagate NaN into the integer output fields.
+        return [{
+          round: r.round,
+          fixedCount: Number(r.fixedCount) || 0,
+          failedCount: Number(r.failedCount) || 0,
+        }]
+      }
+      const kept = (r.records ?? []).filter((rec) => rec && rec.finding && rec.finding.file === fileFilter)
+      if (kept.length === 0) return []
+      // Recompute from the kept records: a rolled-back (success:false) record
+      // counts as failed, matching the registry's own recomputeRoundCounts.
+      return [{
+        round: r.round,
+        fixedCount: kept.filter((rec) => rec.success).length,
+        failedCount: kept.filter((rec) => !rec.success).length,
+      }]
+    })
   return {
     totalFixed: rounds.reduce((s, r) => s + r.fixedCount, 0),
     totalFailed: rounds.reduce((s, r) => s + r.failedCount, 0),
@@ -75,8 +120,9 @@ export function summarizeFixRegistry(registry: FixRegistry): {
 
 /**
  * Register the `iterate_history` tool.
- * Reads the decision log (optionally filtered by type / since / limit) and a
- * fix-registry summary. Read-only; never modifies the filesystem.
+ * Reads the decision log (optionally filtered by type / since / round / file /
+ * limit) and a fix-registry summary (scoped by the same round / file filters).
+ * Read-only; never modifies the filesystem.
  */
 export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<typeof defineTool>) => void } }): void {
   ctx.tools.register(
@@ -87,7 +133,8 @@ export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<t
       isConcurrencySafe: () => true,
       description:
         'Read the iteration history: decision-log entries (optionally filtered by entry `type`, `since` ' +
-        'timestamp, and a `limit`) plus a summary of the fix registry (per-round fixed/failed counts). ' +
+        'timestamp, `round`, fixed `file`, and a `limit`) plus a summary of the fix registry (per-round ' +
+        'fixed/failed counts, scoped by the same round/file filters). ' +
         'Read-only — use it to review what the run did, audit a log, or inspect fixes.',
       parameters: {
         type: {
@@ -99,6 +146,18 @@ export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<t
         since: {
           type: 'string',
           description: 'Optional ISO timestamp; only entries AFTER this timestamp are returned.',
+        },
+        round: {
+          type: 'integer',
+          description:
+            'Optional round number; only decision-log entries logged for this round are returned, ' +
+            'and the fix summary is scoped to this round.',
+        },
+        file: {
+          type: 'string',
+          description:
+            'Optional fixed-file path; only decision-log entries whose `data.file` matches are returned, ' +
+            'and the fix summary counts only fixes applied to that file.',
         },
         limit: {
           type: 'integer',
@@ -148,9 +207,9 @@ export function registerHistoryTool(ctx: { tools: { register: (def: ReturnType<t
 
         const { entries, filteredCount, limit } = filterDecisionEntries(
           readDecisionEntries(projectRoot),
-          { type: args.type, since: args.since, limit: args.limit },
+          { type: args.type, since: args.since, limit: args.limit, round: args.round, file: args.file },
         )
-        const fixes = summarizeFixRegistry(readRegistry(projectRoot))
+        const fixes = summarizeFixRegistry(readRegistry(projectRoot), { round: args.round, file: args.file })
 
         return {
           ok: true,

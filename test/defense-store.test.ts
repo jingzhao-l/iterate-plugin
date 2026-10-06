@@ -87,6 +87,29 @@ describe('addDefenseEvent', () => {
     assert.match(entry.id, /^def-/)
     assert.notEqual(entry.timestamp, '2000-01-01T00:00:00.000Z')
   })
+
+  it('keeps only a 1-based line (storage-side mirror of the record validation)', () => {
+    const base = {
+      round: 1,
+      type: 'rollback' as const,
+      description: 'd',
+      defense: 'def',
+      outcome: 'o',
+      severity: 'high' as const,
+      file: 'src/a.ts',
+    }
+    const kept = addDefenseEvent(emptyStream(), { ...base, line: 1 })
+    assert.equal(kept.events[0]!.line, 1)
+
+    // 0 / negative / non-integer are not usable positions — the renderer
+    // prints the file WITHOUT a position for a falsy line, so a stored 0
+    // would be indistinguishable from "no line at all".
+    for (const line of [0, -3, 2.5]) {
+      const dropped = addDefenseEvent(emptyStream(), { ...base, line } as never)
+      assert.equal('line' in dropped.events[0]!, false, `line ${line} must not be persisted`)
+      assert.equal(dropped.events[0]!.file, 'src/a.ts')
+    }
+  })
 })
 
 describe('computeCounts', () => {
@@ -224,6 +247,60 @@ describe('readDefenseEvents', () => {
       const second = readDefenseEvents(dir)
       assert.equal(second.events[0]!.id, first.events[0]!.id)
       assert.equal(second.events[1]!.id, first.events[1]!.id)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('drops a line that is not a 1-based integer (hand-edited line 0 / negative / fractional)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'defense-events.json'), JSON.stringify({
+        events: [
+          { ...event({ id: '1' }), file: 'a.ts', line: 12 }, // usable → kept
+          { ...event({ id: '2' }), file: 'b.ts', line: 0 }, // whole-file marker → dropped
+          { ...event({ id: '3' }), file: 'c.ts', line: -4 }, // invalid → dropped
+          { ...event({ id: '4' }), file: 'd.ts', line: 1.5 }, // non-integer → dropped
+        ],
+      }), 'utf-8')
+      const stream = readDefenseEvents(dir)
+      assert.equal(stream.events[0]!.line, 12)
+      assert.equal('line' in stream.events[1]!, false)
+      assert.equal('line' in stream.events[2]!, false)
+      assert.equal('line' in stream.events[3]!, false)
+      // The file path itself survives — only the unusable position is dropped.
+      assert.equal(stream.events[1]!.file, 'b.ts')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes a missing timestamp to a stable epoch sentinel (deterministic reads)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-defense-read-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      const file = join(dir, '.iterate', 'defense-events.json')
+      writeFileSync(file, JSON.stringify({
+        lastUpdated: '2026-01-01T00:00:00.000Z',
+        events: [
+          { id: 'no-ts', type: 'rollback', round: 1, description: 'd', defense: 'f', outcome: 'o', severity: 'high' },
+        ],
+      }), 'utf-8')
+
+      // Two reads of the SAME file must be byte-identical: the old
+      // `new Date().toISOString()` fallback made every read differ, and the
+      // next write persisted that read-time churn as real history.
+      const first = readDefenseEvents(dir)
+      const second = readDefenseEvents(dir)
+      assert.equal(JSON.stringify(first), JSON.stringify(second))
+      assert.equal(first.events[0]!.timestamp, '1970-01-01T00:00:00.000Z')
+
+      // A read→write cycle must not churn the sentinel into "now" either.
+      writeFileSync(file, JSON.stringify(first), 'utf-8')
+      const third = readDefenseEvents(dir)
+      assert.equal(third.events[0]!.timestamp, '1970-01-01T00:00:00.000Z')
+      assert.equal(JSON.stringify(third), JSON.stringify(first))
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

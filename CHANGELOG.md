@@ -5,6 +5,76 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-10-06
+
+### Changed
+
+- **Upgraded upstream dsh to `v0.2.1-alpha.1`** (released 2026-10-03) — the
+  four dsh packages `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values`
+  (runtime deps) and `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-jobs`
+  (devDeps, plus `@deepseek-ai/dsh-session`) are all aligned on
+  `0.2.1-alpha.1`, with `@deepseek-ai/cordis` at `4.0.5-alpha.1`.
+  `dsh.compatibility.dshReleases` expanded to declare `0.2.0-rc.1` /
+  `0.2.0-rc.2` / `0.2.1-alpha.1: compatible`. The `dshReleases` field in
+  `package.json` is the single source of truth for release compatibility, and
+  both READMEs now mirror it verbatim.
+
+### Added
+
+- **All 15 UX gaps implemented** (P0 / P1 / P2 from the read-only UX review):
+  - **P0**: registered startup instructions — the empty dashboard's
+    "复制启动指令" buttons now copy natural-language instructions
+    (`START_INSTRUCTIONS`, test-locked) instead of a never-registered `/iterate`
+    slash command; zero-verification preflight is fail-closed — empty
+    `validation.commands` aborts before the loop (or runs an explicit
+    `args.unverified` opt-in) and zero validate results are never treated as a
+    pass (`validationUnavailable`; runs end `converged_unverified` /
+    `max_rounds_unverified`, never a plain `converged`); F8 / F9 / F10 are
+    wired into the workflow close-out (quality-gate `compute` after the
+    report, `iterate_experience add` for verified fixes,
+    `iterate_defense_events record` for rollbacks / defenses).
+  - **P1**: disk-snapshot pull instruction — the read-side tools echo
+    `.iterate/` artifacts into the session stream so the panels fill in a
+    fresh session, and empty states distinguish "no data on disk" from "not
+    pulled yet"; running-iteration dashboard state (round + phase chips while
+    `active`, start buttons hidden); per-round `validations` captured into
+    `iterate_transcript` and rendered in the UI; triage write-back closed loop
+    (schema-aligned `iterate_triage apply` instruction is the primary button,
+    plus an `iterate_triage list` readback); config-edit guide now covers
+    `validation.commands` / `language` / `personalization.known_intentional`
+    with an explicit "empty validation.commands = unprotected" warning, and a
+    field picker generates the matching `iterate_config write` instruction;
+    bilingual approval reasons; copy payloads aligned to the target tools'
+    schemas (`iterate_fix` naming `content`/`round`, checkpoint resume without
+    junk `maxRounds: null`, JSON-shaped F8 query).
+  - **P2**: observatory export now includes `qualityGate` / `experienceBank` /
+    `defenseEvents` / `report` alongside manifest + live; F2 cross-round
+    comparison table (per-round findings / fixed / severity mix / validation
+    outcomes); F1–F10 tab labels plus number-key shortcuts (`1-9` / `0` / `-`);
+    README (EN + zh) and DESIGN doc sync (compatibility list, tab count, new
+    "Using the UI in dsh" section, `iterate_history` filter surface).
+- **`ask.displayReason` adoption** — the approval gate now returns dsh 0.2.x's
+  `displayReason` (localized `en` / `zh` prompt text) alongside the structured
+  machine-readable `reason`; human-facing text follows `language`, structured
+  fields stay English.
+- **`presentResult` / `presentCall` card completion** — review
+  (plan / aggregate / meta-review), checkpoint, quality-gate, experience-bank
+  and defense-events results render as dsh cards instead of raw JSON, sharing
+  a new `src/tools/present.ts` helper (long lines clamped, no new card
+  protocols).
+
+### Fixed
+
+- **~120 findings from a full code review (critical / major / minor)** —
+  including: evidence-gate integer line-number handling; meta-review
+  `ROUND_GAP` denial-of-service; strict `iterate.config.yaml` validation plus
+  approval gating for `iterate_config write`; symlink-aware
+  `resolveProjectRoot` folding (macOS `/etc` → `/private/etc`, symlinked
+  session cwd); `iterate_prune` / checkpoint data preservation (no destruction
+  of live data, `readdirSync` guards); transcript normalization and `validations`
+  capture; atomic-write hardening and resource-release leaks. The unit suite
+  grew from ~677 to **1100+ unit tests, all green** (typecheck clean).
+
 ## [3.5.7] - 2026-09-25
 
 ### Changed

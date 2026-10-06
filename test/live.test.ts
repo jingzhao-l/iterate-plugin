@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -173,4 +173,79 @@ test('registerLiveCapture: tools/result without a resolvable cwd is a no-op', as
   // No session cwd → projectRootOf returns null → nothing appended, no throw.
   invoke({ name: 'iterate_fix', arguments: { file: 'src/a.ts' } })
   assert.ok(true)
+})
+
+test('appendLive: observatory.capture false keeps the feed absent', async () => {
+  const root = freshRoot()
+  try {
+    await writeFile(join(root, 'iterate.config.yaml'), 'observatory:\n  capture: false\n', 'utf-8')
+    await appendLive(root, { ts: '2026-01-01T00:00:00.000Z', type: 'read', tool: 'read_file', target: 'a.ts' })
+    assert.equal(existsSync(liveFilePath(root)), false, 'capture off must not create the feed')
+    // Same for an already-existing feed: bytes must be unchanged.
+    await mkdir(join(root, '.iterate'), { recursive: true })
+    await writeFile(liveFilePath(root), '{"ts":"x"}\n', 'utf-8')
+    await appendLive(root, { ts: '2026-01-01T00:00:00.001Z', type: 'fix', tool: 'iterate_fix', target: 'b.ts' })
+    assert.equal(readFileSync(liveFilePath(root), 'utf-8'), '{"ts":"x"}\n', 'capture off must not touch the feed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('appendLive: observatory.capture true still appends', async () => {
+  const root = freshRoot()
+  try {
+    await writeFile(join(root, 'iterate.config.yaml'), 'observatory:\n  capture: true\n', 'utf-8')
+    await appendLive(root, { ts: '2026-01-01T00:00:00.000Z', type: 'read', tool: 'read_file', target: 'a.ts' })
+    const live = await readLive(root)
+    assert.equal(live.length, 1)
+    assert.equal(live[0]?.target, 'a.ts')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('appendLive: an unreadable config keeps capture ON (defaults)', async () => {
+  const root = freshRoot()
+  try {
+    // Unparseable YAML → loadConfig returns null → defaults → capture on.
+    // Privacy must never silently swallow activity the operator expects.
+    await writeFile(join(root, 'iterate.config.yaml'), 'observatory: [unterminated\n', 'utf-8')
+    await appendLive(root, { ts: '2026-01-01T00:00:00.000Z', type: 'read', tool: 'read_file', target: 'a.ts' })
+    const live = await readLive(root)
+    assert.equal(live.length, 1, 'unreadable config must degrade to capture ON')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('appendLive: .iterate existing as a regular file resolves without throwing', async () => {
+  const root = freshRoot()
+  try {
+    await writeFile(join(root, '.iterate'), 'not a directory', 'utf-8')
+    // Previously the mkdir EEXIST/ENOTDIR path rejected the queue promise,
+    // turning `void appendLive(...)` into an unhandled rejection.
+    await appendLive(root, { ts: '2026-01-01T00:00:00.000Z', type: 'read', tool: 'read_file', target: 'a.ts' })
+    assert.equal(readFileSync(join(root, '.iterate'), 'utf-8'), 'not a directory', 'the file must be left alone')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('registerLiveCapture: a throwing exec getter never escapes the observer', () => {
+  let captured: unknown = null
+  const ctx = {
+    on: (_ev: string, fn: (exec: unknown) => void) => {
+      captured = fn
+      return () => { captured = null }
+    },
+  }
+  registerLiveCapture(ctx as never)
+  const invoke = captured as (exec: unknown) => void
+
+  // Every property access throws — the hook must degrade to a no-op instead
+  // of surfacing an error from a read-only observer.
+  const hostile = new Proxy({}, {
+    get() { throw new Error('boom') },
+  })
+  assert.doesNotThrow(() => invoke(hostile), 'the observer must swallow hostile exec accessors')
 })

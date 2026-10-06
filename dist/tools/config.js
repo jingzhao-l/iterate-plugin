@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { defaultConfig, loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { applyConfigUpdates, readRawConfig, validateConfigUpdates, writeConfigFile, } from "../config-write.js";
@@ -86,6 +86,21 @@ export function registerConfigTool(ctx) {
             // ── Write operation ────────────────────────────────────────────────
             if (args.operation === 'write') {
                 const updates = args.updates;
+                // Missing/empty `updates` used to re-dump the config as-is: the
+                // write "succeeded" (ok:true + a spurious backup) while silently
+                // re-serializing the file and losing any hand-written comments.
+                // There is nothing to merge — refuse instead.
+                const isEmptyUpdate = updates === undefined ||
+                    updates === null ||
+                    (typeof updates === 'object' && !Array.isArray(updates) && Object.keys(updates).length === 0);
+                if (isEmptyUpdate) {
+                    return {
+                        operation: 'write',
+                        ok: false,
+                        found: false,
+                        error: 'updates is required (and must be non-empty) for operation "write"',
+                    };
+                }
                 const updateErrors = validateConfigUpdates(updates ?? {});
                 if (updateErrors.length > 0) {
                     return { operation: 'write', ok: false, found: false, errors: updateErrors };
@@ -132,6 +147,27 @@ export function registerConfigTool(ctx) {
             const hasOverride = source === 'override';
             if (args.validate) {
                 const errors = validateConfig(config);
+                // A config file that EXISTS but cannot be parsed silently degrades to
+                // the built-in defaults (loadEffectiveConfig never throws). Reporting
+                // `valid: true` for that file would wave through the breakage —
+                // re-read it raw and surface the parse failure as a validation error.
+                const configPath = join(projectRoot, 'iterate.config.yaml');
+                if (source === 'defaults' && existsSync(configPath)) {
+                    const raw = readFileSync(configPath, 'utf-8');
+                    if (raw.trim().length > 0) {
+                        try {
+                            readRawConfig(configPath);
+                        }
+                        catch (err) {
+                            return {
+                                found: true,
+                                valid: false,
+                                errors: [`iterate.config.yaml is not usable: ${String(err.message ?? err)}`],
+                                section: 'validation_report',
+                            };
+                        }
+                    }
+                }
                 return {
                     found: hasOverride,
                     valid: errors.length === 0,
@@ -141,7 +177,13 @@ export function registerConfigTool(ctx) {
             }
             if (args.section) {
                 const configRecord = config;
-                const section = configRecord[args.section];
+                // Object.hasOwn, NOT `configRecord[args.section]`: a plain
+                // `configRecord["toString"]` resolves through the PROTOTYPE CHAIN to
+                // a function (non-JSON → ToolOutputError) and `["__proto__"]`
+                // returns Object.prototype dressed up as an "existing section".
+                const section = Object.hasOwn(configRecord, args.section)
+                    ? configRecord[args.section]
+                    : undefined;
                 if (section === undefined) {
                     return {
                         found: hasOverride,

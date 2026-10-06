@@ -21,14 +21,16 @@
  * Security model:
  *   - Only operates under the resolved project `.iterate/` directory.
  *   - dryRun=true by default — the caller must explicitly opt into deletion.
- *   - Each deletion is logged to the decision log (when not dry-run).
+ *   - Each non-dry-run appends ONE aggregate summary entry to the decision
+ *     log (counts per artifact class) — not one log line per deleted file.
  */
-import { existsSync, readdirSync, rmSync, unlinkSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
 import { writeTextAtomic, writeJsonAtomic } from "../atomic-fs.js";
-import { readDecisionEntries, appendDecisionEntry, acquireLogLock, invalidateLogCountCache } from "./decision-log.js";
+import { withProjectLock } from "../file-lock.js";
+import { readDecisionEntries, appendDecisionEntry, acquireLogLockChecked, invalidateLogCountCache } from "./decision-log.js";
 import { readRegistry, recomputeRoundCounts } from "./fix.js";
 import { readExperienceBank, writeExperienceBank } from "./experience-store.js";
 import { readDefenseEvents, writeDefenseEvents } from "./defense-store.js";
@@ -91,12 +93,20 @@ export function sweepExperienceBank(bank, cap) {
     const total = bank.entries.length;
     if (total <= size)
         return { bank, removed: 0 };
-    const kept = [...bank.entries]
-        .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
-        .slice(0, size);
-    // Preserve the original (insertion) order of the surviving entries.
-    const keptIds = new Set(kept.map((e) => e.id));
-    const ordered = bank.entries.filter((e) => keptIds.has(e.id));
+    // Keep by POSITION, not by id: a Set of kept ids lets duplicate ids (a
+    // hand-edited or double-written bank) defeat the cap — every original entry
+    // sharing a kept id would survive, so `removed` stayed 0 and the cap never
+    // applied. Rank positions newest-first (ties fall back to the original index
+    // so equal timestamps keep insertion order, as before), keep the first `size`
+    // positions, then re-emit the survivors in insertion order.
+    const ranked = bank.entries.map((_, i) => i);
+    ranked.sort((a, b) => {
+        const ta = bank.entries[a]?.timestamp ?? '';
+        const tb = bank.entries[b]?.timestamp ?? '';
+        return tb.localeCompare(ta) || a - b;
+    });
+    const keep = new Set(ranked.slice(0, size));
+    const ordered = bank.entries.filter((_, i) => keep.has(i));
     return {
         bank: { ...bank, entries: ordered, lastUpdated: new Date().toISOString() },
         removed: total - ordered.length,
@@ -160,6 +170,27 @@ export function inspectPrune(projectRoot, retainDays) {
         }
     }
     // 3. Stale fix backups: .bak files whose fix-id prefix is not in the registry.
+    //
+    // `readRegistry` returns an EMPTY registry for BOTH "file absent" and "file
+    // present but corrupt" — and for the corrupt case an empty active-id set
+    // would classify EVERY backup stale, so a single dryRun:false prune would
+    // delete the entire rollback safety net. Read the registry file directly to
+    // distinguish the two: absent ⇒ backups are orphaned (stale, delete as
+    // before); present-but-unreadable ⇒ set `registryError`, classify nothing,
+    // and let `executePrune`/the render surface the refusal.
+    const registryFile = fixRegistryPath(projectRoot);
+    let registryError = null;
+    if (existsSync(registryFile)) {
+        try {
+            const parsed = JSON.parse(readFileSync(registryFile, 'utf-8'));
+            if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.rounds)) {
+                registryError = `refusing to delete fix backups: fix registry is present but unreadable (invalid shape): ${registryFile}`;
+            }
+        }
+        catch (err) {
+            registryError = `refusing to delete fix backups: fix registry is present but unreadable: ${String(err)} (${registryFile})`;
+        }
+    }
     const registry = readRegistry(projectRoot);
     const activeIds = new Set();
     for (const r of registry.rounds) {
@@ -179,15 +210,17 @@ export function inspectPrune(projectRoot, retainDays) {
     catch {
         fixEntries = [];
     }
-    for (const entry of fixEntries) {
-        if (!entry.endsWith('.bak'))
-            continue;
-        // Extract the fix-id prefix (up to the first underscore after the id).
-        // e.g. "fix-abc123_2026-08-17T00-00-00-000Z.bak" → "fix-abc123"
-        const match = entry.match(/^(fix-[a-z0-9]+)_/);
-        const id = match?.[1];
-        if (id && !activeIds.has(id)) {
-            staleBackups.push(entry);
+    if (registryError === null) {
+        for (const entry of fixEntries) {
+            if (!entry.endsWith('.bak'))
+                continue;
+            // Extract the fix-id prefix (up to the first underscore after the id).
+            // e.g. "fix-abc123_2026-08-17T00-00-00-000Z.bak" → "fix-abc123"
+            const match = entry.match(/^(fix-[a-z0-9]+)_/);
+            const id = match?.[1];
+            if (id && !activeIds.has(id)) {
+                staleBackups.push(entry);
+            }
         }
     }
     // 4. Empty rounds (rounds with 0 records).
@@ -224,6 +257,7 @@ export function inspectPrune(projectRoot, retainDays) {
         emptyRounds,
         totalLogEntries: entries.length,
         registryRounds: registry.rounds.length,
+        registryError,
         totalExperiences: bank.entries.length,
         experienceOversize: sweptBank.removed,
         totalDefenseEvents: defenseStream.events.length,
@@ -239,29 +273,56 @@ export function inspectPrune(projectRoot, retainDays) {
  *
  * The read-before-rewrite is a TOCTOU hot spot: a concurrent worker can append
  * a fresh audit line between our read and our atomic rewrite, and an atomic
- * rename would silently discard it. So instead of a single read+write we use a
- * bounded compare-and-append loop — after each rewrite we re-read the log and
+ * rename would silently discard it. So instead of a single read+write we take
+ * the cross-process log mutex for the whole loop AND keep a bounded
+ * compare-and-append loop behind it — after each rewrite we re-read the log and
  * retry whenever the file grew (a concurrent append slipped in). The loop
  * terminates when the file is stable or after `MAX_LOG_REWRITE_RETRIES`, and a
  * failure here is surfaced as a structured error instead of truncating the log.
  *
- * @returns the number of entries removed (best-effort) or 0 on error.
+ * Lock required: when the mutex cannot be taken (another process is appending
+ * and does not release within the wait budget) the rewrite is REFUSED with a
+ * structured error rather than proceeding unlocked — an unlocked rename can
+ * drop a concurrent appender's audit line (its fd points at the pre-rename
+ * inode) with no way to detect the loss afterwards.
+ *
+ * `deleted` is the TOTAL across every attempt: attempt 1 may already have
+ * removed entries before a retry is needed, and reporting only the final
+ * attempt's slice would under-count the audit entry (the pre-fix code returned
+ * `deleted: 0` on the exhaustion path even after real deletions).
+ *
+ * @param options.afterRewrite test hook run after each successful rewrite —
+ * simulates a concurrent appender landing lines mid-loop (production passes
+ * no hook).
+ * @param options.lock lock wait/stale budgets (tests pass short waits so the
+ * lock-unavailable refusal is exercised in milliseconds, not 5s).
+ * @returns the number of entries removed across all attempts, or 0 with an
+ *  `error` when nothing needed removing or the rewrite was refused/failed.
  */
-function rewriteDecisionLogKeepingRecent(projectRoot, cutoff) {
+export function rewriteDecisionLogKeepingRecent(projectRoot, cutoff, options = {}) {
     const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl');
     // Take the cross-process log lock for the ENTIRE loop: with the mutex held,
     // no concurrent appender can slip a fresh line into the read-before-rewrite
     // window, so the first attempt is nearly always the only one. (The retry
-    // loop stays as defense-in-depth for the lock-unavailable path.)
-    const release = acquireLogLock(projectRoot);
+    // loop stays as defense-in-depth for a line landing via the afterRewrite
+    // hook or an already-running appender's buffered write.)
+    const { acquired, release } = acquireLogLockChecked(projectRoot, options.lock);
+    if (!acquired) {
+        return {
+            deleted: 0,
+            error: 'failed to acquire the decision-log lock — refusing to rewrite the log unlocked ' +
+                '(a concurrent appender could lose an audit line). Retry after the other operation finishes.',
+        };
+    }
     try {
+        let deletedTotal = 0;
         for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
             try {
                 const entries = readDecisionEntries(projectRoot);
                 const kept = entries.filter((e) => e.timestamp >= cutoff);
                 const deleted = entries.length - kept.length;
                 if (deleted === 0)
-                    return { deleted: 0 };
+                    return { deleted: deletedTotal };
                 writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n');
                 // The append-side entry-count cache is keyed by path and assumes "same
                 // byte size ⇒ same count"; the rename above replaced the file with a
@@ -269,18 +330,23 @@ function rewriteDecisionLogKeepingRecent(projectRoot, cutoff) {
                 // append can report a wrong entryCount when the sizes coincidentally
                 // match.
                 invalidateLogCountCache(logPath);
+                // Accumulate THIS attempt's deletions before the re-read: whatever the
+                // later attempts (or the exhaustion path) report, these entries are
+                // already gone from disk and must count toward the audit total.
+                deletedTotal += deleted;
+                options.afterRewrite?.();
                 // A concurrent appender (cross-process, lock-unavailable path) may have
                 // landed new lines after our read. If the log grew during the write
                 // window, re-read and prune again instead of accepting a lost audit trail.
                 const after = readDecisionEntries(projectRoot);
                 if (after.length <= kept.length)
-                    return { deleted };
+                    return { deleted: deletedTotal };
             }
             catch (err) {
-                return { deleted: 0, error: `failed to rewrite decision log: ${String(err)}` };
+                return { deleted: deletedTotal, error: `failed to rewrite decision log: ${String(err)}` };
             }
         }
-        return { deleted: 0, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` };
+        return { deleted: deletedTotal, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` };
     }
     finally {
         release();
@@ -304,9 +370,10 @@ export function executePrune(projectRoot, retainDays, report) {
         errors: [],
     };
     // 1. Rewrite the decision log, keeping only recent entries. Atomic
-    // (temp + rename) so a crash mid-write can never truncate the log; the
-    // bounded compare-and-append loop guards against a concurrent appender
-    // slipping a fresh audit line into the read-before-rewrite window.
+    // (temp + rename) under the cross-process log mutex — REFUSED with a
+    // structured error when the lock cannot be taken (an unlocked rename could
+    // drop a concurrent appender's audit line); the bounded compare-and-append
+    // loop behind it guards the remaining read-before-rewrite window.
     {
         const { deleted, error } = rewriteDecisionLogKeepingRecent(projectRoot, cutoff);
         result.deletedLogEntries = deleted;
@@ -325,30 +392,42 @@ export function executePrune(projectRoot, retainDays, report) {
             result.errors.push(`failed to remove checkpoint: ${String(err)}`);
         }
     }
-    // 3. Delete stale backups.
-    for (const bak of report.staleBackups) {
-        try {
-            unlinkSync(join(fixesDir(projectRoot), bak));
-            result.deletedBackups.push(bak);
-        }
-        catch (err) {
-            result.errors.push(`failed to delete backup ${bak}: ${String(err)}`);
+    // 3. Delete stale backups — REFUSED outright when the registry is present
+    // but unreadable: without a readable active-id set every backup would have
+    // classified stale, and one dryRun:false prune would wipe the whole rollback
+    // safety net. Surface the refusal as a structured error instead.
+    if (report.registryError) {
+        result.errors.push(report.registryError);
+    }
+    else {
+        for (const bak of report.staleBackups) {
+            try {
+                unlinkSync(join(fixesDir(projectRoot), bak));
+                result.deletedBackups.push(bak);
+            }
+            catch (err) {
+                result.errors.push(`failed to delete backup ${bak}: ${String(err)}`);
+            }
         }
     }
-    // 4. Trim empty rounds from the registry.
+    // 4. Trim empty rounds from the registry (locked read-modify-write: the
+    // registry read and rewrite must not interleave with another process's
+    // fix/rollback or the update is lost — see src/file-lock.ts).
     if (report.emptyRounds.length > 0) {
         try {
-            let registry = readRegistry(projectRoot);
-            const emptyRoundNos = new Set(report.emptyRounds);
-            // Drop whole empty rounds (records.length === 0) instead of only
-            // removing their records — an empty round has no records to remove, so
-            // the old loop was a no-op that still reported trimmedEmptyRounds.
-            registry = {
-                ...registry,
-                rounds: registry.rounds.filter((r) => !emptyRoundNos.has(r.round) || (r.records?.length ?? 0) > 0),
-            };
-            registry = recomputeRoundCounts(registry);
-            writeJsonAtomic(fixRegistryPath(projectRoot), registry);
+            withProjectLock(projectRoot, 'fix-registry', () => {
+                let registry = readRegistry(projectRoot);
+                const emptyRoundNos = new Set(report.emptyRounds);
+                // Drop whole empty rounds (records.length === 0) instead of only
+                // removing their records — an empty round has no records to remove, so
+                // the old loop was a no-op that still reported trimmedEmptyRounds.
+                registry = {
+                    ...registry,
+                    rounds: registry.rounds.filter((r) => !emptyRoundNos.has(r.round) || (r.records?.length ?? 0) > 0),
+                };
+                registry = recomputeRoundCounts(registry);
+                writeJsonAtomic(fixRegistryPath(projectRoot), registry);
+            });
             result.trimmedEmptyRounds = report.emptyRounds.length;
         }
         catch (err) {
@@ -403,12 +482,27 @@ export function executePrune(projectRoot, retainDays, report) {
 export function registerPruneTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_prune',
+        // Pending-call card (#12): say up front whether this sweep is the default
+        // report-only preview or a REAL deletion — that distinction is prune's
+        // entire safety model, so it must be visible before the call runs. Pure:
+        // derived from args only.
+        presentCall: (args) => {
+            const a = args;
+            const deleting = a.dryRun === false;
+            return {
+                card: 'generic',
+                title: deleting
+                    ? 'Prune stale .iterate/ artifacts (delete)'
+                    : 'Prune preview (dry run — nothing deleted)',
+                kind: deleting ? 'delete' : 'read',
+            };
+        },
         description: 'Inspect or clean up old iterate runtime artifacts (.iterate/). ' +
             'Defaults to dry-run (report-only, no deletion). Pass `dryRun: false` to actually prune. ' +
             'Manages: old decision-log entries, stale checkpoints, orphaned fix backups, empty fix rounds, ' +
             'stray temp files left by crashed atomic writes, experience-bank entries beyond the entry cap, ' +
             'and stale defense events. ' +
-            'Each deletion is logged to the decision log.',
+            'A non-dry-run appends ONE aggregate summary entry (counts per artifact class) to the decision log.',
         parameters: {
             dryRun: {
                 type: 'boolean',
@@ -442,11 +536,14 @@ export function registerPruneTool(ctx) {
                 const report = value.report;
                 const result = value.result;
                 if (value.dryRun) {
+                    const registryError = report?.registryError;
                     const lines = [
                         `[dry-run] prune report (retainDays=${value.retainDays}):`,
                         `  Decision-log entries to remove: ${report?.oldLogEntries ?? '?'} (of ${report?.totalLogEntries ?? '?'})`,
                         `  Checkpoint to delete: ${report?.checkpointStale ? 'yes (stale)' : report?.hasCheckpoint ? 'no (fresh — resume point, kept)' : 'none'}`,
-                        `  Stale backups to delete: ${report?.staleBackups?.length ?? 0}`,
+                        registryError
+                            ? `  Stale backups to delete: none — ${registryError}`
+                            : `  Stale backups to delete: ${report?.staleBackups?.length ?? 0}`,
                         `  Stray temp files to delete: ${report?.staleTemps?.length ?? 0}`,
                         `  Empty rounds to trim: ${report?.emptyRounds?.length ?? 0}`,
                         `  Experience entries to drop (over ${report?.totalExperiences ?? '?'} cap): ${report?.experienceOversize ?? 0} of ${report?.totalExperiences ?? '?'}`,

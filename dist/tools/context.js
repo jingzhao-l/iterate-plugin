@@ -25,10 +25,20 @@ export function isAllowedSkillDir(skillDir, allowedRoots) {
         return allowedRoots.some((root) => {
             if (typeof root !== 'string' || root.length === 0)
                 return false;
-            const rootReal = realpathSync(root);
-            const rootPrefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep;
-            const real = realpathSync(dir);
-            return real === rootReal || real.startsWith(rootPrefix);
+            // Per-root try/catch: realpathSync THROWS for a root that does not exist
+            // yet. One throw around the whole `.some()` would abort the scan and
+            // reject a perfectly valid skillDir sitting inside a LATER root (the
+            // caller then silently falls back to auto-detection) — skip only the
+            // unusable root and keep checking the remaining ones.
+            try {
+                const rootReal = realpathSync(root);
+                const rootPrefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep;
+                const real = realpathSync(dir);
+                return real === rootReal || real.startsWith(rootPrefix);
+            }
+            catch {
+                return false; // broken/missing allowed root — not a match, keep scanning
+            }
         });
     }
     catch {
@@ -279,7 +289,7 @@ export function registerContextTool(ctx) {
                 .split(',')
                 .map((s) => s.trim().toLowerCase())
                 .filter(Boolean);
-            const result = { found: true, searched: [] };
+            const result = { found: false, searched: [] };
             // Relay user-attached image metadata into the review context. The
             // orchestrator observes attached images in the session and passes their
             // metadata here; invalid entries are dropped with a reported reason.
@@ -328,6 +338,13 @@ export function registerContextTool(ctx) {
             if (requested.includes('project') || requested.includes('iterate.md')) {
                 result.project = readProjectFile(projectRoot, 'ITERATE.md');
             }
+            // Derive `found` from what was actually returned. It mirrors the
+            // renderer's "No files found" branch exactly: requested file content,
+            // or relayed attachments (attachmentErrors alone never make a find).
+            result.found =
+                Boolean(result.skill) ||
+                    Boolean(result.project) ||
+                    (Array.isArray(result.attachments) && result.attachments.length > 0);
             return result;
         },
     }));

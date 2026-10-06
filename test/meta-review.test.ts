@@ -3,6 +3,8 @@ import { describe, it } from 'node:test'
 import {
   buildFinalReviewReport,
   metaReviewReport,
+  MAX_REVIEW_ROUND_NUMBER,
+  MAX_ROUND_GAP_REPORTS,
   META_REVIEW_CHECKS,
 } from '../src/meta-review.ts'
 import { buildReviewReport } from '../src/review.ts'
@@ -334,5 +336,216 @@ describe('buildFinalReviewReport', () => {
     }
     const final = buildFinalReviewReport(report, { coverage })
     assert.deepEqual(final.coverage, coverage)
+  })
+})
+// ─── ROUND_GAP hardening (untrusted round numbers) ──────────────────────────
+
+describe('ROUND_GAP enumeration bounds', () => {
+  /** A report whose rounds list is exactly `rounds` (rest is well-formed). */
+  function roundsOnly(rounds: ReviewReport['rounds']): ReviewReport {
+    const report = goodReport()
+    report.rounds = rounds
+    return report
+  }
+
+  it('rejects an absurd round number instead of walking min..max (CPU DoS)', () => {
+    // rounds {1, 1e15} previously drove `for (i = min; i <= max; i++)` for
+    // ~1e15 iterations (and pushed one issue per missing round).
+    const started = Date.now()
+    const result = metaReviewReport(
+      roundsOnly([{ round: 1, findings: [f({ summary: 'r1' })] }, { round: 1e15, findings: [f({ summary: 'huge' })] }]),
+    )
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 2000, `gap audit took ${elapsed}ms`)
+    assert.ok(result.issues.some((i) => i.code === 'ROUND_NUMBER'), 'absurd round is invalid, not a gap')
+    assert.ok(!result.issues.some((i) => i.code === 'ROUND_GAP'), 'no enumeration over an absurd range')
+    // …and an `Infinity` round must not hang either.
+    const inf = metaReviewReport(
+      roundsOnly([{ round: 1, findings: [f({ summary: 'r1' })] }, { round: Number.POSITIVE_INFINITY, findings: [] }]),
+    )
+    assert.ok(inf.issues.some((i) => i.code === 'ROUND_NUMBER'))
+    assert.ok(!inf.issues.some((i) => i.code === 'ROUND_GAP'))
+  })
+
+  it('flags fractional / negative round numbers as ROUND_NUMBER', () => {
+    const result = metaReviewReport(
+      roundsOnly([
+        { round: 1, findings: [f({ summary: 'r1' })] },
+        { round: 1.5, findings: [f({ summary: 'half' })] },
+        { round: -3, findings: [] },
+      ]),
+    )
+    const roundNumbers = result.issues.filter((i) => i.code === 'ROUND_NUMBER')
+    assert.equal(roundNumbers.length, 2, 'the 1.5 and -3 rounds are both invalid')
+    // Only round 1 is present → no gap to report.
+    assert.ok(!result.issues.some((i) => i.code === 'ROUND_GAP'))
+  })
+
+  it('caps the number of individual ROUND_GAP issues', () => {
+    const report = roundsOnly([
+      { round: 1, findings: [f({ summary: 'r1' })] },
+      { round: 101, findings: [f({ summary: 'r101' })] },
+    ])
+    const result = metaReviewReport(report)
+    const gaps = result.issues.filter((i) => i.code === 'ROUND_GAP')
+    // 99 missing rounds, but only MAX_ROUND_GAP_REPORTS listed individually
+    // plus one "+N more" summary issue.
+    assert.equal(gaps.length, MAX_ROUND_GAP_REPORTS + 1)
+    assert.ok(gaps.some((i) => /more rounds are missing/.test(i.summary)))
+    assert.equal(result.checksRun, META_REVIEW_CHECKS)
+  })
+
+  it('collapses a range wider than MAX_ROUND_GAP_SPAN into a single issue', () => {
+    const result = metaReviewReport(
+      roundsOnly([
+        { round: 1, findings: [f({ summary: 'r1' })] },
+        { round: MAX_REVIEW_ROUND_NUMBER, findings: [f({ summary: 'last' })] },
+      ]),
+    )
+    const gaps = result.issues.filter((i) => i.code === 'ROUND_GAP')
+    assert.equal(gaps.length, 1)
+    assert.match(gaps[0]!.summary, /too wide to audit/)
+    // round 1000 is within the ceiling, so it is never called out as invalid.
+    assert.ok(!result.issues.some((i) => i.code === 'ROUND_NUMBER'))
+  })
+})
+
+// ─── convergence reads agree with the aggregation core ─────────────────────
+
+describe('convergence checks agree with buildReviewReport', () => {
+  it('does not false-flag CONVERGENCE_* for an over-cap (folded) round', () => {
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'first issue' })] },
+        { round: 50, findings: [f({ summary: 'late issue' })] },
+      ],
+    })
+    const result = metaReviewReport(report)
+    assert.equal(report.convergence.converged, false)
+    assert.ok(!result.issues.some((i) => i.code === 'CONVERGENCE_SUM'))
+    assert.ok(!result.issues.some((i) => i.code === 'CONVERGENCE_FLAG'))
+    // The gap between 1 and 50 is real and still reported (bounded).
+    assert.ok(result.issues.some((i) => i.code === 'ROUND_GAP'))
+  })
+
+  it('does not false-flag CONVERGENCE_FLAG when a trailing round is fractional', () => {
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'real issue' })] },
+        { round: 1.5, findings: [f({ summary: 'real issue' })] },
+      ],
+    })
+    const result = metaReviewReport(report)
+    // `Math.min(1.5, len) - 1` is fractional → used to read `undefined` → 0 new
+    // → expectedConverged flipped against the report's own flag.
+    assert.equal(report.convergence.converged, false)
+    assert.ok(!result.issues.some((i) => i.code === 'CONVERGENCE_FLAG'), JSON.stringify(result.issues))
+    assert.ok(result.issues.some((i) => i.code === 'ROUND_NUMBER'), 'the 1.5 round is still reported')
+  })
+
+  it('findingsByRound sums to totalFindings for every report the core builds', () => {
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'a' })] },
+        { round: 2, findings: [f({ summary: 'b' })] },
+        { round: 77, findings: [f({ summary: 'c' })] },
+      ],
+    })
+    const sum = report.convergence.findingsByRound.reduce((a, b) => a + b, 0)
+    assert.equal(sum, report.summary.totalFindings)
+    const result = metaReviewReport(report)
+    assert.ok(!result.issues.some((i) => i.code === 'CONVERGENCE_SUM'))
+  })
+})
+
+// ─── evidence violation detail distinguishes the new error codes ────────────
+
+describe('EVIDENCE_VIOLATION detail per error code', () => {
+  function withError(partial: Partial<{ file: string; line: number | null; lineTotal: number | null }>, error: string) {
+    const report = goodReport()
+    return buildFinalReviewReport(report, {
+      evidence: {
+        checked: 1,
+        results: [
+          {
+            file: partial.file ?? 'src/a.ts',
+            line: partial.line ?? null,
+            lineTotal: partial.lineTotal ?? null,
+            resolvedPath: '/root/src/a.ts',
+            verified: false,
+            error: error as 'file_not_found',
+          },
+        ],
+      },
+    })
+  }
+
+  it('describes a too-large file as too large, not as missing code', () => {
+    const final = withError({ file: 'src/big.ts' }, 'file_too_large')
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
+    assert.match(issue!.detail, /too large to line-address/)
+    assert.doesNotMatch(issue!.detail, /does not exist at all/)
+    assert.match(issue!.summary, /cannot be anchored/)
+    assert.equal(final.verdict, 'needs_revision')
+  })
+
+  it('describes a binary file as binary, not as missing code', () => {
+    const final = withError({ file: 'src/blob.bin' }, 'binary_file')
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
+    assert.match(issue!.detail, /binary \(NUL-containing\)/)
+    assert.doesNotMatch(issue!.detail, /does not exist at all/)
+    assert.match(issue!.summary, /src\/blob\.bin/)
+    assert.equal(final.verdict, 'needs_revision')
+  })
+
+  it('describes a directory / device target as not line-addressable', () => {
+    const final = withError({ file: 'src' }, 'line_out_of_range')
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
+    assert.match(issue!.detail, /not a regular line-addressable file/)
+  })
+
+  it('still reports a plain out-of-range line with its line count', () => {
+    const final = withError({ file: 'src/a.ts', line: 9999, lineTotal: 10 }, 'line_out_of_range')
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
+    assert.match(issue!.detail, /9999 is beyond this file's 10 lines/)
+    assert.match(issue!.summary, /non-existent code/)
+  })
+
+  it('survives a null round entry while attributing the round', () => {
+    const report = goodReport()
+    report.rounds = [null as unknown as ReviewReport['rounds'][number], ...report.rounds]
+    const final = buildFinalReviewReport(report, {
+      evidence: {
+        checked: 1,
+        results: [
+          {
+            file: 'src/a.ts',
+            line: 10,
+            lineTotal: null,
+            resolvedPath: '/root/src/a.ts',
+            verified: false,
+            error: 'line_out_of_range',
+          },
+        ],
+      },
+    })
+    const issue = final.metaReview.issues.find((i) => i.code === 'EVIDENCE_VIOLATION')
+    assert.ok(issue)
   })
 })

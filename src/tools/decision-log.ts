@@ -27,9 +27,11 @@ const LOG_FILE = 'decision-log.jsonl'
 // by synchronous I/O, but a second plugin process appending to the same
 // project realises the race. The log is serialized with a tiny advisory lock
 // file (exclusive create, pid stamped, stale-stealable) so `append` and the
-// prune rewrite mutually exclude across processes. Best-effort: contention
-// timeouts degrade to "proceed unlocked" (the bounded retry loop in prune.ts
-// stays as defense-in-depth), never to a crash.
+// prune rewrite mutually exclude across processes. Appends are BEST-EFFORT:
+// contention timeouts degrade to "proceed unlocked" (an audit line must never
+// be lost to a wedged append), never to a crash. The prune REWRITE is the
+// opposite — it renames the log and therefore refuses to run when the lock
+// cannot be taken (see `rewriteDecisionLogKeepingRecent` in prune.ts).
 
 const LOCK_FILE = '.decision-log.lock'
 const LOCK_WAIT_MS = 5000
@@ -57,14 +59,40 @@ function sleepSync(ms: number): void {
  * Acquire the decision-log lock for `projectRoot`.
  * Returns a release function (always callable; a no-op when the lock could
  * not be taken — never wedge an append behind a vanished holder).
+ *
+ * `options.waitMs` / `options.staleMs` override the defaults (tests use short
+ * waits so a live-holder timeout is exercised in milliseconds, not 5s).
  */
-export function acquireLogLock(projectRoot: string): () => void {
+export function acquireLogLock(
+  projectRoot: string,
+  options: { waitMs?: number; staleMs?: number } = {},
+): () => void {
+  return acquireLogLockChecked(projectRoot, options).release
+}
+
+/**
+ * {@link acquireLogLock} plus the one thing the prune rewrite needs: whether
+ * the lock was actually TAKEN. Appends stay best-effort on contention (an
+ * audit line must not be lost to a wedged append), but the rewrite renames the
+ * log under any unlocked concurrent appender — it must refuse to run without
+ * the mutex rather than silently dropping an audit line.
+ */
+export function acquireLogLockChecked(
+  projectRoot: string,
+  options: { waitMs?: number; staleMs?: number } = {},
+): { acquired: boolean; release: () => void } {
+  const waitMs = Number.isFinite(options.waitMs) && (options.waitMs ?? 0) >= 0
+    ? (options.waitMs as number)
+    : LOCK_WAIT_MS
+  const staleMs = Number.isFinite(options.staleMs) && (options.staleMs ?? 0) >= 0
+    ? (options.staleMs as number)
+    : LOCK_STALE_MS
   const dir = join(projectRoot, LOG_DIR)
   if (!existsSync(dir)) {
     try {
       mkdirSync(dir, { recursive: true })
     } catch {
-      return () => {}
+      return { acquired: false, release: () => {} }
     }
   }
   const lockPath = join(dir, LOCK_FILE)
@@ -74,12 +102,12 @@ export function acquireLogLock(projectRoot: string): () => void {
     try {
       fd = openSync(lockPath, 'wx')
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return () => {}
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return { acquired: false, release: () => {} }
       // Lock exists — steal it when the owner is gone or the lock is ancient.
       let stale = false
       try {
         const st = statSync(lockPath)
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) stale = true
+        if (Date.now() - st.mtimeMs > staleMs) stale = true
         else {
           const pid = Number(readFileSync(lockPath, 'utf-8'))
           if (!processAlive(pid)) stale = true
@@ -91,7 +119,7 @@ export function acquireLogLock(projectRoot: string): () => void {
         try { unlinkSync(lockPath) } catch { /* another holder stole it */ }
         continue
       }
-      if (Date.now() - start > LOCK_WAIT_MS) return () => {}
+      if (Date.now() - start > waitMs) return { acquired: false, release: () => {} }
       sleepSync(LOCK_POLL_MS)
       continue
     }
@@ -99,25 +127,73 @@ export function acquireLogLock(projectRoot: string): () => void {
     try { writeSync(fd, String(process.pid)) } catch { /* pid stamp is advisory */ }
     try { closeSync(fd) } catch { /* best-effort */ }
     let released = false
-    return () => {
-      if (released) return
-      released = true
-      try { unlinkSync(lockPath) } catch { /* already gone */ }
+    return {
+      acquired: true,
+      release: () => {
+        if (released) return
+        released = true
+        try { unlinkSync(lockPath) } catch { /* already gone */ }
+      },
     }
   }
 }
 
 // ─── Entry-count cache (avoid an O(n) full re-read per append) ─────────────
 
+/**
+ * Max distinct log paths tracked by the entry-count cache. The cache is keyed
+ * by PATH (one entry per project's log) with no natural eviction — a long-lived
+ * process touching many projects would otherwise grow it without bound. A
+ * simple insertion-ordered LRU: a hit re-inserts (refreshing recency), a set
+ * past the cap evicts the least-recently-used path. Small on purpose: the
+ * hot path is one project's log.
+ */
+export const LOG_COUNT_CACHE_CAP = 64
+
 const entryCountCache = new Map<string, { size: number; count: number }>()
 
-/** Line-count the log file from scratch (entries = non-empty JSON lines). */
-function recountEntries(filePath: string): number {
+/** LRU-ish get: refresh recency by re-inserting the key. */
+function cacheGet(filePath: string): { size: number; count: number } | undefined {
+  const hit = entryCountCache.get(filePath)
+  if (hit) {
+    entryCountCache.delete(filePath)
+    entryCountCache.set(filePath, hit)
+  }
+  return hit
+}
+
+/** Insert (or refresh) a cache entry, evicting past LOG_COUNT_CACHE_CAP. */
+function cacheSet(filePath: string, value: { size: number; count: number }): void {
+  entryCountCache.delete(filePath)
+  entryCountCache.set(filePath, value)
+  while (entryCountCache.size > LOG_COUNT_CACHE_CAP) {
+    const oldest = entryCountCache.keys().next().value
+    if (oldest === undefined) break
+    entryCountCache.delete(oldest)
+  }
+}
+
+/** Current cache occupancy (exported for unit tests of the capacity bound). */
+export function logCountCacheSize(): number {
+  return entryCountCache.size
+}
+
+/**
+ * Line-count the log file from scratch (entries = non-empty JSON lines).
+ * Exported for unit tests.
+ *
+ * A read failure (file vanished, permission, replaced by a directory) returns
+ * `{ ok: false }` with the last KNOWN cached count for this path — or 0 when
+ * the path was never counted. The old code returned a fabricated `1` here,
+ * which the caller then cached, poisoning the base count for every later
+ * append. The `ok` flag lets the caller skip caching a failed read entirely.
+ */
+export function recountEntries(filePath: string): { count: number; ok: boolean } {
   try {
     const content = readFileSync(filePath, 'utf-8')
-    return content.split('\n').filter((l) => l.trim().length > 0).length
+    return { count: content.split('\n').filter((l) => l.trim().length > 0).length, ok: true }
   } catch {
-    return 1
+    return { count: cacheGet(filePath)?.count ?? 0, ok: false }
   }
 }
 
@@ -186,19 +262,36 @@ export function appendDecisionEntry(projectRoot: string, entry: DecisionLogEntry
   // with a prune rewrite (which renames the file under us).
   const release = acquireLogLock(projectRoot)
   try {
-    const filePath = logPath(projectRoot)
+    // EVERYTHING that can throw — including `logPath`'s mkdirSync (EACCES when
+    // `.iterate` cannot be created, ENOTDIR when an ancestor is a regular file)
+    // and the statSync probes — sits inside the inner try: callers run this
+    // AFTER their own mutations and only handle the structured form, so an
+    // escaping exception would abort the whole iterate_fix/iterate_prune call.
     try {
+      const filePath = logPath(projectRoot)
       const line = JSON.stringify(entry) + '\n'
       const prevSize = existsSync(filePath) ? statSync(filePath).size : 0
       appendFileSync(filePath, line, 'utf-8')
       // Count entries via the size/count cache: when nothing else changed the
       // file since our last append (same byte size), count is just +1 — no full
       // re-read. Falls back to a full re-count whenever the cache is stale.
-      const cached = entryCountCache.get(filePath)
-      const count = cached && cached.size === prevSize
-        ? cached.count + 1
-        : recountEntries(filePath)
-      entryCountCache.set(filePath, { size: existsSync(filePath) ? statSync(filePath).size : prevSize, count })
+      const cached = cacheGet(filePath)
+      let count: number
+      if (cached && cached.size === prevSize) {
+        count = cached.count + 1
+      } else {
+        const recounted = recountEntries(filePath)
+        if (!recounted.ok) {
+          // The append LANDED but the read-back failed (file vanished /
+          // replaced mid-call). Report the best count we actually know —
+          // cached value or 0 — and DO NOT touch the cache: caching a failed
+          // read's fallback under the new byte size would poison every later
+          // append's count.
+          return { count: recounted.count, path: filePath }
+        }
+        count = recounted.count
+      }
+      cacheSet(filePath, { size: existsSync(filePath) ? statSync(filePath).size : prevSize, count })
       return { count, path: filePath }
     } catch (err) {
       return { count: 0, path: join(projectRoot, LOG_DIR, LOG_FILE), error: `failed to append decision log: ${String(err)}` }

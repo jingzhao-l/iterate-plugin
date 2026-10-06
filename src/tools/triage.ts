@@ -5,6 +5,8 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import yaml from 'js-yaml'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 import { writeTextAtomic } from '../atomic-fs.ts'
+import { configBackupSuffix } from '../config-write.ts'
+import { WHOLE_FILE_LINE } from '../evidence.ts'
 import type { KnownIntentional } from '../types.ts'
 
 const CONFIG_FILE = 'iterate.config.yaml'
@@ -16,11 +18,23 @@ const KNOWN_INTENTIONAL_KEY = 'known_intentional'
 /** Max entries per single `apply` call. */
 const MAX_ENTRIES = 500
 
+/**
+ * TOTAL cap on `personalization.known_intentional`.
+ *
+ * `MAX_ENTRIES` only bounds one `apply` payload, so the list itself grew
+ * without limit across sessions — every review round then ran
+ * `filterKnownIntentional` as O(findings × entries) over an ever-longer list,
+ * and the config file (backed up on every write) grew with it. Merges now
+ * evict the OLDEST entries (list order is write order — incoming entries are
+ * appended) beyond this bound and report how many were dropped.
+ */
+export const MAX_TOTAL_KNOWN_INTENTIONAL = 1000
+
 /** How many timestamped config backups are retained (older ones are removed). */
 export const MAX_TRIAGE_BACKUPS = 5
 
-/** Whole-file marker line (matches review.ts filterKnownIntentional semantics). */
-const WHOLE_FILE_LINE = 0
+/** Whole-file marker line — the shared constant from evidence.ts (also used by
+ *  review-scope/filterKnownIntentional), so every consumer agrees on `0`. */
 
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
 
@@ -96,16 +110,20 @@ export function entryKey(entry: KnownIntentional): string {
 /**
  * Merge incoming entries into the existing known-intentional list.
  * Existing entries are never mutated; incoming entries whose key already
- * exists are skipped. Returns the merged list plus add/skip counts.
+ * exists are skipped. The result is then bounded by
+ * {@link MAX_TOTAL_KNOWN_INTENTIONAL}: the list is append-ordered, so when a
+ * merge overflows, the entries at the FRONT (the oldest ones) are evicted and
+ * counted in `dropped` — the caller reports that number instead of silently
+ * losing verdicts.
  *
  * @param {KnownIntentional[]} existing
  * @param {KnownIntentional[]} incoming
- * @returns {{ merged: KnownIntentional[], added: number, skipped: number }}
+ * @returns {{ merged: KnownIntentional[], added: number, skipped: number, dropped: number }}
  */
 export function mergeKnownIntentional(
   existing: KnownIntentional[],
   incoming: KnownIntentional[],
-): { merged: KnownIntentional[]; added: number; skipped: number } {
+): { merged: KnownIntentional[]; added: number; skipped: number; dropped: number } {
   const seen = new Set<string>()
   const merged: KnownIntentional[] = []
   for (const entry of existing) {
@@ -127,7 +145,16 @@ export function mergeKnownIntentional(
     merged.push(entry)
     added++
   }
-  return { merged, added, skipped }
+  // Total bound: evict oldest-first. Incoming entries sit at the END of
+  // `merged`, so they survive — a session cannot evict its own fresh verdicts
+  // by overflowing the list, and one apply adds at most MAX_ENTRIES entries,
+  // which bounds how far a single merge can overshoot the cap.
+  let dropped = 0
+  if (merged.length > MAX_TOTAL_KNOWN_INTENTIONAL) {
+    dropped = merged.length - MAX_TOTAL_KNOWN_INTENTIONAL
+    merged.splice(0, dropped)
+  }
+  return { merged, added, skipped, dropped }
 }
 
 /**
@@ -169,10 +196,15 @@ export function readKnownIntentional(
   )
 }
 
-/** Build a filesystem-safe backup suffix from the current time. */
-export function backupSuffix(now = new Date()): string {
-  return now.toISOString().replace(/[:.]/g, '-')
-}
+/**
+ * Build a filesystem-safe backup suffix from the current time.
+ *
+ * Re-exported from config-write: BOTH writers back up `iterate.config.yaml`,
+ * and the shared implementation carries the same-millisecond collision guard
+ * (two backups created in the same ms used to produce the identical
+ * `config.bak-…` path, so the second silently overwrote the first).
+ */
+export const backupSuffix = configBackupSuffix
 
 /**
  * Bound the timestamped config backups: after a fresh one is written, delete
@@ -226,6 +258,8 @@ function applyEntries(
   ok: true
   added: number
   skipped: number
+  /** Entries evicted from the FRONT of the list because the total cap was hit. */
+  dropped: number
   count: number
   configPath: string
   backupPath: string | null
@@ -242,7 +276,7 @@ function applyEntries(
     return { ok: false, error: `Failed to read config: ${String(err)}` }
   }
   const existing = readKnownIntentional(config)
-  const { merged, added, skipped } = mergeKnownIntentional(existing, incoming)
+  const { merged, added, skipped, dropped } = mergeKnownIntentional(existing, incoming)
   const nextConfig = buildConfigWithKnownIntentional(config, merged)
 
   const hadFile = existsSync(configPath)
@@ -283,7 +317,7 @@ function applyEntries(
   // project never collects an unbounded pile of config snapshots.
   if (backupPath) pruneOldConfigBackups(configPath)
 
-  return { ok: true, added, skipped, count: merged.length, configPath, backupPath }
+  return { ok: true, added, skipped, dropped, count: merged.length, configPath, backupPath }
 }
 
 /**
@@ -304,6 +338,22 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
   ctx.tools.register(
     defineTool({
       name: 'iterate_triage',
+      // Pending-call card (#12): `apply` rewrites iterate.config.yaml (with
+      // backup + rollback) — it must read as a config write, not a read, and
+      // name how many entries it will merge. `list` is a plain read and keeps
+      // the default presentation. Pure: derived from args only.
+      presentCall: (args) => {
+        const a = args as { operation?: unknown; entries?: unknown }
+        if (a.operation !== 'apply') return undefined
+        const count = Array.isArray(a.entries) ? a.entries.length : 0
+        return {
+          card: 'generic',
+          title: count > 0
+            ? `Apply ${count} known_intentional ${count === 1 ? 'entry' : 'entries'} to iterate.config.yaml`
+            : 'Apply known_intentional entries to iterate.config.yaml',
+          kind: 'edit',
+        }
+      },
       // `list` is a pure config read; `apply` rewrites iterate.config.yaml →
       // only list joins a parallel dispatch group.
       isConcurrencySafe: (args) => (args as { operation?: unknown }).operation === 'list',
@@ -311,7 +361,8 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
         'Manage `personalization.known_intentional` entries in iterate.config.yaml. ' +
         'Use `apply` to write back triage verdicts (entries where the reviewer said "known intentional") so ' +
         'future review rounds filter them out. Entries are deduped by file|dimension|line and the config is ' +
-        'backed up before writing. Use `list` to read the current entries. ' +
+        'backed up before writing. The list is capped at 1000 entries — when a merge overflows it, the OLDEST ' +
+        'entries are evicted and the result reports `dropped`. Use `list` to read the current entries. ' +
         'The client browser cannot write files, so this tool is the write-back channel for the triage panel.',
       parameters: {
         operation: {
@@ -342,6 +393,8 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
             operation: { type: 'string', required: true },
             added: { type: 'integer' },
             skipped: { type: 'integer' },
+            /** Entries evicted from the FRONT of the list (total cap hit). */
+            dropped: { type: 'integer' },
             count: { type: 'integer' },
             path: { type: 'string' },
             backupPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
@@ -403,6 +456,10 @@ export function registerTriageTool(ctx: { tools: { register: (def: ReturnType<ty
             operation: 'apply',
             added: result.added,
             skipped: result.skipped,
+            // Surface the overflow count: a merge that hit the total cap
+            // evicted the OLDEST entries, and the caller must be able to see
+            // how many verdicts were dropped instead of silently losing them.
+            dropped: result.dropped,
             count: result.count,
             path: result.configPath,
             backupPath: result.backupPath ?? null,

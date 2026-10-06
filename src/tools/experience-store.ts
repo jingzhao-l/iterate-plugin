@@ -33,6 +33,41 @@ function stringArray(v: unknown): string[] {
 }
 
 /**
+ * Coerce a persisted hit counter to a safe non-negative integer. Hand-edited
+ * banks can carry fractional (4.5), negative (-1), non-finite (Infinity) or
+ * non-numeric ('x') values — the tool output schema declares these fields as
+ * `integer`, so any of them reaching the result would throw ToolOutputError
+ * at runtime. Floors first, then clamps at 0; anything non-finite → 0.
+ */
+function toHitCount(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0
+  return Math.max(0, Math.floor(v))
+}
+
+/**
+ * Longest caller-supplied experience id we will persist, and the characters
+ * it may contain. Ids surface verbatim in tool output and on disk, so a
+ * hostile "add" must not be able to store a 100 KB blob or control bytes
+ * (NUL/newline) under the id field. Printable characters only (no C0/C1
+ * controls); unicode text is fine.
+ */
+export const MAX_EXPERIENCE_ID_LENGTH = 200
+
+/**
+ * Whether a caller-supplied id may identify a NEW experience entry.
+ * Validated at the tool layer BEFORE the entry reaches `upsertExperience`
+ * (see src/tools/experience-bank.ts): non-empty, ≤ 200 chars, no control
+ * characters. Pure — exported for unit tests.
+ */
+export function isValidExperienceId(id: unknown): id is string {
+  if (typeof id !== 'string') return false
+  if (id.length === 0 || id.length > MAX_EXPERIENCE_ID_LENGTH) return false
+  // Control characters (NUL, newline, …) would corrupt the id wherever it is
+  // echoed (JSON output, file names in renderers) — reject them outright.
+  return !/[\u0000-\u001f\u007f]/.test(id)
+}
+
+/**
  * Normalize one persisted experience entry. A hand-edited bank entry can be
  * missing `files`/`tags` arrays (or `hitCount`) — consumers rendering/searching
  * entries (`render` `.join(', ')`, `searchExperienceEntries` spread) must never
@@ -49,7 +84,7 @@ function normalizeEntry(raw: unknown, index: number): ExperienceEntry | null {
   const derivedId = `exp-${hashString(`${index}|${pattern}|${dimension}`)}`
   const id = typeof e.id === 'string' && e.id ? e.id : derivedId
   if (!pattern && !dimension) return null
-  const hitCount = typeof e.hitCount === 'number' && Number.isFinite(e.hitCount) ? e.hitCount : 0
+  const hitCount = toHitCount(e.hitCount)
   return {
     id,
     timestamp: typeof e.timestamp === 'string' ? e.timestamp : new Date().toISOString(),
@@ -78,9 +113,16 @@ export function readExperienceBank(projectRoot: string): ExperienceBank {
         .filter((e): e is ExperienceEntry => e !== null)
       return {
         entries,
+        // Stream-level fallback timestamp: display-only metadata — the entry
+        // sweep ranks per-ENTRY `entry.timestamp`, never `lastUpdated`, so a
+        // missing/corrupt value degrading to "now" cannot reorder or rescue
+        // entries. (Reaffirmed from the earlier review: comment only, behavior
+        // unchanged.)
         lastUpdated: typeof parsed.lastUpdated === 'string' ? parsed.lastUpdated : emptyBank().lastUpdated,
-        totalHits:
-          typeof parsed.totalHits === 'number' && Number.isFinite(parsed.totalHits) ? parsed.totalHits : 0,
+        // Same contract as per-entry hitCount: a hand-edited totalHits must be
+        // a finite non-negative integer before it reaches the `integer` output
+        // schema (4.5 → 4, -1 → 0, Infinity/NaN/'x' → 0).
+        totalHits: toHitCount(parsed.totalHits),
       }
     }
   } catch {
@@ -214,8 +256,15 @@ export function upsertExperience(
   }
 
   // Add new entry. Spread the caller input FIRST so the store-generated
-  // `id`/`timestamp`/`hitCount`/`lastHitAt` always win — a hostile or
-  // malformed input can never forge its own identity or hit count.
+  // `timestamp`/`hitCount`/`lastHitAt` always win — a hostile or malformed
+  // input can never forge its hit metadata. A caller-supplied `id` IS honored
+  // here (it is the documented "update a specific entry via add"/custom-id
+  // contract), but only after the tool layer validated it with
+  // `isValidExperienceId` (non-empty, ≤ 200 chars, printable) — oversized or
+  // control-byte ids are rejected with a structured error before they reach
+  // this store (see src/tools/experience-bank.ts). Because an EXISTING id
+  // takes the update path above, a new entry can never collide with — or
+  // impersonate — an entry that is already in the bank.
   const id = entry.id || `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const newEntry: ExperienceEntry = {
     ...entry,

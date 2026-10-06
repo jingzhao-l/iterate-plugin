@@ -11,10 +11,19 @@
  * - `ctx.jobs` only exists when the dsh host loaded a job registry + a
  *   controller serves the calling owner (`@deepseek-ai/dsh-tool-jobs` or an
  *   equivalent). When it is missing, `start()` throws or is absent — we
- *   detect both and fall through to plain execution, so the Job Panel is a
- *   pure enhancement and never breaks a tool call.
+ *   detect both (including a throwing `start` GETTER) and fall through to
+ *   plain execution, so the Job Panel is a pure enhancement and never breaks
+ *   a tool call.
  * - The registry is memory-only and panel rows are read-only (no progress
  *   updates), so these jobs are completion records, not control channels.
+ * - Cancellation is honest, not theatrical. `JobHooks.cancel` is REQUIRED by
+ *   `@deepseek-ai/dsh-jobs` (the registry calls it on kill/teardown), but the
+ *   wrapped tool `fn` exposes no abort channel — a panel kill cannot stop it.
+ *   So `cancel` records the REQUEST (synchronous + idempotent, first reason
+ *   wins), best-effort surfaces it on the record's progress line, and lets the
+ *   job settle with `fn`'s TRUE outcome, with the request annotated in
+ *   `detail`. Settling the record `killed` while `fn()` keeps running would
+ *   show a stopped job that is still running — a lie in the Job Panel.
  */
 /**
  * Read `ctx.jobs` defensively: the dsh plugin context can be a Proxy whose
@@ -31,10 +40,24 @@ function safeJobs(ctx) {
     }
 }
 /**
+ * Read `jobs.start` defensively: the `start` GETTER itself can throw on a
+ * hostile/proxied registry, and that read must degrade the same way as a
+ * missing registry — never escape `runWithJob`.
+ */
+function safeStart(jobs) {
+    try {
+        return jobs?.start;
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
  * Run `fn` wrapped in a dsh background job, settling it completed/failed
- * with the execution's outcome. When the host exposes no job registry (or
- * refuses the start), `fn` runs untouched and `null` is returned — the Job
- * Panel is an enhancement, never a dependency.
+ * with the execution's ACTUAL outcome (a requested cancel never falsifies it
+ * — see the header). When the host exposes no job registry (or refuses the
+ * start), `fn` runs untouched and `null` is returned — the Job Panel is an
+ * enhancement, never a dependency.
  *
  * @param ctx      the dsh plugin context (may or may not expose `jobs`).
  * @param kind     iterate job kind registered via {@link IterateJobKind}.
@@ -44,21 +67,43 @@ function safeJobs(ctx) {
  */
 export async function runWithJob(ctx, kind, label, fn) {
     const jobs = safeJobs(ctx);
-    if (!jobs || typeof jobs.start !== 'function') {
+    const start = safeStart(jobs);
+    if (!jobs || !start || typeof start !== 'function') {
         return { result: await fn(), jobId: null };
     }
     let settle;
     const done = new Promise((resolve) => {
         settle = resolve;
     });
+    // Honest cancel bookkeeping: the request is recorded (first reason wins),
+    // but `done` is NOT settled here — `fn()` is still running and the panel
+    // must not claim otherwise. The settlement below carries `fn`'s real
+    // outcome, annotated with the request.
+    let cancelRequested = null;
+    const annotate = (detail) => cancelRequested === null
+        ? detail
+        : `${detail} (cancel requested: ${cancelRequested} — the wrapped tool call has no abort channel and ran to completion)`;
     let jobId = null;
     try {
-        jobId = jobs.start({
+        jobId = start.call(jobs, {
             kind,
             label,
-            run: () => ({
+            run: (job) => ({
                 done,
-                cancel: () => settle({ status: 'killed', detail: 'cancelled' }),
+                cancel: (reason) => {
+                    if (cancelRequested !== null)
+                        return; // idempotent — first reason wins
+                    cancelRequested = reason ?? 'cancel requested';
+                    // Best-effort panel hint while the record is stopping; the registry
+                    // drops writes it cannot apply, and a throwing update must not
+                    // propagate out of the registry's kill path.
+                    try {
+                        job?.updateProgress?.('cancel requested — waiting for the tool call to finish (no abort channel)');
+                    }
+                    catch {
+                        /* progress hint is cosmetic */
+                    }
+                },
             }),
         });
     }
@@ -69,13 +114,13 @@ export async function runWithJob(ctx, kind, label, fn) {
     }
     try {
         const result = await fn();
-        settle({ status: 'completed', detail: 'done' });
+        settle({ status: 'completed', detail: annotate('done') });
         return { result, jobId };
     }
     catch (error) {
         settle({
             status: 'failed',
-            detail: error instanceof Error ? error.message : 'execution failed',
+            detail: annotate(error instanceof Error ? error.message : 'execution failed'),
         });
         throw error;
     }

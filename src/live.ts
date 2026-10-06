@@ -18,6 +18,9 @@
  * Safety:
  *   - Read-only observer: never mutates source files; writes only the NDJSON
  *     live file under `.iterate/`.
+ *   - Privacy switch: when the project's effective config sets
+ *     `observatory.capture: false`, nothing is persisted (the file stays
+ *     absent/unchanged). An unreadable config keeps capture ON (defaults).
  *   - The live file is byte-capped (rewrite to last N lines when it grows too
  *     large) so it can never grow unbounded.
  *   - Any capture failure is swallowed (fire-and-forget) so it can never block
@@ -30,7 +33,7 @@ import { writeTextAtomicAsync } from './atomic-fs.ts'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { resolveProjectRoot } from './config-loader.ts'
+import { loadEffectiveConfig, resolveProjectRoot } from './config-loader.ts'
 
 /** Keep at most this many live activity entries. */
 export const LIVE_MAX_ENTRIES = 300
@@ -85,14 +88,40 @@ function enqueueLiveWrite(task: () => Promise<void>): Promise<void> {
   return next
 }
 
-/** Append one activity record to the project's live feed (byte-capped). */
+/**
+ * True when the project's effective config still allows live capture.
+ * `observatory.capture: false` opts the project out — nothing is persisted.
+ * Failure modes keep TODAY'S behavior: `loadEffectiveConfig` never throws on
+ * an unreadable config (it falls back to defaults, capture on), and any
+ * unexpected loader error here also degrades to capture ON rather than
+ * silently eating activity the operator expected to see.
+ */
+function captureEnabled(projectRoot: string): boolean {
+  try {
+    return loadEffectiveConfig(projectRoot).config.observatory?.capture !== false
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Append one activity record to the project's live feed (byte-capped).
+ * Never rejects: every failure (capture disabled, `.iterate` existing as a
+ * regular file, locked/unwritable feed) is swallowed — the header promises
+ * this path can never crash or block a tool call (`void appendLive(...)`
+ * would otherwise turn a rejection into an unhandled rejection).
+ */
 export function appendLive(projectRoot: string, entry: LiveActivityEntry): Promise<void> {
   return enqueueLiveWrite(async () => {
-    const file = liveFilePath(projectRoot)
-    const line = JSON.stringify(entry) + '\n'
-    await mkdir(join(projectRoot, '.iterate'), { recursive: true })
-    // Amortized O(1): only read+rewrite when the file has grown past the cap.
     try {
+      // Privacy: capture off → do not touch the feed at all.
+      if (!captureEnabled(projectRoot)) return
+      const file = liveFilePath(projectRoot)
+      const line = JSON.stringify(entry) + '\n'
+      // mkdir is INSIDE the guard: `.iterate` may be a regular file (or the
+      // dir unwritable) — it must reject neither the caller nor the queue.
+      await mkdir(join(projectRoot, '.iterate'), { recursive: true })
+      // Amortized O(1): only read+rewrite when the file has grown past the cap.
       const st = await stat(file).catch(() => null)
       if (st && st.size > LIVE_MAX_BYTES) {
         const raw = await readFile(file, 'utf-8')
@@ -201,10 +230,18 @@ export async function readLive(projectRoot: string): Promise<LiveActivityEntry[]
  */
 export function registerLiveCapture(ctx: Context): void {
   ctx.on('tools/result', (exec: ToolExecution) => {
-    const root = projectRootOf(exec)
-    if (!root) return
-    const entry = classifyTool(exec.name, exec.arguments, root)
-    if (!entry) return
-    void appendLive(root, entry)
+    // Defensive: a hostile/proxied exec whose getters throw (`agent`,
+    // `name`, `arguments`) must not abort the observer — unlike the guarded
+    // siblings below, an unguarded throw here would lose the record and
+    // surface an error from a read-only hook. Degrade to a no-op.
+    try {
+      const root = projectRootOf(exec)
+      if (!root) return
+      const entry = classifyTool(exec.name, exec.arguments, root)
+      if (!entry) return
+      void appendLive(root, entry)
+    } catch {
+      // An observer must never throw.
+    }
   })
 }

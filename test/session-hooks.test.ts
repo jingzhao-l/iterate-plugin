@@ -84,6 +84,135 @@ describe('gateDecision', () => {
     }
   })
 
+  it('gates iterate_config WRITES under the session policy while reads stay free', () => {
+    // M2: iterate.config.yaml carries the approval policy, the reviewer gates,
+    // and the command allow-list — a write must route through consent exactly
+    // like iterate_fix, but blocking READS would lock the model out of the
+    // workflow it is supposed to follow.
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    try {
+      const session = { session: { header: { cwd: dir } } }
+      const write = gateDecision(
+        exec({
+          name: 'iterate_config',
+          arguments: { operation: 'write', updates: { reviewer: { evidence_validation: false } } },
+          agent: session,
+        }),
+      )
+      assert.equal(write.kind, 'deny')
+      if (write.kind === 'deny') {
+        assert.match(String(write.reason), /iterate\.config\.yaml/)
+        // Fail-closed denials carry the structured info seam.
+        assert.equal(write.info?.code, 'APPROVAL_DENIED')
+      }
+
+      // A read (no operation / section read) is always allowed, even under deny.
+      for (const args of [{}, { section: 'dimensions' }, { operation: 'validate' }]) {
+        assert.deepEqual(
+          gateDecision(exec({ name: 'iterate_config', arguments: args, agent: session })),
+          { kind: 'allow' },
+          `read args=${JSON.stringify(args)}`,
+        )
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('iterate_config write ASKS under the default fail-safe policy', () => {
+    // No config at all → policy degrades to `ask` → the write must prompt.
+    const { dir, cleanup } = tempDir()
+    try {
+      const d = gateDecision(
+        exec({
+          name: 'iterate_config',
+          arguments: { operation: 'write', updates: { max_rounds: 5 } },
+          agent: { session: { header: { cwd: dir } } },
+        }),
+      )
+      assert.equal(d.kind, 'ask')
+      if (d.kind === 'ask') assert.match(String(d.reason), /max_rounds/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('session cwd policy WINS over a model-controlled path pointing at `allow`', () => {
+    // Regression: the gate used to read the policy from the path-resolved
+    // root first, so `path:` at an `approval: allow` directory let the model
+    // self-grant despite the human's `deny` in the session workspace.
+    const session = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    const elsewhere = tempDir({ 'iterate.config.yaml': configYaml('allow') })
+    try {
+      const d = gateDecision(
+        exec({
+          name: 'iterate_fix',
+          arguments: { path: elsewhere.dir },
+          agent: { session: { header: { cwd: session.dir } } },
+        }),
+      )
+      assert.equal(d.kind, 'deny')
+    } finally {
+      session.cleanup()
+      elsewhere.cleanup()
+    }
+  })
+
+  it('session cwd `deny` still applies when the path points at a dir with NO config', () => {
+    const session = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    const bare = tempDir()
+    try {
+      const d = gateDecision(
+        exec({
+          name: 'iterate_fix',
+          arguments: { path: bare.dir },
+          agent: { session: { header: { cwd: session.dir } } },
+        }),
+      )
+      assert.equal(d.kind, 'deny')
+    } finally {
+      session.cleanup()
+      bare.cleanup()
+    }
+  })
+
+  it('session cwd `allow` wins over a path pointing at `deny` (path ignored both ways)', () => {
+    const session = tempDir({ 'iterate.config.yaml': configYaml('allow') })
+    const elsewhere = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    try {
+      const d = gateDecision(
+        exec({
+          name: 'iterate_fix',
+          arguments: { path: elsewhere.dir },
+          agent: { session: { header: { cwd: session.dir } } },
+        }),
+      )
+      assert.equal(d.kind, 'allow')
+    } finally {
+      session.cleanup()
+      elsewhere.cleanup()
+    }
+  })
+
+  it('without a session cwd the path-resolved config is still honored (headless/tests)', () => {
+    // No session cwd → the path fallback is the only policy source there is;
+    // this is the pre-existing behavior the gate keeps for headless callers.
+    const withAllow = tempDir({ 'iterate.config.yaml': configYaml('allow') })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_fix', arguments: { path: withAllow.dir } }))
+      assert.equal(d.kind, 'allow')
+    } finally {
+      withAllow.cleanup()
+    }
+    const withDeny = tempDir({ 'iterate.config.yaml': configYaml('deny') })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_fix', arguments: { path: withDeny.dir } }))
+      assert.equal(d.kind, 'deny')
+    } finally {
+      withDeny.cleanup()
+    }
+  })
+
   it('falls back to ask on an invalid config via session cwd without throwing', () => {
     const { dir, cleanup } = tempDir({ 'iterate.config.yaml': ': not: yaml {' })
     try {
@@ -191,6 +320,68 @@ describe('gateDecision', () => {
   })
 })
 
+describe('language rule (#9)', () => {
+  const bilingualConfig = `language: zh\nobservatory:\n  approval: ask\n`
+  const enOnlyConfig = `language: en\nobservatory:\n  approval: ask\n`
+
+  it('ask carries reason (English) + displayReason localized to config.language', () => {
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': bilingualConfig })
+    try {
+      const d = gateDecision(
+        exec({
+          name: 'iterate_config',
+          arguments: { path: dir, operation: 'write', updates: { reviewer: { evidence_validation: false } } },
+          agent: { session: { header: { cwd: dir } } },
+        }),
+      )
+      assert.equal(d.kind, 'ask')
+      if (d.kind === 'ask') {
+        // Audited summary: English, machine-readable, no CJK.
+        assert.match(String(d.reason), /^Update `iterate\.config\.yaml`/)
+        assert.match(String(d.reason), /WARNING/)
+        assert.doesNotMatch(String(d.reason), /[一-鿿]/)
+        // Human prompt: follows the configured language; en stays available.
+        assert.equal(typeof d.displayReason?.en, 'string')
+        assert.match(d.displayReason?.zh ?? '', /将关闭/)
+        assert.match(d.displayReason?.zh ?? '', /WARNING/)
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('deny reason and deny.info.reason stay English under a zh config', () => {
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': `language: zh\nobservatory:\n  approval: deny\n` })
+    try {
+      const d = gateDecision(exec({ name: 'iterate_fix', arguments: { path: dir, file: 'src/a.ts' } }))
+      assert.equal(d.kind, 'deny')
+      if (d.kind === 'deny') {
+        assert.equal(d.reason, 'Apply an atomic fix to `src/a.ts`')
+        assert.doesNotMatch(d.reason, /[一-鿿]/)
+        assert.equal(d.info?.reason, d.reason)
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('an ask under an en config carries displayReason.en only', () => {
+    const { dir, cleanup } = tempDir({ 'iterate.config.yaml': enOnlyConfig })
+    try {
+      const d = gateDecision(
+        exec({ name: 'iterate_fix', arguments: { path: dir, file: 'src/a.ts' } }),
+      )
+      assert.equal(d.kind, 'ask')
+      if (d.kind === 'ask') {
+        assert.equal(d.displayReason?.en, d.reason)
+        assert.equal(d.displayReason?.zh, undefined)
+      }
+    } finally {
+      cleanup()
+    }
+  })
+})
+
 describe('registerSessionHooks', () => {
   interface CapturedListener {
     ctx: Context
@@ -281,5 +472,26 @@ describe('registerSessionHooks', () => {
     )
     assert.equal(nextCalled, true)
     assert.deepEqual(decision, { kind: 'allow' })
+  })
+
+  it('the fail-safe degraded ask still exposes displayReason.en (#9)', async () => {
+    // The listener's catch path must produce a complete ask decision — dsh
+    // 0.2.x renders `displayReason`, so an ask without it would show no prompt
+    // text at all. Reaching the catch: `gateDecision` reads `exec.signal`
+    // inside a try but dereferences `.aborted` OUTSIDE it, so a signal whose
+    // `aborted` getter throws escapes to the listener's fail-safe branch.
+    const { handler } = capture()
+    const hostile = exec({
+      name: 'iterate_fix',
+      arguments: {},
+      signal: { get aborted(): boolean { throw new Error('boom') } } as unknown as AbortSignal,
+    })
+    const decision = await handler!(hostile, () => Promise.resolve({ kind: 'allow' }))
+    assert.equal(decision.kind, 'ask')
+    if (decision.kind === 'ask') {
+      assert.match(String(decision.reason), /require consent/)
+      assert.equal(decision.displayReason?.en, decision.reason)
+      assert.equal(decision.displayReason?.zh, undefined)
+    }
   })
 })

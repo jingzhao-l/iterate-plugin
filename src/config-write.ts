@@ -14,29 +14,68 @@ import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'nod
 import { basename, dirname, join } from 'node:path'
 import yaml from 'js-yaml'
 import { writeTextAtomic } from './atomic-fs.ts'
+import {
+  MAX_ATOMIC_MAX_LINES,
+  MAX_MAX_ADJACENT_METHODS,
+  MAX_MAX_ROUNDS,
+  MAX_SCOPE_CHUNK_SIZE,
+  SUPPORTED_CONFIG_KEYS,
+} from './config-loader.ts'
+
+export {
+  MAX_ATOMIC_MAX_LINES,
+  MAX_MAX_ADJACENT_METHODS,
+  MAX_MAX_ROUNDS,
+  MAX_SCOPE_CHUNK_SIZE,
+}
 
 /** Config file name (must match config-loader). */
 export const CONFIG_FILE = 'iterate.config.yaml'
 
-/** Backup suffix helper (filesystem-safe timestamp). */
+/**
+ * Monotonic collision guard for {@link configBackupSuffix}: two writes in the
+ * SAME millisecond used to build the identical `config.bak-<iso>` path, so the
+ * second backup overwrote the first and one snapshot was silently lost.
+ * Only ever moves forward (a clock stepping backwards also counts as a
+ * collision), so every suffix issued by this process is unique.
+ */
+let lastSuffixMs = -1
+let suffixSequence = 0
+
+/**
+ * Backup suffix helper (filesystem-safe timestamp + monotonic disambiguator).
+ * The ISO timestamp is kept verbatim when the millisecond is fresh (existing
+ * `config.bak-…` names sort chronologically); repeats within the same
+ * millisecond get `-1`, `-2`, … appended so the backup path never collides.
+ */
 export function configBackupSuffix(now = new Date()): string {
-  return now.toISOString().replace(/[:.]/g, '-')
+  const ms = now.getTime()
+  if (ms > lastSuffixMs) {
+    lastSuffixMs = ms
+    suffixSequence = 0
+  } else {
+    suffixSequence += 1
+  }
+  const base = now.toISOString().replace(/[:.]/g, '-')
+  return suffixSequence === 0 ? base : `${base}-${suffixSequence}`
 }
-
-/** Upper bound on configurable iteration rounds (config bomb guard). */
-export const MAX_MAX_ROUNDS = 100
-
-/** Upper bound on `atomic.max_lines` (a single fix never needs more). */
-export const MAX_ATOMIC_MAX_LINES = 10_000
-
-/** Upper bound on `atomic.max_adjacent_methods`. */
-export const MAX_MAX_ADJACENT_METHODS = 200
-
-/** Upper bound on `reviewer.scope_chunk_size` (files per reviewer task batch). */
-export const MAX_SCOPE_CHUNK_SIZE = 1000
 
 /** Keep at most this many timestamped config backups (older ones are removed). */
 export const MAX_CONFIG_BACKUPS = 5
+
+/**
+ * Top-level keys `iterate_config` accepts in `updates`.
+ *
+ * The write path MERGES updates into the file, so an unrecognized key used to
+ * be persisted verbatim: a typo (`maxRounds`) or a hallucinated field
+ * (`task_modes`) silently became part of the project's config, survived every
+ * later read, and was never consumed by anything. Rejecting unknown keys turns
+ * that silent no-op into a structured error the model can correct.
+ *
+ * Defined once in config-loader (shared with `validateConfig`) and re-exported
+ * here under its write-path name.
+ */
+export const SUPPORTED_UPDATE_KEYS = SUPPORTED_CONFIG_KEYS
 
 /**
  * Bound the timestamped config backups: after a fresh one is written, delete
@@ -76,6 +115,16 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
     return ['updates must be a JSON object']
   }
 
+  // Unknown top-level keys are refused rather than merged into the file
+  // (see SUPPORTED_UPDATE_KEYS for why a typo used to persist forever).
+  for (const key of Object.keys(updates)) {
+    if (!(SUPPORTED_UPDATE_KEYS as readonly string[]).includes(key)) {
+      errors.push(
+        `updates.${key} is not a supported config key (supported: ${SUPPORTED_UPDATE_KEYS.join(', ')})`,
+      )
+    }
+  }
+
   if ('goal' in updates && typeof updates.goal !== 'string') {
     errors.push('updates.goal must be a string')
   }
@@ -83,8 +132,14 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
     errors.push('updates.language must be "zh" or "en"')
   }
   if ('dimensions' in updates) {
-    if (!Array.isArray(updates.dimensions) || updates.dimensions.some((d) => typeof d !== 'string' || d.trim().length === 0)) {
-      errors.push('updates.dimensions must be an array of non-empty strings')
+    // `.some` on an EMPTY array is false, so `dimensions: []` used to validate
+    // clean and then replace the whole dimension list with "review nothing".
+    if (
+      !Array.isArray(updates.dimensions) ||
+      updates.dimensions.length === 0 ||
+      updates.dimensions.some((d) => typeof d !== 'string' || d.trim().length === 0)
+    ) {
+      errors.push('updates.dimensions must be a non-empty array of non-empty strings')
     }
   }
   if ('max_rounds' in updates) {
@@ -107,7 +162,7 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
   }
   if ('reviewer' in updates) {
     const rv = updates.reviewer as Record<string, unknown> | undefined
-    if (!rv || typeof rv !== 'object') {
+    if (!rv || typeof rv !== 'object' || Array.isArray(rv)) {
       errors.push('updates.reviewer must be an object')
     } else {
       for (const boolKey of ['output_schema_validation', 'evidence_validation', 'coverage_validation'] as const) {
@@ -126,7 +181,7 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
   }
   if ('review' in updates) {
     const r = updates.review as Record<string, unknown> | undefined
-    if (!r || typeof r !== 'object') {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) {
       errors.push('updates.review must be an object')
     } else if (r.scope !== undefined && r.scope !== 'full' && r.scope !== 'changed-only') {
       errors.push('updates.review.scope must be "full" or "changed-only"')
@@ -134,7 +189,7 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
   }
   if ('atomic' in updates) {
     const a = updates.atomic as Record<string, unknown> | undefined
-    if (!a || typeof a !== 'object') {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) {
       errors.push('updates.atomic must be an object')
     } else {
       if (a.max_lines !== undefined && (typeof a.max_lines !== 'number' || !Number.isInteger(a.max_lines) || a.max_lines < 1 || a.max_lines > MAX_ATOMIC_MAX_LINES)) {
@@ -147,7 +202,7 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
   }
   if ('git' in updates) {
     const g = updates.git as Record<string, unknown> | undefined
-    if (!g || typeof g !== 'object') {
+    if (!g || typeof g !== 'object' || Array.isArray(g)) {
       errors.push('updates.git must be an object')
     } else {
       if (g.target_branch !== undefined && typeof g.target_branch !== 'string') {
@@ -162,15 +217,36 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
   }
   if ('validation' in updates) {
     const v = updates.validation as Record<string, unknown> | undefined
-    if (!v || typeof v !== 'object') {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
       errors.push('updates.validation must be an object')
-    } else if ('commands' in v && v.commands !== undefined && typeof v.commands !== 'object') {
-      errors.push('updates.validation.commands must be an object of command arrays')
+    } else {
+      if ('command_whitelist' in v && v.command_whitelist !== undefined) {
+        if (!Array.isArray(v.command_whitelist) || !v.command_whitelist.every((x) => typeof x === 'string')) {
+          errors.push('updates.validation.command_whitelist must be an array of strings')
+        }
+      }
+      // `typeof [] === 'object'` let `commands: ["npm t"]` validate clean, and
+      // `flattenCommands` drops every non-object entry — the allow-list would
+      // read as configured while matching NOTHING. Require the real shape:
+      // a mapping of module → string[] (string keys, string-array values).
+      if ('commands' in v && v.commands !== undefined) {
+        const c = v.commands
+        const shapeOk =
+          typeof c === 'object' &&
+          c !== null &&
+          !Array.isArray(c) &&
+          Object.entries(c as Record<string, unknown>).every(
+            ([, value]) => Array.isArray(value) && value.every((x) => typeof x === 'string'),
+          )
+        if (!shapeOk) {
+          errors.push('updates.validation.commands must be a mapping of module → string[] (not an array)')
+        }
+      }
     }
   }
   if ('observatory' in updates) {
     const o = updates.observatory as Record<string, unknown> | undefined
-    if (!o || typeof o !== 'object') {
+    if (!o || typeof o !== 'object' || Array.isArray(o)) {
       errors.push('updates.observatory must be an object')
     } else {
       if (o.capture !== undefined && typeof o.capture !== 'boolean') {
@@ -190,10 +266,16 @@ export function validateConfigUpdates(updates: Record<string, unknown>): string[
       }
     }
   }
-  if ('personalization' in updates && (!updates.personalization || typeof updates.personalization !== 'object')) {
+  if (
+    'personalization' in updates &&
+    (!updates.personalization || typeof updates.personalization !== 'object' || Array.isArray(updates.personalization))
+  ) {
     errors.push('updates.personalization must be an object')
   }
-  if ('onboarding' in updates && (!updates.onboarding || typeof updates.onboarding !== 'object')) {
+  if (
+    'onboarding' in updates &&
+    (!updates.onboarding || typeof updates.onboarding !== 'object' || Array.isArray(updates.onboarding))
+  ) {
     errors.push('updates.onboarding must be an object')
   }
   return errors

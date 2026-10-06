@@ -23,6 +23,13 @@
 
 import { readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
+// Single source of truth for the whole-file line sentinel: evidence.ts's gate
+// and this module's inventory filters must agree on what `0` means. Evidence
+// imports neither this module nor review.ts, so the edge is acyclic (review.ts
+// → review-scope.ts → evidence.ts → types.ts).
+import { WHOLE_FILE_LINE } from './evidence.ts'
+
+export { WHOLE_FILE_LINE }
 
 export interface CoverageResult {
   assigned: string[]
@@ -31,9 +38,6 @@ export interface CoverageResult {
   uncovered: string[]
   ratio: number
 }
-
-/** Relative-scope sentinel for whole-module findings. */
-export const WHOLE_FILE_LINE = 0
 
 /** Source extensions a full-scope walk includes. */
 const SOURCE_EXTENSIONS = new Set([
@@ -100,13 +104,18 @@ export function collectScopeFiles(
   root: string,
   opts: { scope: 'full' | 'changed-only'; changedFiles?: string[] },
 ): string[] {
+  // `opts` / `scope` come from tool args: a missing or malformed options
+  // object must degrade to a full walk, never throw inside the inventory step.
+  if (!opts || typeof opts !== 'object') return collectFull(root)
   if (opts.scope === 'changed-only') return collectChanged(opts.changedFiles ?? [])
   return collectFull(root)
 }
 
 function collectChanged(changedFiles: string[]): string[] {
+  // A non-array `changedFiles` (JSON arg) must not be iterated char-by-char.
+  const list = Array.isArray(changedFiles) ? changedFiles : []
   const out = new Set<string>()
-  for (const rel of changedFiles) {
+  for (const rel of list) {
     if (typeof rel !== 'string' || !rel.trim()) continue
     if (rel === String(WHOLE_FILE_LINE)) continue
     const cleaned = normalizePath(rel)
@@ -156,9 +165,18 @@ function collectFull(root: string): string[] {
 /** Split `files` into stable batches, keeping directory runs together. */
 export function chunkFiles(files: string[], perChunk?: number): string[][] {
   // Number.isFinite: NaN fails `perChunk < 1` and would yield one unbounded
-  // chunk (current.length >= NaN is never true).
-  const size = Number.isFinite(perChunk) && (perChunk as number) >= 1 ? (perChunk as number) : DEFAULT_SCOPE_CHUNK_SIZE
-  const ordered = [...files].sort()
+  // chunk (current.length >= NaN is never true). Math.floor: a fractional
+  // size (2.5) made chunks alternate between 2 and 3 members — the caller's
+  // "files per batch" is a count, so it must be an integer.
+  const size =
+    Number.isFinite(perChunk) && (perChunk as number) >= 1
+      ? Math.floor(perChunk as number)
+      : DEFAULT_SCOPE_CHUNK_SIZE
+  // A non-array / sparse-free copy: callers pass tool-arg JSON, and sort()
+  // on a non-array (or `rel.includes` on a number) would throw.
+  const ordered = (Array.isArray(files) ? files : [])
+    .filter((rel): rel is string => typeof rel === 'string')
+    .sort()
   const chunks: string[][] = []
   let current: string[] = []
   let lastDir: string | undefined
@@ -186,11 +204,16 @@ export function computeCoverage(
   assigned: string[],
   readFiles?: string[] | null,
 ): CoverageResult {
+  // Both lists are JSON-arg-derived: `for...of` over a bare number throws and
+  // over a bare string iterates single characters into the read set. Anything
+  // non-array behaves like "nothing" (empty inventory / nothing read).
+  const assignedList = Array.isArray(assigned) ? assigned : []
+  const readList = Array.isArray(readFiles) ? readFiles : []
   const readNorm = new Set<string>()
-  for (const p of readFiles ?? []) {
+  for (const p of readList) {
     if (typeof p === 'string' && p) readNorm.add(normalizePath(p))
   }
-  const assignedSorted = [...assigned].sort()
+  const assignedSorted = [...assignedList].filter((rel): rel is string => typeof rel === 'string').sort()
   const covered = assignedSorted.filter((rel) => readNorm.has(normalizePath(rel)))
   const uncovered = assignedSorted.filter((rel) => !readNorm.has(normalizePath(rel)))
   const rawRatio =
@@ -198,7 +221,7 @@ export function computeCoverage(
   const ratio = Math.round(rawRatio * 1000) / 1000
   return {
     assigned: assignedSorted,
-    read: [...new Set((readFiles ?? []).filter((p): p is string => typeof p === 'string'))].sort(),
+    read: [...new Set(readList.filter((p): p is string => typeof p === 'string'))].sort(),
     covered,
     uncovered,
     ratio,

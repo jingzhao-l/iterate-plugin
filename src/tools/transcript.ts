@@ -9,10 +9,12 @@
  *                  "not found" empty view). Used each round by the workflow to
  *                  pick up steering nudges, and polled by tool-reading agents.
  *   - `capture`  — build a fresh transcript from the review `rounds` + `report`
- *                  and persist it. Called by the canonical scripts after the
- *                  final aggregate so the client always sees the latest run.
- *   - `nudge`    — set (`text`) or clear (`text: null`) steering text persisted
- *                  for the next round's reviewers to read.
+ *                  (plus the decision-log timeline) and persist it. Called by
+ *                  the canonical scripts after the final aggregate so the
+ *                  client always sees the latest run. Skipped entirely when
+ *                  `observatory.capture: false` is configured.
+ *   - `nudge`    — set (`text`) or clear (`text: null` / empty string) steering
+ *                  text persisted for the next round's reviewers to read.
  *
  * All writes are persisted to `.iterate/transcript.json` via an atomic
  * tmp+rename so a crashed writer never leaves a corrupt manifest.
@@ -29,7 +31,8 @@ import {
   resolveProjectRootForExec,
 } from '../config-loader.ts'
 import { transcriptPath } from '../paths.ts'
-import { ReviewTranscriptBuilder } from '../transcript.ts'
+import { ReviewTranscriptBuilder, MAX_TIMELINE, MAX_ROUNDS, normalizeManifestBounds } from '../transcript.ts'
+import { readDecisionLogDetailed } from './decision-log.ts'
 import { readLive } from '../live.ts'
 import type {
   TranscriptManifest,
@@ -106,6 +109,47 @@ function normalizeFix(input: unknown): TranscriptFix | null {
   }
 }
 
+/**
+ * Structural gate for a parsed `.iterate/transcript.json` payload.
+ *
+ * `JSON.parse` accepts `null`, `[]`, `{}` … — parseable values that are NOT
+ * manifests; the read path used to return them as `found: true`. Only a
+ * payload carrying the builder's field layout is accepted here (the ROOT
+ * gate); row-level bounds and values are then re-normalized on the way out by
+ * {@link normalizeManifestBounds}, so an older but still renderable manifest
+ * is shown instead of blanked — and a hostile one is bounded instead of
+ * passed through.
+ *
+ * Deliberately does NOT rehydrate through the builder for normalization:
+ * `rehydrateBuilder(...).serialize()` drops fields the builder cannot rebuild
+ * (notably `phases`), so a plain read would silently rewrite history.
+ */
+function isManifestShaped(value: unknown): value is TranscriptManifest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const m = value as Record<string, unknown>
+  if (typeof m.version !== 'number' || typeof m.project !== 'string' || typeof m.active !== 'boolean') {
+    return false
+  }
+  if (
+    !Array.isArray(m.rounds) ||
+    !Array.isArray(m.convergence) ||
+    !Array.isArray(m.findings) ||
+    !Array.isArray(m.fixes) ||
+    !Array.isArray(m.timeline)
+  ) {
+    return false
+  }
+  // Rows must be objects (round rows with a numeric index): a manifest whose
+  // rows are `null`/`"x"` is structurally broken, not merely old.
+  return (
+    m.rounds.every((r) => !!r && typeof r === 'object' && typeof (r as { round?: unknown }).round === 'number') &&
+    m.convergence.every((n) => typeof n === 'number') &&
+    m.findings.every((f) => !!f && typeof f === 'object') &&
+    m.fixes.every((f) => !!f && typeof f === 'object') &&
+    m.timeline.every((e) => !!e && typeof e === 'object')
+  )
+}
+
 /** Register the `iterate_transcript` tool. */
 export function registerTranscriptTool(ctx: {
   tools: { register: (def: ReturnType<typeof defineTool>) => void }
@@ -120,10 +164,13 @@ export function registerTranscriptTool(ctx: {
         'Runtime-observatory transcript for the iterate workflow. ' +
         '`read` returns the current persisted transcript manifest (per-reviewer threads, ' +
         'convergence series, findings, fixes, checkpoint, timeline, and any steering nudge ' +
-        'written for the next round). ' +
-        '`capture` builds a fresh transcript from the review `rounds` + `report` and persists it ' +
-        '(call once after the final aggregate so the UI reflects the run). ' +
-        '`nudge` sets (text) or clears (text:null) steering text the next round\'s reviewers read. ' +
+        'written for the next round) — or, when the file is missing/malformed, a structured ' +
+        'empty view (`found:false` plus a blank manifest). ' +
+        '`capture` builds a fresh transcript from the review `rounds` + `report`, folds in the ' +
+        'decision-log timeline, and persists it (call once after the final aggregate so the UI ' +
+        'reflects the run; skipped when `observatory.capture` is disabled). Round validation outcomes ' +
+        'can be carried on capture via `validations` ({round, command, exitCode, allowed, rejectReason?}). ' +
+        '`nudge` sets (text) or clears (text:null or an empty string) steering text the next round\'s reviewers read. ' +
         'Purely local and deterministic — never touches source files.',
       parameters: {
         operation: {
@@ -159,9 +206,27 @@ export function registerTranscriptTool(ctx: {
           type: 'json',
           description: 'For `capture`: array of applied fixes [{id, file, round, summary, linesAdded, linesRemoved, success}].',
         },
+        validations: {
+          type: 'json',
+          description:
+            'For `capture`: per-round validation outcomes [{round, command, exitCode:number|null, allowed:boolean, rejectReason?}] — ' +
+            'the exact commands run by iterate_validate with their exit codes. Malformed rows are dropped, ' +
+            'out-of-range rounds clamped, and the list capped (newest kept). Pass every round\'s validate results so ' +
+            'the run console can show which commands ran and whether they passed.',
+        },
         refReadFiles: { type: 'json', description: 'For `capture`: flat array of all read files across rounds (optional).' },
         stoppedReason: { type: 'string', description: 'For `capture`: why the run ended — "converged" | "max_rounds_reached" | "aborted_by_validation" | "aborted_by_config" | "schema_invalid" | "no_usable_reviewer_output" | "inconclusive". When omitted, derived from the convergence trend (trailing 0 = converged, otherwise = max_rounds_reached once a round ran).' },
-        text: { type: 'string', description: 'For `nudge`: steering text to set (or null to clear).' },
+        // `string | null` (NOT plain `type: 'string'`): dsh validates arguments
+        // against the compiled schema BEFORE execute, and the docs — plus the
+        // client's clear button — advertise `{"operation":"nudge","text":null}`.
+        // Under `type: 'string'` that call always failed validation, so the
+        // advertised clear flow could never run. Probed against the installed
+        // dsh-tools validator: `oneOf[string,null]` accepts null + string and
+        // still rejects numbers (`type:'json'` would have accepted those too).
+        text: {
+          oneOf: [{ type: 'string' }, { type: 'null' }],
+          description: 'For `nudge`: steering text to set. `null` (or an empty/whitespace-only string) clears the stored nudge.',
+        },
         path: { type: 'string', description: 'Project root directory (default: current working directory).' },
       },
 
@@ -175,6 +240,11 @@ export function registerTranscriptTool(ctx: {
             transcript: { type: 'json' },
             live: { type: 'json', description: 'Recent live reviewer-activity entries (newest first).' },
             updated: { type: 'boolean' },
+            skipped: {
+              type: 'boolean',
+              description: 'For `capture`: true when nothing was persisted because `observatory.capture` is disabled.',
+            },
+            reason: { type: 'string', description: 'For a skipped `capture`: why persistence was skipped.' },
             error: { type: 'string' },
           },
         },
@@ -191,32 +261,52 @@ export function registerTranscriptTool(ctx: {
 
         if (args.operation === 'read') {
           const live = await readLive(projectRoot)
-          if (!existsSync(file)) {
-            return {
-              operation: 'read',
-              found: false,
-              live: live as unknown as JsonValue,
-              transcript: new ReviewTranscriptBuilder({
-                project: projectRoot,
-                approval,
-              }).serialize() as unknown as JsonValue,
-            }
-          }
+          // Every "no usable manifest" outcome (missing file, unparseable JSON,
+          // parseable-but-wrong-shape JSON) returns the SAME structured
+          // not-found view: `found:false` plus an empty manifest. The client's
+          // F1–F7 tabs read `transcript.<field>` unconditionally, so the old
+          // bare `{found:false, error}` parse-error branch blanked the panel.
+          const emptyView = (): {
+            operation: 'read'
+            found: false
+            live: JsonValue
+            transcript: JsonValue
+          } => ({
+            operation: 'read',
+            found: false,
+            live: live as unknown as JsonValue,
+            transcript: new ReviewTranscriptBuilder({
+              project: projectRoot,
+              approval,
+            }).serialize() as unknown as JsonValue,
+          })
+          if (!existsSync(file)) return emptyView()
+          let parsed: unknown
           try {
-            const raw = await readFile(file, 'utf-8')
-            const parsed = JSON.parse(raw) as unknown as TranscriptManifest
-            return {
-              operation: 'read',
-              found: true,
-              live: live as unknown as JsonValue,
-              transcript: parsed as unknown as JsonValue,
-            }
+            parsed = JSON.parse(await readFile(file, 'utf-8'))
           } catch (err) {
             return {
-              operation: 'read',
-              found: false,
+              ...emptyView(),
               error: `Failed to read transcript: ${err instanceof Error ? err.message : String(err)}`,
             }
+          }
+          if (!isManifestShaped(parsed)) {
+            // `JSON.parse` happily accepts `null`, `[]` and `{}` — values that
+            // are parseable but carry no manifest. Surfacing them as
+            // `found:true` made the observatory render junk panels.
+            return {
+              ...emptyView(),
+              error: 'Transcript file is not a valid manifest; returning an empty view.',
+            }
+          }
+          return {
+            operation: 'read',
+            found: true,
+            live: live as unknown as JsonValue,
+            // Defensive normalization (bounded rows + sanitized field values)
+            // so a hand-edited/hostile manifest is never handed to the client
+            // raw — same normalizers/caps the builder applies at capture time.
+            transcript: normalizeManifestBounds(parsed) as unknown as JsonValue,
           }
         }
 
@@ -267,6 +357,18 @@ export function registerTranscriptTool(ctx: {
         }
 
         // capture
+        // `observatory.capture: false` opts the project out of transcript
+        // persistence entirely. Only an EXPLICIT false skips: an unreadable or
+        // missing config falls back to the defaults (capture on), so a broken
+        // config can never silently blind the observatory.
+        if (config.observatory?.capture === false) {
+          return {
+            operation: 'capture',
+            updated: false,
+            skipped: true,
+            reason: 'observatory.capture is disabled',
+          }
+        }
         const mode = args.mode === 'normal' ? 'normal' : 'dry-run'
         const taskMode = args.taskMode === 'code' || args.taskMode === 'iterate' ? args.taskMode : undefined
         const goal = typeof args.goal === 'string' ? args.goal : ''
@@ -301,14 +403,43 @@ export function registerTranscriptTool(ctx: {
           for (const [dim, list] of byDim) builder.reviewerSnapshot(dim, list, readFiles)
         }
 
-        // Convergence series from the report (position per round).
-        for (let i = 0; i < convergence.length; i += 1) {
+        // Convergence series from the report (position per round). The rehydrate
+        // path already refuses negative/non-finite counts; capture must not be
+        // the asymmetric back door that persists a hostile `-3` into the F2
+        // trend (a non-number entry was already skipped; `Number.isFinite`
+        // additionally rejects NaN, which `typeof NaN === 'number'` admits).
+        // Truncate at MAX_ROUNDS on the FEED side: `snapshotConvergence` clamps
+        // an over-cap round to the last slot, so feeding 1000+ entries would
+        // silently FOLD every extra round into slot 1000 (one value winning).
+        for (let i = 0; i < Math.min(convergence.length, MAX_ROUNDS); i += 1) {
           const n = convergence[i]
-          if (typeof n === 'number') builder.snapshotConvergence(i + 1, n)
+          if (typeof n === 'number' && Number.isFinite(n) && n >= 0) builder.snapshotConvergence(i + 1, n)
         }
         const roundsExecuted =
           typeof args.roundsExecuted === 'number' ? Math.floor(args.roundsExecuted) : rounds.length
-        if (roundsExecuted > 0) builder.roundStart(roundsExecuted, maxRounds)
+        // Advance the round MARKER only — never `roundStart`, which would
+        // pre-create phantom EMPTY round rows for rounds we captured no data
+        // for (a resumed run reports `roundsExecuted` above the rounds with
+        // captured findings). advanceRound also refuses to rewind below the
+        // last captured round.
+        if (roundsExecuted > 0) builder.advanceRound(roundsExecuted, maxRounds)
+
+        // F7 timeline: the decision log is the source of truth for what the run
+        // decided, and the tool docs promise a captured `timeline`. Without
+        // folding it in, `manifest.timeline` was ALWAYS empty on capture (the
+        // builder's decision() ran only during nudge rehydration), so the
+        // client's F7 tab rendered nothing even for a run with a full audit
+        // trail. Feed only the builder's cap worth — the builder evicts oldest
+        // first anyway, and slicing first saves a clone per dropped entry.
+        // Fail-safe: an unreadable/corrupt log must never break the capture —
+        // the transcript is a UI projection, the log stays the primary record.
+        try {
+          const { entries } = readDecisionLogDetailed(projectRoot)
+          for (const e of entries.slice(-MAX_TIMELINE)) builder.decision(e)
+        } catch {
+          // readDecisionLogDetailed already skips corrupt lines; this catch
+          // covers an unexpected reader failure (unreadable dir, EACCES …).
+        }
 
         builder.recordCheckpoint(normalizeCheckpoint(args.checkpoint))
         if (Array.isArray(args.fixes)) {
@@ -316,6 +447,14 @@ export function registerTranscriptTool(ctx: {
             const record = normalizeFix(fx)
             if (record) builder.fix(record)
           }
+        }
+        // Validation outcomes (contract with the client run console):
+        // [{round, command, exitCode, allowed, rejectReason?}]. The builder
+        // normalizes every row defensively (bad rows dropped, rounds clamped,
+        // capped newest-wins), so a hostile/malformed payload can neither
+        // crash the capture nor persist junk.
+        if (Array.isArray(args.validations)) {
+          for (const v of args.validations) builder.validation(v)
         }
         // End state: an explicit stoppedReason wins; otherwise derive it from
         // the trend. A run that settled closes as "converged"; a run that did
@@ -377,12 +516,15 @@ function rehydrateBuilder(manifest: TranscriptManifest, approval: 'ask' | 'deny'
       })
     }
   }
-  for (let idx = 0; idx < (manifest.convergence ?? []).length; idx += 1) {
+  for (let idx = 0; idx < Math.min((manifest.convergence ?? []).length, MAX_ROUNDS); idx += 1) {
     const n = manifest.convergence[idx]
     if (typeof n === 'number' && n >= 0) builder.snapshotConvergence(idx + 1, n)
   }
   if (manifest.checkpoint) builder.recordCheckpoint(manifest.checkpoint)
   if (Array.isArray(manifest.fixes)) for (const fx of manifest.fixes) builder.fix(fx as TranscriptFix)
+  // Validation rows survive a nudge-edit re-persist (same defensive
+  // normalization as capture — a hand-edited manifest is re-clamped here).
+  if (Array.isArray(manifest.validations)) for (const v of manifest.validations) builder.validation(v)
   if (Array.isArray(manifest.timeline)) for (const e of manifest.timeline) builder.decision(e)
   builder.setNudge(manifest.nudge?.text ?? null)
   if (!manifest.active) builder.finish(manifest.stoppedReason ?? undefined)

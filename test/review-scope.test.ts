@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   COVERAGE_TARGET,
   DEFAULT_SCOPE_CHUNK_SIZE,
+  WHOLE_FILE_LINE,
   chunkFiles,
   collectScopeFiles,
   computeCoverage,
@@ -164,5 +165,89 @@ describe('collectScopeFiles', () => {
   it('returns nothing when a changed-only scope has no files', () => {
     const root = makeTree()
     assert.deepEqual(collectScopeFiles(root, { scope: 'changed-only' }), [])
+  })
+})
+// ─── input hardening ────────────────────────────────────────────────────────
+
+describe('review-scope input hardening', () => {
+  it('computeCoverage survives a non-array read list (no for..of throw)', () => {
+    // A bare number used to throw `x is not iterable`; a bare string used to
+    // iterate single characters into the read set.
+    for (const bad of [42, true, {}, 'src/a.py']) {
+      const out = computeCoverage(['src/a.py'], bad as unknown as string[])
+      assert.equal(typeof out.ratio, 'number')
+      assert.equal(out.covered.length, 0, `${JSON.stringify(bad)} matched nothing`)
+      assert.equal(out.ratio, 0)
+    }
+    assert.equal(computeCoverage(['src/a.py'], null).ratio, 0)
+  })
+
+  it('computeCoverage survives a non-array assigned inventory', () => {
+    for (const bad of [42, 'src/a.py', null, undefined]) {
+      const out = computeCoverage(bad as unknown as string[], ['src/a.py'])
+      assert.deepEqual(out.assigned, [])
+      assert.equal(out.ratio, 1) // empty inventory is vacuously fully covered
+    }
+  })
+
+  it('computeCoverage drops non-string inventory entries', () => {
+    const out = computeCoverage(
+      ['src/a.py', 7, null, {}] as unknown as string[],
+      ['src/a.py'],
+    )
+    assert.deepEqual(out.assigned, ['src/a.py'])
+    assert.equal(out.ratio, 1)
+  })
+
+  it('chunkFiles survives a non-array inventory', () => {
+    for (const bad of [undefined, null, 42, 'a.ts']) {
+      assert.deepEqual(chunkFiles(bad as unknown as string[]), [])
+    }
+  })
+
+  it('chunkFiles drops non-string entries instead of throwing on rel.includes', () => {
+    const chunks = chunkFiles(['a.ts', 7, null, 'b.ts'] as unknown as string[], 2)
+    assert.deepEqual(chunks, [['a.ts', 'b.ts']])
+  })
+
+  it('chunkFiles floors a fractional chunk size', () => {
+    // 2.5 used to produce alternating 3- and 2-member chunks.
+    const files = Array.from({ length: 5 }, (_, i) => `f${i}.ts`)
+    for (const bad of [2.5, 3.9]) {
+      const chunks = chunkFiles(files, bad)
+      for (const c of chunks) assert.ok(c.length <= Math.floor(bad), `${c.length} > floor(${bad})`)
+      assert.equal(chunks.flat().length, 5, 'no file is lost')
+    }
+    // Non-finite sizes still fall back to the default.
+    assert.equal(chunkFiles(Array.from({ length: 30 }, (_, i) => `f${i}.ts`), Infinity).length, 2)
+  })
+
+  it('collectScopeFiles tolerates a missing options object', () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-scope-'))
+    mkdirSync(join(root, 'src'))
+    writeFileSync(join(root, 'src', 'a.ts'), 'x')
+    const files = collectScopeFiles(root, undefined as unknown as { scope: 'full' })
+    assert.deepEqual(files, ['src/a.ts'])
+  })
+
+  it('collectScopeFiles tolerates a non-array changedFiles list', () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-scope-'))
+    const files = collectScopeFiles(root, {
+      scope: 'changed-only',
+      changedFiles: 'src/a.ts' as unknown as string[],
+    })
+    assert.deepEqual(files, [])
+    assert.deepEqual(
+      collectScopeFiles(root, { scope: 'changed-only', changedFiles: [7, null] as unknown as string[] }),
+      [],
+    )
+  })
+})
+
+describe('WHOLE_FILE_LINE is shared with evidence.ts', () => {
+  it('re-exports the single sentinel instead of redefining it', async () => {
+    const evidence = await import('../src/evidence.ts')
+    assert.equal(WHOLE_FILE_LINE, evidence.WHOLE_FILE_LINE)
+    assert.equal(WHOLE_FILE_LINE, 0)
   })
 })

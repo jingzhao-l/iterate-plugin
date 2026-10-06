@@ -147,3 +147,81 @@ describe('countTouchedMethods', () => {
     assert.equal(countTouchedMethods(A, rewritten, diffLines(A, rewritten)), 1)
   })
 })
+
+// ─── input hardening ────────────────────────────────────────────────────────
+
+describe('method-scope input hardening', () => {
+  const A = 'function a() {\n  return 1\n}\n'
+
+  it('tolerates non-string source text instead of throwing', () => {
+    for (const bad of [undefined, null, 7, {}, []]) {
+      assert.deepEqual(collectMethodSignatures(bad as unknown as string), [])
+      assert.deepEqual(collectMethodSpans(bad as unknown as string), [])
+      assert.equal(countTextLines(bad as unknown as string), 0)
+    }
+  })
+
+  it('treats a non-array hunk list as "nothing changed"', () => {
+    for (const bad of [undefined, null, {}, 'hunks', 3]) {
+      assert.equal(countTouchedMethods(A, A, bad as unknown as never), 0)
+    }
+  })
+
+  it('ignores null / non-object hunk entries', () => {
+    const hunks = [
+      null,
+      'junk',
+      { oldStart: 1, oldLines: 3, newStart: 1, newLines: 3 },
+    ] as unknown as { oldStart: number; oldLines: number; newStart: number; newLines: number }[]
+    assert.equal(countTouchedMethods(A, A, hunks), 1)
+  })
+
+  it('skips malformed hunk coordinates instead of counting phantom methods', () => {
+    // A negative start builds a region that reaches up through line 3, so the
+    // unguarded version counted method `a` for a change that never touched it.
+    assert.equal(
+      countTouchedMethods(A, A, [{ oldStart: -5, oldLines: 10, newStart: -5, newLines: 10 }]),
+      0,
+    )
+    // Fractional coordinates cannot address a line either.
+    assert.equal(
+      countTouchedMethods(A, A, [{ oldStart: 1.5, oldLines: 2, newStart: 1.5, newLines: 2 }]),
+      0,
+    )
+    // Non-finite coordinates are equally unusable (both sides must be bad,
+    // otherwise the still-valid side legitimately counts the method).
+    assert.equal(
+      countTouchedMethods(A, A, [
+        { oldStart: Number.NaN, oldLines: 3, newStart: Number.NaN, newLines: 3 },
+      ]),
+      0,
+    )
+    assert.equal(
+      countTouchedMethods(A, A, [
+        {
+          oldStart: Number.POSITIVE_INFINITY,
+          oldLines: 3,
+          newStart: Number.POSITIVE_INFINITY,
+          newLines: 3,
+        },
+      ]),
+      0,
+    )
+    // Negative line COUNTS never enter either side.
+    assert.equal(
+      countTouchedMethods(A, A, [{ oldStart: 1, oldLines: -3, newStart: 1, newLines: -3 }]),
+      0,
+    )
+  })
+
+  it('still counts a well-formed hunk (0-based and 1-based starts both work)', () => {
+    assert.equal(
+      countTouchedMethods(A, A, [{ oldStart: 1, oldLines: 3, newStart: 1, newLines: 3 }]),
+      1,
+    )
+    assert.equal(
+      countTouchedMethods(A, A, [{ oldStart: 0, oldLines: 3, newStart: 0, newLines: 3 }]),
+      1,
+    )
+  })
+})

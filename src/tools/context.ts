@@ -24,10 +24,19 @@ export function isAllowedSkillDir(skillDir: string, allowedRoots: readonly strin
     if (!existsSync(dir) || !statSync(dir).isDirectory()) return false
     return allowedRoots.some((root) => {
       if (typeof root !== 'string' || root.length === 0) return false
-      const rootReal = realpathSync(root)
-      const rootPrefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep
-      const real = realpathSync(dir)
-      return real === rootReal || real.startsWith(rootPrefix)
+      // Per-root try/catch: realpathSync THROWS for a root that does not exist
+      // yet. One throw around the whole `.some()` would abort the scan and
+      // reject a perfectly valid skillDir sitting inside a LATER root (the
+      // caller then silently falls back to auto-detection) — skip only the
+      // unusable root and keep checking the remaining ones.
+      try {
+        const rootReal = realpathSync(root)
+        const rootPrefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep
+        const real = realpathSync(dir)
+        return real === rootReal || real.startsWith(rootPrefix)
+      } catch {
+        return false // broken/missing allowed root — not a match, keep scanning
+      }
     })
   } catch {
     return false
@@ -307,7 +316,11 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
           searched: string[]
           attachments?: string[]
           attachmentErrors?: string[]
-        } = { found: true, searched: [] }
+          // `found` starts false and is DERIVED at the end from the content
+          // actually returned — hardcoding `true` here meant a miss (no
+          // SKILL.md/ITERATE.md anywhere) still reported `found: true` while
+          // the renderer said "No files found".
+        } = { found: false, searched: [] }
 
         // Relay user-attached image metadata into the review context. The
         // orchestrator observes attached images in the session and passes their
@@ -358,6 +371,13 @@ export function registerContextTool(ctx: { tools: { register: (def: ReturnType<t
           result.project = readProjectFile(projectRoot, 'ITERATE.md')
         }
 
+        // Derive `found` from what was actually returned. It mirrors the
+        // renderer's "No files found" branch exactly: requested file content,
+        // or relayed attachments (attachmentErrors alone never make a find).
+        result.found =
+          Boolean(result.skill) ||
+          Boolean(result.project) ||
+          (Array.isArray(result.attachments) && result.attachments.length > 0)
         return result
       },
     }),

@@ -47,34 +47,60 @@ import { ITERATE_SKILL_PROMPT } from "./skill-prompt.js";
 export const name = 'iterate-plugin';
 export const inject = ['tools', 'systemPrompt'];
 export function apply(ctx) {
-    // 1. Register the 17 tools (14 original + 3 v3.0)
-    registerConfigTool(ctx);
-    registerValidateTool(ctx);
-    registerDecisionLogTool(ctx);
-    registerContextTool(ctx);
-    registerReviewTool(ctx);
-    registerTriageTool(ctx);
-    registerFixTool(ctx);
-    registerDiffTool(ctx);
-    registerRollbackTool(ctx);
-    registerCheckpointTool(ctx);
-    registerStatusTool(ctx);
-    registerHistoryTool(ctx);
-    registerPruneTool(ctx);
-    registerTranscriptTool(ctx);
-    // v3.0: Quality Command Center tools
-    registerExperienceBankTool(ctx);
-    registerQualityGateTool(ctx);
-    registerDefenseEventsTool(ctx);
-    // 2. Wire the observatory approval gate onto dsh's tools/pre-execute waterfall,
-    //    and the live reviewer-activity feed onto tools/result.
+    // 0. Wire the SAFETY hooks BEFORE any tool is registered.
+    //    Registration is a list of 17 independent calls; if one of them threw
+    //    (duplicate name, malformed definition, hostile ctx) while the gate was
+    //    registered last, the tools registered up to that point would keep
+    //    running with NO `tools/pre-execute` approval gate — a fail-open hole
+    //    created by load order. Registering the gate first means a partial load
+    //    can only ever err on the side of MORE gating, never less.
     registerSessionHooks(ctx);
     registerLiveCapture(ctx);
-    // 2. Inject the iterate skill prompt as a system prompt section
-    // This teaches the model how to write iterate workflow scripts using the tools.
-    ctx.systemPrompt.section({
-        name: 'iterate-skill',
-        order: 100,
-        text: ITERATE_SKILL_PROMPT,
-    });
+    // 1. Register the 17 tools (14 original + 3 v3.0). Each registration is
+    //    isolated: one failing tool must not take down the other 16, the gate
+    //    above, or the prompt below (a partial plugin that still gates and
+    //    teaches the workflow beats an aborted `apply`). Failures are logged,
+    //    never swallowed silently.
+    const toolRegistrations = [
+        ['iterate_config', () => registerConfigTool(ctx)],
+        ['iterate_validate', () => registerValidateTool(ctx)],
+        ['iterate_decision_log', () => registerDecisionLogTool(ctx)],
+        ['iterate_context', () => registerContextTool(ctx)],
+        ['iterate_review', () => registerReviewTool(ctx)],
+        ['iterate_triage', () => registerTriageTool(ctx)],
+        ['iterate_fix', () => registerFixTool(ctx)],
+        ['iterate_diff', () => registerDiffTool(ctx)],
+        ['iterate_rollback', () => registerRollbackTool(ctx)],
+        ['iterate_checkpoint', () => registerCheckpointTool(ctx)],
+        ['iterate_status', () => registerStatusTool(ctx)],
+        ['iterate_history', () => registerHistoryTool(ctx)],
+        ['iterate_prune', () => registerPruneTool(ctx)],
+        ['iterate_transcript', () => registerTranscriptTool(ctx)],
+        // v3.0: Quality Command Center tools
+        ['iterate_experience', () => registerExperienceBankTool(ctx)],
+        ['iterate_quality_gate', () => registerQualityGateTool(ctx)],
+        ['iterate_defense_events', () => registerDefenseEventsTool(ctx)],
+    ];
+    for (const [toolName, register] of toolRegistrations) {
+        try {
+            register();
+        }
+        catch (err) {
+            console.warn(`[iterate] failed to register ${toolName}; continuing.`, err);
+        }
+    }
+    // 2. Inject the iterate skill prompt as a system prompt section.
+    //    This teaches the model how to write iterate workflow scripts using the
+    //    tools. Guarded for the same reason as above: a prompt-injection failure
+    //    must not undo a load that already wired the gate and the tools.
+    try {
+        ctx.systemPrompt.section({
+            name: 'iterate-skill',
+            order: 100,
+            text: ITERATE_SKILL_PROMPT,
+        });
+    }
+    catch (err) {
+        console.warn('[iterate] failed to inject the skill prompt section; continuing.', err);
+    }
 }

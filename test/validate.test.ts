@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -10,14 +10,37 @@ function tempProject(): { dir: string; cleanup: () => void } {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
-function captureValidateTool(): (args: unknown) => Promise<Record<string, unknown>> {
-  let def: { execute: (a: unknown, e: unknown) => Promise<unknown> } | null = null
+type ValidateDef = {
+  execute: (a: unknown, e: unknown) => Promise<unknown>
+  output: { render: (args: unknown, value: unknown) => Array<{ type: string; text: string }> }
+}
+
+function registerValidateDef(): ValidateDef {
+  let def: ValidateDef | null = null
   registerValidateTool({
-    tools: { register: (d: never) => { def = d as typeof def } },
+    tools: { register: (d: never) => { def = d as ValidateDef } },
   } as never)
   if (!def) throw new Error('iterate_validate was not registered')
+  return def
+}
+
+function captureValidateTool(): (args: unknown) => Promise<Record<string, unknown>> {
+  const def = registerValidateDef()
   const exec = { signal: new AbortController().signal }
-  return async (args) => (await def!.execute(args, exec as never)) as Record<string, unknown>
+  return async (args) => (await def.execute(args, exec as never)) as Record<string, unknown>
+}
+
+/** Same tool, but also exposes `output.render` for render-level assertions. */
+function captureValidateToolWithRender(): {
+  execute: (args: unknown) => Promise<Record<string, unknown>>
+  render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+} {
+  const def = registerValidateDef()
+  const exec = { signal: new AbortController().signal }
+  return {
+    execute: async (args) => (await def.execute(args, exec as never)) as Record<string, unknown>,
+    render: (args, value) => def.output.render(args, value),
+  }
 }
 
 describe('clampTimeout', () => {
@@ -153,6 +176,166 @@ describe('iterate_validate execute', () => {
       const out = await execute({ command: 'echo ok', path: dir })
       assert.equal(out.allowed, false)
       assert.match(String(out.rejectReason), /No iterate\.config\.yaml/)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ─── whitelist: exact match after trim, nothing more ─────────────────────────
+
+describe('iterate_validate whitelist exact-match', () => {
+  const CONFIG = [
+    'validation:',
+    '  commands:',
+    '    default:',
+    '      - echo ok',
+    '',
+  ].join('\n')
+
+  it('rejects look-alike commands that only extend a whitelisted command', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, 'iterate.config.yaml'), CONFIG, 'utf-8')
+      const execute = captureValidateTool()
+      // A whitelisted `echo ok` must not vouch for a longer string: prefix
+      // matching used to allow `echo ok-more` and, worse, `echo ok; <payload>`
+      // — the whole string has to equal one whitelisted entry after trim.
+      for (const command of ['echo ok extra', 'echo ok; touch pwned', 'echo ok && true', 'echo ok-more']) {
+        const out = await execute({ command, path: dir })
+        assert.equal(out.allowed, false, `"${command}" must be rejected`)
+        assert.equal(out.exitCode, -1)
+        assert.match(String(out.rejectReason), /exactly match/i)
+      }
+      // The separator payload never reached a shell.
+      assert.equal(existsSync(join(dir, 'pwned')), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('accepts a whitelisted command padded with surrounding whitespace', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, 'iterate.config.yaml'), CONFIG, 'utf-8')
+      const execute = captureValidateTool()
+      // Trim semantics: only the CANDIDATE is trimmed before the exact
+      // comparison, so incidental padding is fine while extra arguments are not.
+      const out = await execute({ command: ' echo ok ', path: dir })
+      assert.equal(out.allowed, true)
+      assert.equal(out.exitCode, 0)
+      assert.equal(String(out.stdout).trim(), 'ok')
+      assert.equal(out.truncated, false)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ─── runCommand never rejects; a cut stream is flagged, not guessed ──────────
+
+describe('runCommand start failures and output caps', () => {
+  it('resolves a structured startError instead of rejecting on a NUL-byte command', async () => {
+    // exec() validates its arguments synchronously and THROWS for a NUL byte
+    // before registering its callback — inside the promise executor that throw
+    // would reject and escape `execute` as an unhandled tool crash.
+    const result = await runCommand('echo ok\u0000', process.cwd(), 10_000)
+    assert.equal(typeof result.startError, 'string')
+    assert.match(String(result.startError), /null bytes/)
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.stdout, '')
+    assert.equal(result.timedOut, false)
+    assert.equal(result.canceled, false)
+    assert.equal(result.truncated, false)
+  })
+
+  it('flags truncated output (not a timeout) when maxBuffer is exceeded', async () => {
+    // maxBuffer is injectable so the cap is hit without generating 10 MB here;
+    // `yes` never exits on its own, proving the cap kills the child too.
+    const result = await runCommand('yes x', process.cwd(), 10_000, undefined, 1024)
+    assert.equal(result.truncated, true)
+    assert.equal(result.startError, undefined)
+    assert.equal(result.timedOut, false)
+    assert.equal(result.canceled, false)
+    assert.equal(result.exitCode, 1)
+    assert.ok(result.stdout.length > 0)
+    assert.ok(result.stdout.length < 5_000, 'stdout must be cut short at the cap')
+  })
+})
+
+// ─── failures surface as structured results through the tool ─────────────────
+
+describe('iterate_validate failure surfacing', () => {
+  it('turns a whitelisted command that cannot start into a structured rejection', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      // YAML's double-quoted `\0` escape embeds a real NUL byte, so the
+      // whitelist itself can carry a command exec() refuses to spawn — the
+      // crafted case that used to escape execute as an unhandled throw.
+      const nulConfig = [
+        'validation:',
+        '  commands:',
+        '    default:',
+        '      - "echo ok\\0"',
+        '',
+      ].join('\n')
+      writeFileSync(join(dir, 'iterate.config.yaml'), nulConfig, 'utf-8')
+      const execute = captureValidateTool()
+      const out = await execute({ command: 'echo ok\u0000', path: dir })
+      assert.equal(out.allowed, false)
+      assert.equal(out.exitCode, 1)
+      assert.match(String(out.rejectReason), /^command failed to start:/)
+      assert.equal(out.timedOut, false)
+      assert.equal(out.canceled, false)
+      // Internal runCommand diagnostics must never leak into the tool output
+      // (the output schema has no `startError` property).
+      assert.equal('startError' in out, false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('reports truncation (and a render warning) when output exceeds the cap', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      // `yes` writes without bound, so the production 10 MB default cap is hit
+      // and the child is killed — the reader must be told the tail was cut.
+      const bigConfig = [
+        'validation:',
+        '  commands:',
+        '    default:',
+        '      - yes x',
+        '',
+      ].join('\n')
+      writeFileSync(join(dir, 'iterate.config.yaml'), bigConfig, 'utf-8')
+      const { execute, render } = captureValidateToolWithRender()
+      const out = await execute({ command: 'yes x', path: dir })
+      assert.equal(out.allowed, true)
+      assert.equal(out.truncated, true)
+      assert.equal(out.exitCode, 1)
+      assert.match(String(out.rejectReason), /truncated/)
+      assert.equal(out.timedOut, false)
+      assert.equal('startError' in out, false)
+      assert.ok(String(out.stdout).length > 0, 'the partial output is still reported')
+
+      const text = render({ command: 'yes x' }, out).map((b) => b.text).join('\n')
+      assert.match(text, /⚠ .*truncated/)
+
+      // A clean run renders without any warning markers.
+      const cleanText = render({ command: 'echo ok' }, {
+        allowed: true,
+        command: 'echo ok',
+        exitCode: 0,
+        stdout: 'ok',
+        stderr: '',
+        timedOut: false,
+        canceled: false,
+        durationMs: 3,
+        truncated: false,
+      })
+        .map((b) => b.text)
+        .join('\n')
+      assert.equal(cleanText.includes('⚠'), false)
     } finally {
       cleanup()
     }

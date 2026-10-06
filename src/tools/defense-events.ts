@@ -12,7 +12,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec, loadEffectiveConfig } from '../config-loader.ts'
+import { withProjectLock } from '../file-lock.ts'
 import { readDefenseEvents, writeDefenseEvents, addDefenseEvent, clearDefenseEvents } from './defense-store.ts'
+import { renderedText } from './present.ts'
 import type { DefenseEvent, DefenseEventType } from '../types.ts'
 
 const DEFAULT_LIMIT = 50
@@ -25,8 +27,13 @@ const EVENT_TYPES: DefenseEventType[] = [
   'assumption_falsified',
 ]
 
-/** Clamp a caller-supplied limit to a sane range. */
-function clampLimit(limit: number | undefined): number {
+/**
+ * Clamp a caller-supplied limit to a sane range.
+ * Anything that is not a positive integer falls back to the default — the
+ * parameter schema already rejects non-integers, but hand-constructed args
+ * (and future internal callers) still land here. Pure — exported for unit tests.
+ */
+export function clampLimit(limit: number | undefined): number {
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
     return DEFAULT_LIMIT
   }
@@ -73,8 +80,14 @@ function validateRecordInput(args: {
   if (typeof args.outcome !== 'string' || !args.outcome.trim()) {
     errors.push('outcome is required')
   }
-  if (args.line !== undefined && (typeof args.line !== 'number' || !Number.isInteger(args.line) || args.line < 0)) {
-    errors.push('line must be a non-negative integer when present')
+  // Positions are 1-BASED. `line: 0` is not usable here even though the
+  // evidence/review layer treats 0 as "whole file": the renderer prints the
+  // position only for a truthy line (`file + ':' + line`), so a stored 0 would
+  // come back as a bare file path with no indication of what it meant — and
+  // the client-side normalizer already degrades 0 to null ("not a usable
+  // position"). Reject it at the door instead of persisting a silent 0.
+  if (args.line !== undefined && (typeof args.line !== 'number' || !Number.isInteger(args.line) || args.line < 1)) {
+    errors.push('line must be a positive integer (>= 1) when present')
   }
   const severity = args.severity
   if (severity !== 'critical' && severity !== 'high' && severity !== 'medium' && severity !== 'low') {
@@ -91,6 +104,31 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
   ctx.tools.register(
     defineTool({
       name: 'iterate_defense_events',
+      // Result card (#12): the `counts` render is a column of per-type lines —
+      // fold it into one headline ("Defense events: 3 recorded (rollback: 2)").
+      // Only `counts` gets a card; other operations keep the default view.
+      // Pure: parsed from the rendered text; an unreadable shape declines.
+      presentResult: (args, result) => {
+        const a = args as { operation?: unknown }
+        if (a.operation !== 'counts') return undefined
+        const text = renderedText(result)
+        if (!text) return undefined
+        const lines = text.split('\n')
+        const totalLine = lines.find((l) => l.trim().startsWith('Total:'))
+        const totalMatch = totalLine ? /Total:\s*(\d+)/.exec(totalLine) : null
+        const total = totalMatch ? Number(totalMatch[1]) : NaN
+        if (!Number.isFinite(total)) return undefined
+        // Per-type rows ("  rollback: 2"), localized labels included; the zero
+        // rows are dropped so the headline only names types that actually fired.
+        const detail = lines
+          .filter((l) => /^\s{2,}\S.*:\s*\d+\s*$/.test(l))
+          .map((l) => l.trim())
+          .filter((l) => !l.startsWith('Total:') && !/:\s*0\s*$/.test(l))
+        return {
+          card: 'generic',
+          title: `Defense events: ${total} recorded` + (detail.length > 0 ? ` (${detail.join(', ')})` : ''),
+        }
+      },
       // List/counts never write; `record` persists an event and `clear` removes
       // the persisted stream, so only the read shapes may join a parallel
       // dispatch group.
@@ -142,7 +180,7 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
         },
         line: {
           type: 'integer',
-          description: 'Optional line number context (record).',
+          description: 'Optional line number context (record): a 1-based line number (>= 1).',
         },
         language: {
           type: 'string',
@@ -167,7 +205,8 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
             ok: { type: 'boolean', required: true },
             kind: { type: 'string' },
             operation: { type: 'string' },
-            count: { type: 'integer' },
+            count: { type: 'integer', description: 'list: number of events actually returned (after limit truncation).' },
+            total: { type: 'integer', description: 'list: total number of matching events before the limit was applied.' },
             counted: { type: 'boolean', description: 'clear only: true when a persisted stream was removed.' },
             events: { type: 'json' },
             counts: { type: 'json' },
@@ -222,7 +261,10 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
           }
 
           const lines = [
-            `Defense Events (${value.count} total):`,
+            // `total` is the UNTRUNCATED match count; `count` is what survived
+            // the limit. Printing only one number (the old `count` as "total")
+            // hid the real stream size from the reader.
+            `Defense Events (showing ${value.count} of ${value.total}):`,
             '',
             ...events.map((e) => {
               const typeLabel = labelFor(e.type, language)
@@ -251,7 +293,10 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
         if (operation === 'clear') {
           // Reset the persisted event stream so a fresh iteration does not carry
           // stale defensive data (mirrors iterate_quality_gate clear / clearQualityGate).
-          const result = clearDefenseEvents(projectRoot)
+          // Same lock as `record`: clear is a read-modify-write against the same
+          // file, so an unlocked clear racing a locked record could resurrect
+          // the just-cleared events (the record's write lands after the rm).
+          const result = withProjectLock(projectRoot, 'defense-events', () => clearDefenseEvents(projectRoot))
           if (!result.ok) {
             return { ok: false, kind: 'defense_events', operation: 'clear', error: result.error }
           }
@@ -278,30 +323,38 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
               error: `Invalid defense event: ${errors.join('; ')}`,
             }
           }
-          const stream = readDefenseEvents(projectRoot)
-          const next = addDefenseEvent(stream, {
-            round: args.round as number,
-            type: args.type as DefenseEventType,
-            description: args.description as string,
-            defense: args.defense as string,
-            outcome: args.outcome as string,
-            severity: args.severity as DefenseEvent['severity'],
-            ...(typeof args.file === 'string' && args.file.length > 0 ? { file: args.file } : {}),
-            ...(typeof args.line === 'number' ? { line: args.line } : {}),
+          // The read→modify→write below is the exact cross-process race the
+          // decision log documents: two plugin processes reading the same
+          // stream concurrently each append their own event and the second
+          // write silently drops the first. Serialize the whole cycle with the
+          // shared advisory lock (fail-open on timeout is built into the
+          // helper — worst case is the pre-existing unlocked behavior).
+          return withProjectLock(projectRoot, 'defense-events', () => {
+            const stream = readDefenseEvents(projectRoot)
+            const next = addDefenseEvent(stream, {
+              round: args.round as number,
+              type: args.type as DefenseEventType,
+              description: args.description as string,
+              defense: args.defense as string,
+              outcome: args.outcome as string,
+              severity: args.severity as DefenseEvent['severity'],
+              ...(typeof args.file === 'string' && args.file.length > 0 ? { file: args.file } : {}),
+              ...(typeof args.line === 'number' ? { line: args.line } : {}),
+            })
+            const write = writeDefenseEvents(projectRoot, next)
+            if (!write.ok) {
+              return { ok: false, kind: 'defense_events', operation: 'record', error: write.error }
+            }
+            const event = next.events[next.events.length - 1]
+            return {
+              ok: true,
+              kind: 'defense_events',
+              operation: 'record',
+              language,
+              event: event as unknown as JsonValue,
+              counts: next.counts as unknown as JsonValue,
+            }
           })
-          const write = writeDefenseEvents(projectRoot, next)
-          if (!write.ok) {
-            return { ok: false, kind: 'defense_events', operation: 'record', error: write.error }
-          }
-          const event = next.events[next.events.length - 1]
-          return {
-            ok: true,
-            kind: 'defense_events',
-            operation: 'record',
-            language,
-            event: event as unknown as JsonValue,
-            counts: next.counts as unknown as JsonValue,
-          }
         }
 
         const stream = readDefenseEvents(projectRoot)
@@ -337,7 +390,10 @@ export function registerDefenseEventsTool(ctx: { tools: { register: (def: Return
           kind: 'defense_events',
           operation: 'list',
           language,
+          // `count` = events actually returned (limit-truncated);
+          // `total` = every event matching the filters, before truncation.
           count: Math.min(events.length, limit),
+          total: events.length,
           events: events.slice(0, limit) as unknown as JsonValue,
         }
       },

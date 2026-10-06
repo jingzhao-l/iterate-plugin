@@ -19,10 +19,12 @@ import type { DecisionLogEntry, FixRegistry, FixRecord, ReviewFinding } from '..
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+  parameters: () => Record<string, unknown>
 } {
   let def: {
     execute: (a: unknown, e: unknown) => Promise<unknown>
     output: { render: (a: unknown, v: unknown) => unknown }
+    parameters: Record<string, unknown>
   } | null = null
   registerHistoryTool({
     tools: { register: (d: never) => { def = d as typeof def } },
@@ -32,6 +34,7 @@ function captureTool(): {
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
+    parameters: () => def!.parameters,
   }
 }
 
@@ -112,6 +115,11 @@ describe('filterDecisionEntries', () => {
     entry({ timestamp: '2026-08-02T00:00:00.000Z', round: 2, type: 'review_result', data: {} }),
     entry({ timestamp: '2026-08-03T00:00:00.000Z', round: 3, type: 'decision', data: {} }),
   ]
+  const fileEntries: DecisionLogEntry[] = [
+    entry({ timestamp: '2026-08-01T00:00:00.000Z', round: 1, type: 'atomic_fix', data: { file: 'src/a.ts' } }),
+    entry({ timestamp: '2026-08-02T00:00:00.000Z', round: 1, type: 'atomic_fix', data: { file: 'src/b.ts' } }),
+    entry({ timestamp: '2026-08-03T00:00:00.000Z', round: 2, type: 'atomic_fix', data: { file: 'src/a.ts' } }),
+  ]
 
   it('returns newest matching entries with a count before the cap', () => {
     const r = filterDecisionEntries(entries, { limit: 2 })
@@ -131,8 +139,34 @@ describe('filterDecisionEntries', () => {
     assert.deepEqual(r.entries.map((e) => e.round), [3])
   })
 
-  it('ignores invalid type / since inputs', () => {
-    const r = filterDecisionEntries(entries, { type: 42, since: 7 })
+  it('filters by round', () => {
+    const r = filterDecisionEntries(fileEntries, { round: 2 })
+    assert.deepEqual(r.entries.map((e) => e.round), [2])
+    assert.equal(r.filteredCount, 1)
+  })
+
+  it('filters by fixed file (entries whose data.file matches)', () => {
+    const r = filterDecisionEntries(fileEntries, { file: 'src/b.ts' })
+    assert.equal(r.filteredCount, 1)
+    assert.deepEqual(r.entries.map((e) => e.data.file), ['src/b.ts'])
+  })
+
+  it('combines round + file with the other filters', () => {
+    const r = filterDecisionEntries(fileEntries, { type: 'atomic_fix', round: 1, file: 'src/a.ts' })
+    assert.equal(r.filteredCount, 1)
+    assert.equal(r.entries[0]!.timestamp, '2026-08-01T00:00:00.000Z')
+    // Round 2 also fixes src/a.ts — the round scope must exclude it.
+    assert.notEqual(r.entries[0]!.round, 2)
+  })
+
+  it('returns an empty window for a round that matches nothing', () => {
+    const r = filterDecisionEntries(fileEntries, { round: 99 })
+    assert.deepEqual(r.entries, [])
+    assert.equal(r.filteredCount, 0)
+  })
+
+  it('ignores invalid type / since / round / file inputs', () => {
+    const r = filterDecisionEntries(entries, { type: 42, since: 7, round: '2', file: 42 })
     assert.equal(r.filteredCount, 3)
   })
 
@@ -189,6 +223,69 @@ describe('summarizeFixRegistry', () => {
     assert.equal(s.totalFixed, 2) // only the well-formed round counts
     assert.equal(s.totalFailed, 1)
   })
+
+  const multiRoundRegistry = (): FixRegistry => ({
+    rounds: [
+      {
+        round: 1,
+        fixedCount: 2,
+        failedCount: 1,
+        records: [
+          record({ id: 'fix-a', finding: finding({ file: 'src/a.ts' }), success: true }),
+          record({ id: 'fix-b', finding: finding({ file: 'src/b.ts' }), success: true }),
+          record({ id: 'fix-c', finding: finding({ file: 'src/a.ts' }), success: false }),
+        ],
+      },
+      {
+        round: 2,
+        fixedCount: 1,
+        failedCount: 0,
+        records: [record({ id: 'fix-d', round: 2, finding: finding({ file: 'src/a.ts' }) })],
+      },
+    ],
+  })
+
+  it('scopes the fix summary to one round', () => {
+    const s = summarizeFixRegistry(multiRoundRegistry(), { round: 2 })
+    assert.equal(s.roundCount, 1)
+    assert.equal(s.totalFixed, 1)
+    assert.equal(s.totalFailed, 0)
+    assert.deepEqual(s.rounds, [{ round: 2, fixedCount: 1, failedCount: 0 }])
+  })
+
+  it('scopes the fix summary to one fixed file and recomputes counts from records', () => {
+    const s = summarizeFixRegistry(multiRoundRegistry(), { file: 'src/a.ts' })
+    // src/a.ts: round 1 has fix-a (fixed) + fix-c (failed); round 2 has fix-d.
+    assert.equal(s.roundCount, 2)
+    assert.equal(s.totalFixed, 2)
+    assert.equal(s.totalFailed, 1)
+    assert.deepEqual(s.rounds, [
+      { round: 1, fixedCount: 1, failedCount: 1 },
+      { round: 2, fixedCount: 1, failedCount: 0 },
+    ])
+  })
+
+  it('combines round + file scopes', () => {
+    const s = summarizeFixRegistry(multiRoundRegistry(), { round: 1, file: 'src/b.ts' })
+    assert.equal(s.roundCount, 1)
+    assert.equal(s.totalFixed, 1)
+    assert.equal(s.totalFailed, 0)
+    assert.deepEqual(s.rounds, [{ round: 1, fixedCount: 1, failedCount: 0 }])
+  })
+
+  it('returns an empty summary when the file matches no fixes', () => {
+    const s = summarizeFixRegistry(multiRoundRegistry(), { file: 'src/never-fixed.ts' })
+    assert.equal(s.roundCount, 0)
+    assert.equal(s.totalFixed, 0)
+    assert.equal(s.totalFailed, 0)
+    assert.deepEqual(s.rounds, [])
+  })
+
+  it('returns an empty summary for a round that matches nothing', () => {
+    const s = summarizeFixRegistry(multiRoundRegistry(), { round: 99 })
+    assert.equal(s.roundCount, 0)
+    assert.equal(s.totalFixed, 0)
+  })
 })
 
 // ─── iterate_history tool (end-to-end) ───────────────────────────────────────
@@ -235,6 +332,34 @@ describe('iterate_history tool', () => {
     const out = (await tool.execute({ path: dir, type: 'atomic_fix' })) as Record<string, unknown>
     assert.equal(out.count, 1)
     cleanup()
+  })
+
+  it('supports round + file filtering through the tool (schema params wired)', async () => {
+    const { dir, cleanup } = tempProject()
+    appendDecisionEntry(dir, entry({ round: 1, type: 'atomic_fix', data: { file: 'src/a.ts' } }))
+    appendDecisionEntry(dir, entry({ round: 1, type: 'atomic_fix', data: { file: 'src/b.ts' } }))
+    appendDecisionEntry(dir, entry({ round: 2, type: 'atomic_fix', data: { file: 'src/a.ts' } }))
+
+    const tool = captureTool()
+    const both = (await tool.execute({ path: dir, round: 1, file: 'src/a.ts' })) as Record<string, unknown>
+    assert.equal(both.ok, true)
+    assert.equal(both.count, 1)
+    const onlyRound = (await tool.execute({ path: dir, round: 1 })) as Record<string, unknown>
+    assert.equal(onlyRound.count, 2)
+    const noMatch = (await tool.execute({ path: dir, round: 42 })) as Record<string, unknown>
+    assert.equal(noMatch.count, 0)
+    assert.equal(noMatch.filteredCount, 0)
+    cleanup()
+  })
+
+  it('exposes round and file in the tool parameter schema', () => {
+    const tool = captureTool()
+    // defineTool compiles the per-property spec into a JSON-schema root.
+    const params = tool.parameters() as { properties?: Record<string, { type?: string; description?: string }> }
+    assert.equal(params.properties?.round?.type, 'integer')
+    assert.equal(params.properties?.file?.type, 'string')
+    assert.ok(params.properties?.round?.description?.includes('round'))
+    assert.ok(params.properties?.file?.description?.includes('file'))
   })
 })
 

@@ -9,6 +9,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
 import { readQualityGate, writeQualityGate, computeQualityGate, clearQualityGate } from "./quality-store.js";
+import { resultHeadline } from "./present.js";
 /** Valid severity values (kept in sync with QualityGateSnapshot counting). */
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 /** Validate a single finding object; returns true when well-formed. */
@@ -62,6 +63,14 @@ function sanitizeRoundSeries(raw) {
 export function registerQualityGateTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_quality_gate',
+        // Result card (#12): the certificate render already opens with its
+        // headline ("✓ Quality Gate: PASS (score: 92)") — surface that as the
+        // card title so a completed gate query isn't a bare blob. Pure: reads
+        // only the rendered result (replay-safe); failures decline the card.
+        presentResult: (_args, result) => {
+            const title = resultHeadline(result);
+            return title ? { card: 'generic', title } : undefined;
+        },
         // `read` never writes; `compute` persists the snapshot → only read
         // joins a parallel dispatch group.
         isConcurrencySafe: (args) => args.operation === 'read',
@@ -81,11 +90,13 @@ export function registerQualityGateTool(ctx) {
             dimensions: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Dimensions to gate (required for compute).',
+                description: 'Dimensions to gate (required and must be non-empty for compute).',
             },
             findings: {
                 type: 'json',
-                description: 'Findings array (required for compute). Each item: { dimension, severity (critical|high|medium|low), file, line? }.',
+                description: 'Findings array for compute (optional — defaults to []). Each item: ' +
+                    '{ dimension, severity (critical|high|medium|low), file, line? }. Findings whose dimension ' +
+                    'is not listed in `dimensions` are excluded from scoring and reported as warnings.',
             },
             validationResults: {
                 type: 'json',
@@ -114,6 +125,11 @@ export function registerQualityGateTool(ctx) {
                     kind: { type: 'string' },
                     operation: { type: 'string' },
                     snapshot: { type: 'json' },
+                    warnings: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'compute only: findings excluded from scoring because their dimension is not gated.',
+                    },
                     error: { type: 'string' },
                 },
             },
@@ -138,6 +154,9 @@ export function registerQualityGateTool(ctx) {
                 ];
                 if (snapshot.failReason) {
                     lines.push('', `Fail Reason: ${snapshot.failReason}`);
+                }
+                if (Array.isArray(value.warnings) && value.warnings.length > 0) {
+                    lines.push('', 'Warnings:', ...value.warnings.map((w) => `  ! ${String(w)}`));
                 }
                 if (operation === 'compute') {
                     lines.push('', 'Quality gate snapshot computed and persisted.');
@@ -170,12 +189,40 @@ export function registerQualityGateTool(ctx) {
                 const dimensions = Array.isArray(args.dimensions)
                     ? args.dimensions.filter((d) => typeof d === 'string' && d.length > 0)
                     : [];
+                // A compute without any gateable dimension would score an empty
+                // dimension list at overallScore 0 and PERSIST a fabricated FAIL
+                // certificate for a review that was simply never scoped. Refuse
+                // instead: no snapshot is written, and the caller gets a structured
+                // error naming the missing argument.
+                if (dimensions.length === 0) {
+                    return {
+                        ok: false,
+                        kind: 'quality_gate',
+                        operation: 'compute',
+                        error: 'dimensions is required (and must be a non-empty array of dimension names) for operation "compute" — ' +
+                            'without dimensions there is nothing to gate and no certificate can be computed.',
+                    };
+                }
                 const findings = Array.isArray(args.findings) ? args.findings.filter(isValidFinding) : [];
                 const validationResults = Array.isArray(args.validationResults)
                     ? args.validationResults.filter(isValidValidationResult)
                     : undefined;
                 const findingsByRound = sanitizeRoundSeries(args.findingsByRound);
                 const fixedByDimension = sanitizeNumberMap(args.fixedByDimension);
+                // Findings in dimensions outside the gated list are silently skipped
+                // by computeQualityGate (they never touch any dimension score) — a
+                // critical one still fails the gate globally, everything else just
+                // vanishes from the numbers. Surface those dimensions as warnings so
+                // the caller knows the score does NOT cover them; scoring is
+                // deliberately left unchanged.
+                const gated = new Set(dimensions);
+                const ungatedCounts = new Map();
+                for (const finding of findings) {
+                    if (!gated.has(finding.dimension)) {
+                        ungatedCounts.set(finding.dimension, (ungatedCounts.get(finding.dimension) ?? 0) + 1);
+                    }
+                }
+                const warnings = [...ungatedCounts].map(([dimension, count]) => `finding dimension "${dimension}" is not in the gated dimensions and was excluded from scoring (${count} finding${count === 1 ? '' : 's'})`);
                 const snapshot = computeQualityGate({
                     dimensions,
                     findings,
@@ -192,6 +239,9 @@ export function registerQualityGateTool(ctx) {
                     kind: 'quality_gate',
                     operation: 'compute',
                     snapshot: snapshot,
+                    // Typed by the output schema as string[] — do not widen this to
+                    // JsonValue or the execute return type stops matching the schema.
+                    warnings,
                 };
             }
             const snapshot = readQualityGate(projectRoot);

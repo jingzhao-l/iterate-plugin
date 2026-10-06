@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { upsertExperience, removeExperience, writeExperienceBank, readExperienceBank, searchExperienceEntries } from '../src/tools/experience-store.ts'
+import { upsertExperience, removeExperience, writeExperienceBank, readExperienceBank, searchExperienceEntries, isValidExperienceId, MAX_EXPERIENCE_ID_LENGTH } from '../src/tools/experience-store.ts'
 import type { ExperienceEntryInput } from '../src/tools/experience-store.ts'
 import type { ExperienceBank } from '../src/types.ts'
 
@@ -297,5 +297,81 @@ describe('readExperienceBank normalization', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+// ─── hit-counter normalization (integer output schema contract) ─────────────
+
+describe('readExperienceBank hit-counter normalization', () => {
+  /** Raw bank text — written literally so `1e999` (Infinity) reaches JSON.parse. */
+  function bankText(hitCount: string, totalHits: string): string {
+    return (
+      '{"lastUpdated":"2026-01-01T00:00:00.000Z",' +
+      `"totalHits":${totalHits},` +
+      `"entries":[{"id":"e1","dimension":"d","pattern":"p","hitCount":${hitCount}}]}`
+    )
+  }
+
+  function readRaw(hitCount: string, totalHits: string): ExperienceBank {
+    const dir = mkdtempSync(join(tmpdir(), 'iterate-exp-count-'))
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'experience.json'), bankText(hitCount, totalHits), 'utf-8')
+      return readExperienceBank(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('floors fractional counters (4.5 → 4) for hitCount and totalHits', () => {
+    const bank = readRaw('4.5', '4.5')
+    assert.equal(bank.entries[0]!.hitCount, 4)
+    assert.equal(bank.totalHits, 4)
+  })
+
+  it('clamps negative counters to 0', () => {
+    const bank = readRaw('-1', '-1')
+    assert.equal(bank.entries[0]!.hitCount, 0)
+    assert.equal(bank.totalHits, 0)
+  })
+
+  it('resets non-numeric counters to 0', () => {
+    const bank = readRaw('"x"', '"x"')
+    assert.equal(bank.entries[0]!.hitCount, 0)
+    assert.equal(bank.totalHits, 0)
+  })
+
+  it('resets non-finite counters to 0 (1e999 parses to Infinity)', () => {
+    const bank = readRaw('1e999', '1e999')
+    assert.equal(bank.entries[0]!.hitCount, 0)
+    assert.equal(bank.totalHits, 0)
+    // The integer output schema would throw ToolOutputError on any of these
+    // leaking through — every surviving value must be a safe non-negative int.
+    const values = [bank.entries[0]!.hitCount, bank.totalHits]
+    for (const v of values) {
+      assert.equal(Number.isInteger(v), true)
+      assert.ok(v >= 0)
+    }
+  })
+})
+
+// ─── caller-supplied id validation (new-entry identity) ─────────────────────
+
+describe('isValidExperienceId', () => {
+  it('accepts normal printable ids of reasonable length', () => {
+    assert.equal(isValidExperienceId('exp-12345-abcdef'), true)
+    assert.equal(isValidExperienceId('my-custom-id'), true)
+    assert.equal(isValidExperienceId('exp-' + 'x'.repeat(MAX_EXPERIENCE_ID_LENGTH - 4)), true)
+  })
+
+  it('rejects oversized, empty, control-byte, and non-string ids', () => {
+    assert.equal(isValidExperienceId('x'.repeat(MAX_EXPERIENCE_ID_LENGTH + 1)), false)
+    assert.equal(isValidExperienceId(''), false)
+    assert.equal(isValidExperienceId('line\nbreak'), false)
+    assert.equal(isValidExperienceId('nul\u0000byte'), false)
+    assert.equal(isValidExperienceId(42), false)
+    assert.equal(isValidExperienceId(null), false)
+    assert.equal(isValidExperienceId(undefined), false)
+    assert.equal(isValidExperienceId({ id: 'x' }), false)
   })
 })

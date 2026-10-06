@@ -8,8 +8,13 @@ import { registerQualityGateTool } from '../src/tools/quality-gate.ts'
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+  presentResult: (args: unknown, result: { content?: unknown; isError?: boolean }) => { card?: string; title?: string } | undefined
 } {
-  let def: { execute: (a: unknown, e: unknown) => Promise<unknown>; output: { render: (a: unknown, v: unknown) => unknown } } | null = null
+  let def: {
+    execute: (a: unknown, e: unknown) => Promise<unknown>
+    output: { render: (a: unknown, v: unknown) => unknown }
+    presentResult?: (a: unknown, r: { content?: unknown; isError?: boolean }) => unknown
+  } | null = null
   registerQualityGateTool({
     tools: { register: (d: never) => { def = d as typeof def } },
   } as never)
@@ -18,6 +23,7 @@ function captureTool(): {
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
+    presentResult: (args, result) => def!.presentResult?.(args, result) as { card?: string; title?: string } | undefined,
   }
 }
 
@@ -209,6 +215,165 @@ describe('iterate_quality_gate', () => {
       const result = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
       assert.equal(result.ok, true)
       assert.equal(result.operation, 'clear')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('compute without dimensions is refused and persists nothing', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // Missing `dimensions`: findings cannot be gated against an empty list —
+      // the old path computed overallScore 0 and PERSISTED a fabricated FAIL.
+      const missing = (await tool.execute({
+        operation: 'compute',
+        path: dir,
+        findings: [{ dimension: 'correctness', severity: 'high', file: 'a.ts' }],
+      })) as Record<string, unknown>
+      assert.equal(missing.ok, false)
+      assert.equal(missing.operation, 'compute')
+      assert.equal(missing.snapshot, undefined)
+      assert.match(missing.error as string, /dimensions is required/)
+      assert.equal(existsSync(join(dir, '.iterate', 'quality-gate.json')), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('compute with an empty dimensions array is refused even when findings exist', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const empty = (await tool.execute({
+        operation: 'compute',
+        path: dir,
+        dimensions: [],
+        findings: [{ dimension: 'correctness', severity: 'critical', file: 'a.ts' }],
+      })) as Record<string, unknown>
+      assert.equal(empty.ok, false)
+      assert.equal(empty.snapshot, undefined)
+      assert.match(empty.error as string, /dimensions is required/)
+      assert.equal(existsSync(join(dir, '.iterate', 'quality-gate.json')), false)
+      // A later read still falls back to the untouched pending state.
+      const read = (await tool.execute({ operation: 'read', path: dir })) as Record<string, unknown>
+      assert.equal((read.snapshot as { overallStatus: string }).overallStatus, 'pending')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('compute warns about findings in ungated dimensions without changing the score', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const result = (await tool.execute({
+        operation: 'compute',
+        path: dir,
+        dimensions: ['correctness'],
+        findings: [
+          { dimension: 'correctness', severity: 'high', file: 'a.ts' }, // gated: -15
+          { dimension: 'docs', severity: 'medium', file: 'b.md' }, // NOT gated → warning
+          { dimension: 'docs', severity: 'low', file: 'c.md' }, // NOT gated → warning
+        ],
+      })) as Record<string, unknown>
+      assert.equal(result.ok, true)
+
+      const warnings = result.warnings as string[]
+      assert.equal(warnings.length, 1)
+      assert.match(warnings[0]!, /"docs"/)
+      assert.match(warnings[0]!, /2 findings/)
+      assert.match(warnings[0]!, /not in the gated dimensions/)
+
+      // Scoring is unchanged: only the gated dimension is scored (100-15=85),
+      // the two docs findings contribute nothing to it.
+      const snapshot = result.snapshot as {
+        overallScore: number
+        totalFindings: number
+        dimensions: Array<{ dimension: string; score: number; findingsCount: number }>
+      }
+      assert.equal(snapshot.dimensions.length, 1)
+      assert.equal(snapshot.dimensions[0]!.findingsCount, 1)
+      assert.equal(snapshot.overallScore, 85)
+      assert.equal(snapshot.totalFindings, 3)
+
+      // The renderer surfaces the warnings alongside the certificate.
+      const blocks = tool.render({ operation: 'compute' }, result)
+      assert.match(blocks[0]!.text, /Warnings:/)
+      assert.match(blocks[0]!.text, /"docs"/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('compute reports no warnings when every finding is in a gated dimension', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const result = (await tool.execute({
+        operation: 'compute',
+        path: dir,
+        dimensions: ['correctness', 'security'],
+        findings: [{ dimension: 'security', severity: 'low', file: 'a.ts' }],
+      })) as Record<string, unknown>
+      assert.equal(result.ok, true)
+      assert.deepEqual(result.warnings, [])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('renders a critical-holding dimension as FAILED, agreeing with the overall gate status', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const result = (await tool.execute({
+        operation: 'compute',
+        path: dir,
+        dimensions: ['correctness'],
+        // score would be 100-30 = 70 (a 'warn' band), but the critical finding
+        // fails the whole gate — the dimension row must not say WARN while the
+        // header says FAIL.
+        findings: [{ dimension: 'correctness', severity: 'critical', file: 'a.ts', line: 10 }],
+      })) as Record<string, unknown>
+      assert.equal(result.ok, true)
+
+      const snapshot = result.snapshot as {
+        overallStatus: string
+        dimensions: Array<{ status: string; score: number }>
+      }
+      assert.equal(snapshot.overallStatus, 'fail')
+      assert.equal(snapshot.dimensions[0]!.status, 'fail')
+      assert.equal(snapshot.dimensions[0]!.score, 70)
+
+      const text = tool.render({ operation: 'compute' }, result)[0]!.text
+      assert.match(text, /Quality Gate: FAIL/)
+      assert.match(text, /✗ correctness: score=70/)
+      assert.doesNotMatch(text, /! correctness/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('presentResult titles a completed gate query with the rendered headline (#12)', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const args = {
+        operation: 'compute',
+        path: dir,
+        dimensions: ['correctness'],
+        validationResults: [{ command: 'npm test', exitCode: 0 }],
+      }
+      const result = await tool.execute(args)
+      const content = tool.render(args, result)
+      const card = tool.presentResult(args, { content, isError: false })
+      assert.equal(card?.card, 'generic')
+      assert.match(card!.title!, /^✓ Quality Gate: PASS/, `headline must lead the card: ${card!.title}`)
+      // Failure results and content without text decline the card, so the UI
+      // falls back to the default presentation instead of a wrong headline.
+      assert.equal(tool.presentResult(args, { content, isError: true }), undefined)
+      assert.equal(tool.presentResult(args, { content: [], isError: false }), undefined)
     } finally {
       cleanup()
     }

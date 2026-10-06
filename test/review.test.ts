@@ -5,11 +5,14 @@ import {
   attachmentClause,
   buildReviewReport,
   buildReviewPlan,
+  clampMaxReviewRounds,
   computeConvergence,
   dedupeFindings,
   filterKnownIntentional,
   findingKey,
   findingsSchema,
+  isValidRoundNumber,
+  MAX_REVIEW_ROUNDS_CAP,
   normalizeSummary,
   REQUIRED_FINDING_FIELDS,
   reviewerTaskPrompt,
@@ -805,3 +808,285 @@ describe('schema constants mirror findingsSchema', () => {
       assert.equal(attachmentClause(attrs), '')
     })
   })
+
+// ─── Round-cap clamping, folding and convergence-input hardening ────────────
+
+describe('round cap clamping', () => {
+  it('clampMaxReviewRounds bounds the cap and survives garbage input', () => {
+    assert.equal(clampMaxReviewRounds(3), 3)
+    assert.equal(clampMaxReviewRounds(1), 1)
+    assert.equal(clampMaxReviewRounds(0), 1)
+    assert.equal(clampMaxReviewRounds(-7), 1)
+    assert.equal(clampMaxReviewRounds(1e15), MAX_REVIEW_ROUNDS_CAP)
+    assert.equal(clampMaxReviewRounds(150), MAX_REVIEW_ROUNDS_CAP)
+    assert.equal(clampMaxReviewRounds(2.7), 2)
+    // Non-finite used to survive `Math.max(1, NaN)` and kill `new Array(NaN)`.
+    assert.equal(clampMaxReviewRounds(Number.NaN), 1)
+    assert.equal(clampMaxReviewRounds(Number.POSITIVE_INFINITY), 1)
+    assert.equal(clampMaxReviewRounds('7' as unknown as number), 1)
+    assert.equal(clampMaxReviewRounds(undefined), 1)
+    assert.equal(clampMaxReviewRounds(null as unknown as number), 1)
+  })
+
+  it('the cap stays aligned with config-loader MAX_MAX_ROUNDS', async () => {
+    // review.ts deliberately does not import the config layer (it is the pure
+    // core); this test is the drift guard between the two constants.
+    const { MAX_MAX_ROUNDS } = await import('../src/config-loader.ts')
+    assert.equal(MAX_REVIEW_ROUNDS_CAP, MAX_MAX_ROUNDS)
+  })
+
+  it('aggregateRounds never allocates past the clamp for an absurd cap', () => {
+    const rounds = [{ round: 1, findings: [f({ summary: 'only issue' })] }]
+    for (const cap of [Number.NaN, 1e15, Infinity, -3, 0, 'nope' as unknown as number]) {
+      const { findingsByRound } = aggregateRounds(rounds, cap)
+      assert.ok(
+        findingsByRound.length <= MAX_REVIEW_ROUNDS_CAP * 2,
+        `cap ${String(cap)} produced ${findingsByRound.length} slots`,
+      )
+      assert.equal(findingsByRound.length, 1)
+      assert.equal(findingsByRound[0], 1)
+    }
+  })
+
+  it('aggregateRounds never allocates past the clamp for an absurd round number', () => {
+    const { findingsByRound } = aggregateRounds(
+      [{ round: 1, findings: [f({ summary: 'a' })] }, { round: 5_000_000, findings: [f({ summary: 'b' })] }],
+      3,
+    )
+    assert.ok(findingsByRound.length <= MAX_REVIEW_ROUNDS_CAP * 2)
+    // The over-cap round is FOLDED into the last slot, not dropped.
+    assert.equal(findingsByRound.length, 6)
+    assert.equal(findingsByRound[5], 1)
+    assert.equal(findingsByRound.reduce((a, b) => a + b, 0), 2)
+  })
+
+  it('buildReviewPlan advertises the same clamped cap the aggregate honors', () => {
+    const plan = buildReviewPlan({
+      config: baseConfig,
+      mode: 'dry-run',
+      maxReviewRounds: 1e15,
+    })
+    assert.equal(plan.maxReviewRounds, MAX_REVIEW_ROUNDS_CAP)
+  })
+})
+
+describe('over-cap round folding invariants', () => {
+  const overCapRounds = (cap: number) =>
+    buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: cap,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'first issue' })] },
+        { round: 50, findings: [f({ summary: 'late issue' })] },
+      ],
+    })
+
+  it('findingsByRound sums to totalFindings after folding (CONVERGENCE_SUM)', () => {
+    const report = overCapRounds(3)
+    const sum = report.convergence.findingsByRound.reduce((a, b) => a + b, 0)
+    assert.equal(sum, report.findings.length)
+    assert.equal(sum, report.summary.totalFindings)
+    assert.equal(report.convergence.findingsByRound.length, 6)
+  })
+
+  it('reads the folded last slot, so "last round > cap" is not read as 0 new', () => {
+    const report = overCapRounds(3)
+    assert.equal(report.convergence.converged, false, 'round 50 reported a new finding')
+    assert.equal(report.convergence.stoppedReason, 'max_rounds_reached')
+    // The mirrored case: the over-cap round reports nothing new → converged.
+    const converged = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'same issue' })] },
+        { round: 50, findings: [f({ summary: 'SAME ISSUE' })] },
+      ],
+    })
+    assert.deepEqual(converged.convergence.findingsByRound, [1, 0, 0, 0, 0, 0])
+    assert.equal(converged.convergence.converged, true)
+  })
+
+  it('computeConvergence reads the folded slot identically', () => {
+    const c = computeConvergence(
+      [
+        { round: 1, findings: [f({ summary: 'a' })] },
+        { round: 50, findings: [f({ summary: 'b' })] },
+      ],
+      3,
+    )
+    assert.equal(c.converged, false)
+    assert.equal(c.findingsByRound.reduce((a, b) => a + b, 0), 2)
+  })
+})
+
+describe('malformed convergence inputs', () => {
+  it('a fractional round number can never flip converged to true', () => {
+    // Math.min(1.5, len) - 1 = 0.5 → findingsByRound[0.5] is undefined → 0 new
+    // → a round that DID report findings was read as converged.
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [
+        { round: 1, findings: [f({ summary: 'real issue' })] },
+        { round: 1.5, findings: [f({ summary: 'fractional issue' })] },
+      ],
+    })
+    assert.equal(report.convergence.converged, false)
+    assert.equal(report.convergence.stoppedReason, 'max_rounds_reached')
+    // The fractional round is simply "not a round": it contributes no slot.
+    assert.deepEqual(report.convergence.findingsByRound, [1])
+  })
+
+  it('a report whose only round number is malformed never claims convergence', () => {
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [{ round: 1.5, findings: [f({ summary: 'uninterpretable' })] }],
+    })
+    assert.equal(report.convergence.converged, false)
+    assert.deepEqual(report.convergence.findingsByRound, [])
+    assert.equal(report.summary.totalFindings, 0)
+
+    const c = computeConvergence([{ round: 1.5, findings: [f({ summary: 'x' })] }], 3)
+    assert.equal(c.converged, false)
+    assert.equal(c.stoppedReason, 'max_rounds_reached')
+  })
+
+  it('ignores null / array findings instead of crashing the aggregation', () => {
+    const rounds = [
+      {
+        round: 1,
+        findings: [
+          f({ summary: 'real issue' }),
+          null as unknown as ReviewFinding,
+          ['array'] as unknown as ReviewFinding,
+          'junk' as unknown as ReviewFinding,
+        ],
+      },
+    ]
+    const { findings, findingsByRound } = aggregateRounds(rounds, 3)
+    assert.equal(findings.length, 1)
+    assert.equal(findingsByRound.reduce((a, b) => a + b, 0), findings.length)
+
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds,
+    })
+    assert.equal(report.summary.totalFindings, 1)
+    assert.equal(report.convergence.converged, false)
+    // Round 1 is the LAST round and it reported 1 → not converged.
+    assert.deepEqual(report.convergence.findingsByRound, [1])
+  })
+
+  it('tolerates a non-array rounds list without throwing', () => {
+    const { findings, findingsByRound } = aggregateRounds(
+      undefined as unknown as ReviewRound[],
+      3,
+    )
+    assert.deepEqual(findings, [])
+    assert.deepEqual(findingsByRound, [])
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: undefined as unknown as ReviewRound[],
+    })
+    assert.equal(report.summary.totalFindings, 0)
+    assert.equal(report.convergence.converged, false)
+  })
+
+  it('does not crash on a non-string summary / wrong-typed fields (schema off)', () => {
+    const malformed = {
+      dimension: 7,
+      file: 42,
+      severity: 'low',
+      summary: 12345,
+      failure_scenario: null,
+      suggested_fix: undefined,
+      is_atomic: true,
+      line: 'not-a-line',
+    } as unknown as ReviewFinding
+    assert.equal(typeof findingKey(malformed), 'string')
+    assert.equal(dedupeFindings([malformed, malformed]).length, 1)
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['correctness'],
+      maxReviewRounds: 3,
+      rounds: [{ round: 1, findings: [malformed] }],
+    })
+    assert.equal(report.summary.totalFindings, 1)
+  })
+
+  it('filterKnownIntentional survives a non-array known list and null findings', () => {
+    const input = [f({ file: 'a.ts', line: 1, dimension: 'security' }), null as unknown as ReviewFinding]
+    // A non-array truthy `known` behaves like "no entries".
+    assert.equal(filterKnownIntentional(input, 'nope' as unknown as never), input)
+    // Null elements are dropped rather than crashing on `f.file`.
+    const known = [{ file: 'a.ts', line: 1, dimension: 'security', reason: 'by design' }]
+    assert.deepEqual(filterKnownIntentional(input, known), [])
+  })
+})
+
+describe('summary dimension counting', () => {
+  it('counts __proto__ / constructor / prototype dimensions as plain keys', () => {
+    // The old `{}` map resolved those names against Object.prototype: the
+    // __proto__ setter discarded the primitive counter and `constructor`
+    // concatenated the Object function, so byDimension under-counted and the
+    // meta-review's DIMENSION_SUM check false-positived on a clean report.
+    const report = buildReviewReport({
+      mode: 'dry-run',
+      goal: 'g',
+      dimensions: ['__proto__', 'constructor', 'prototype', 'correctness'],
+      maxReviewRounds: 3,
+      rounds: [
+        {
+          round: 1,
+          findings: [
+            f({ dimension: '__proto__', summary: 'proto dim' }),
+            f({ dimension: 'constructor', summary: 'ctor dim' }),
+            f({ dimension: 'prototype', summary: 'prototype dim' }),
+            f({ dimension: 'correctness', summary: 'normal dim' }),
+          ],
+        },
+      ],
+    })
+    assert.equal(report.summary.byDimension['__proto__'], 1)
+    assert.equal(report.summary.byDimension['constructor'], 1)
+    assert.equal(report.summary.byDimension['prototype'], 1)
+    assert.equal(report.summary.byDimension['correctness'], 1)
+    const sum = Object.values(report.summary.byDimension).reduce((a, b) => a + b, 0)
+    assert.equal(sum, report.summary.totalFindings)
+    // Serializes like any other map (a null prototype is JSON-transparent).
+    const roundTripped = JSON.parse(JSON.stringify(report.summary.byDimension)) as Record<string, number>
+    assert.deepEqual(Object.keys(roundTripped).sort(), [
+      '__proto__',
+      'constructor',
+      'correctness',
+      'prototype',
+    ])
+    assert.equal(roundTripped['__proto__'], 1)
+    assert.equal(roundTripped['constructor'], 1)
+  })
+})
+
+describe('isValidRoundNumber', () => {
+  it('accepts only positive integers', () => {
+    for (const good of [1, 2, 100, 1000, 12345]) assert.equal(isValidRoundNumber(good), true)
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '1', null, undefined, {}]) {
+      assert.equal(isValidRoundNumber(bad), false, `${String(bad)} must be rejected`)
+    }
+  })
+})

@@ -54,9 +54,46 @@ export function sortFindings(findings: ReviewFinding[]): ReviewFinding[] {
   })
 }
 
+/**
+ * Hard ceiling on the round cap the aggregation math will honor.
+ *
+ * Mirrors `MAX_MAX_ROUNDS` in `config-loader.ts` (the config bomb guard) —
+ * `test/review.test.ts` asserts the two constants stay in sync. The tool
+ * boundary only clamps the LOWER bound of `maxReviewRounds`, so an absurd
+ * caller value (1e15) would otherwise drive the `findingsByRound` allocation
+ * bound (`roundCap * 2`) straight into OOM territory.
+ */
+export const MAX_REVIEW_ROUNDS_CAP = 100
+
+/**
+ * Clamp an untrusted round cap to `[1, MAX_REVIEW_ROUNDS_CAP]`.
+ *
+ * Non-finite / non-numeric input (`NaN`, `Infinity`, a string) collapses to
+ * 1 — the smallest sane cap. Without this, `Math.max(1, NaN)` stayed `NaN`
+ * and `new Array(NaN)` threw `RangeError` out of `aggregateRounds`.
+ */
+export function clampMaxReviewRounds(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 1
+  return Math.min(MAX_REVIEW_ROUNDS_CAP, Math.max(1, Math.floor(value)))
+}
+
+/**
+ * True when `n` is a round number the deterministic core accepts: a positive
+ * integer. Shared by `aggregateRounds` / `computeConvergence` /
+ * `buildReviewReport` (and re-read by the meta-review audit) so every reader
+ * of "the last round" agrees on which round numbers count — a fractional
+ * (`1.5`) or non-finite round is simply "not a round", never a convergence
+ * input that could be mis-indexed into `findingsByRound`.
+ */
+export function isValidRoundNumber(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1
+}
+
 /** Normalize a summary so near-identical duplicates collapse to one key. */
 export function normalizeSummary(summary: string): string {
-  return summary
+  // Coerce: `summary` is model-authored JSON when schema validation is off,
+  // so a numeric summary must not crash `.trim()` inside the dedupe key.
+  return String(summary ?? '')
     .trim()
     .toLowerCase()
     .replace(/[\s\n\t]+/g, ' ')
@@ -69,8 +106,14 @@ export function normalizeSummary(summary: string): string {
  * neither side anchors one, i.e. whole-file findings).
  */
 export function findingKey(f: ReviewFinding): string {
-  const line = typeof f.line === 'number' && f.line > 0 ? f.line : 0
-  return `${f.file}|${f.dimension}|${line}|${normalizeSummary(f.summary)}`
+  // Defensive reads: with `output_schema_validation: false` a finding may
+  // carry wrong-typed fields (and `f` itself may be a null list element), and
+  // this key feeds the dedupe Set on EVERY round — it must never throw.
+  const src = (f ?? {}) as Partial<ReviewFinding>
+  const line = typeof src.line === 'number' && src.line > 0 ? src.line : 0
+  return `${String(src.file ?? '')}|${String(src.dimension ?? '')}|${line}|${normalizeSummary(
+    src.summary as string,
+  )}`
 }
 
 /**
@@ -81,6 +124,9 @@ export function dedupeFindings(findings: ReviewFinding[]): ReviewFinding[] {
   const seen = new Set<string>()
   const out: ReviewFinding[] = []
   for (const f of findings) {
+    // A null / array entry (hostile or schema-validation-off JSON) must never
+    // reach `summarize`, which reads `f.severity` unguarded.
+    if (!f || typeof f !== 'object' || Array.isArray(f)) continue
     const key = findingKey(f)
     if (seen.has(key)) continue
     seen.add(key)
@@ -99,9 +145,16 @@ export function filterKnownIntentional(
   findings: ReviewFinding[],
   known: KnownIntentional[] | undefined,
 ): ReviewFinding[] {
-  if (!known || known.length === 0) return findings
+  // `known` is config/arg JSON: a non-array truthy value must behave like
+  // "no entries", never reach `known.some` and throw.
+  if (!Array.isArray(known) || known.length === 0) return findings
   return findings.filter((f) => {
+    // A null / non-object finding has no file/dimension to match on; drop it
+    // here so it can never crash the comparator (aggregateRounds drops it too,
+    // so the report's counts stay consistent either way).
+    if (!f || typeof f !== 'object' || Array.isArray(f)) return false
     const matched = known.some((k) => {
+      if (!k || typeof k !== 'object') return false
       const sameFile = k.file === f.file
       const sameDim = k.dimension === f.dimension
       if (!sameFile || !sameDim) return false
@@ -145,13 +198,21 @@ export function aggregateRounds(
   // 1e9) would otherwise allocate an array of that size below (OOM). Round
   // numbers above the configured cap are clamped to the cap.
   let maxRound = 0
-  const roundCap = Math.max(1, maxReviewRounds)
-  for (const round of rounds) {
+  // Upper-bounded too: `Math.max(1, NaN)` used to stay NaN and blow up in
+  // `new Array(effectiveMax)`, and an unbounded cap scaled the allocation
+  // bound to whatever the caller asked for.
+  const roundCap = clampMaxReviewRounds(maxReviewRounds)
+  for (const round of Array.isArray(rounds) ? rounds : []) {
     if (!round || typeof round !== 'object') continue
-    if (typeof round.round !== 'number' || !Number.isInteger(round.round) || round.round < 1) continue
+    if (!isValidRoundNumber(round.round)) continue
     const findings = Array.isArray(round.findings) ? round.findings : []
     if (round.round > maxRound) maxRound = round.round
     for (const f of findings) {
+      // Null / non-object elements (schema validation off) would crash
+      // `findingKey`; dropping them here keeps `findingsByRound` summing to
+      // exactly the returned findings list (the meta-review's CONVERGENCE_SUM
+      // check reads that equality).
+      if (!f || typeof f !== 'object' || Array.isArray(f)) continue
       const key = findingKey(f)
       if (seen.has(key)) continue
       seen.add(key)
@@ -185,8 +246,9 @@ export function computeConvergence(
   rounds: ReviewRound[],
   maxReviewRounds: number,
 ): ReviewReport['convergence'] {
-  const { findingsByRound } = aggregateRounds(rounds, maxReviewRounds)
-  const totalRounds = rounds.length
+  const list = Array.isArray(rounds) ? rounds : []
+  const { findingsByRound } = aggregateRounds(list, maxReviewRounds)
+  const totalRounds = list.length
   // `findingsByRound` is indexed by the actual round number (round r → index
   // r-1), sized to the highest present round (clamped). Convergence must read
   // the HIGHEST PRESENT round's count — not the last array element (rounds
@@ -194,13 +256,15 @@ export function computeConvergence(
   // 1..N). The count index is bounded by the array length aggregateRounds
   // actually allocated.
   let lastRound = 0
-  for (const round of rounds) {
-    if (!round || typeof round.round !== 'number' || !Number.isInteger(round.round) || round.round < 1) continue
+  for (const round of list) {
+    if (!isValidRoundNumber(round?.round)) continue
     if (round.round > lastRound) lastRound = round.round
   }
   const idx = Math.min(lastRound, findingsByRound.length) - 1
   const lastRoundCount = idx >= 0 ? (findingsByRound[idx] ?? 0) : 0
-  const converged = totalRounds > 0 && lastRoundCount === 0
+  // `lastRound === 0` means NO round carried an interpretable number: claiming
+  // `converged` there would bless a report the core could not actually read.
+  const converged = totalRounds > 0 && lastRound > 0 && lastRoundCount === 0
   return {
     totalRounds,
     findingsByRound,
@@ -222,7 +286,15 @@ function summarize(findings: ReviewFinding[]): ReviewReport['summary'] {
     high: 0,
     medium: 0,
     low: 0,
-    byDimension: {},
+    // NULL-PROTOTYPE map: a model-authored `dimension` of `__proto__` or
+    // `constructor` would otherwise resolve against Object.prototype — the
+    // `__proto__` setter silently discards a primitive value and `constructor`
+    // string-concatenates the Object function — so the counter never
+    // accumulated and the meta-review's DIMENSION_SUM check false-positived.
+    // A null-prototype object has no inherited accessors, so every dimension
+    // (including those three names) is a plain own data property and
+    // JSON-serializes normally.
+    byDimension: Object.create(null) as Record<string, number>,
   }
   for (const f of findings) {
     if (f.severity === 'critical') summary.critical++
@@ -252,7 +324,8 @@ export function buildReviewReport(input: {
   fixedCount?: number
 }): ReviewReport {
   // 1. Filter known-intentional per round (before cross-round dedupe).
-  const filteredRounds = input.rounds
+  const inputRounds = Array.isArray(input.rounds) ? input.rounds : []
+  const filteredRounds = inputRounds
     .map((r) => ({
       round: typeof r?.round === 'number' ? r.round : 0,
       findings: filterKnownIntentional(
@@ -284,7 +357,11 @@ export function buildReviewReport(input: {
   //    non-contiguous round sets would otherwise read the wrong count).
   let lastRound = 0
   for (const r of filteredRounds) {
-    if (typeof r.round === 'number' && r.round > lastRound) lastRound = r.round
+    // Same validity rule as aggregateRounds: a fractional / NaN round is not
+    // a round, so it must never be used as an index into `findingsByRound`
+    // (Math.min(1.5, len) - 1 = 0.5 → reads `undefined` → counts as 0 new →
+    // a round that really did report findings would be read as "converged").
+    if (isValidRoundNumber(r.round) && r.round > lastRound) lastRound = r.round
   }
   // `lastRound` can exceed the array length when over-cap rounds were FOLDED
   // into the last slot (see aggregateRounds). Read the same clamped index
@@ -293,7 +370,7 @@ export function buildReviewReport(input: {
   const idx = Math.min(lastRound, findingsByRound.length) - 1
   const lastRoundCount =
     lastRound > 0 && idx >= 0 ? (findingsByRound[idx] ?? 0) : 0
-  const converged = filteredRounds.length > 0 && lastRoundCount === 0
+  const converged = filteredRounds.length > 0 && lastRound > 0 && lastRoundCount === 0
 
   // Attach the normal-mode fix count to the summary (dry-run leaves it absent).
   const computed = summarize(sorted)
@@ -858,7 +935,9 @@ export function buildReviewPlan(input: {
     goal,
     scope,
     dimensions: dimensionTasks,
-    maxReviewRounds: input.maxReviewRounds,
+    // Clamped with the SAME rule aggregateRounds honors, so the cap this plan
+    // advertises is never a number the aggregation math would silently clamp.
+    maxReviewRounds: clampMaxReviewRounds(input.maxReviewRounds),
     knownIntentional: input.knownIntentional ?? [],
     changedFiles: effectiveChangedOnly ? changedFiles : [],
     fallbackToFull,

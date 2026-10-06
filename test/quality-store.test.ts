@@ -111,6 +111,39 @@ describe('computeQualityGate', () => {
     assert.match(poorScore.failReason as string, /below threshold/)
   })
 
+  it('marks a dimension holding a critical finding as fail (never warn), matching the overall gate', () => {
+    const snapshot = computeQualityGate({
+      dimensions: ['x'],
+      findings: [{ dimension: 'x', severity: 'critical', file: 'a.ts' }],
+    })
+    const dim = snapshot.dimensions[0]!
+    // Arithmetic alone: 100 - 30 = 70 → 'warn'. That contradicted the overall
+    // status (hasCritical → 'fail'), so a reader saw a WARN dimension on a
+    // FAILED certificate. A critical finding is a hard fail for its dimension.
+    assert.equal(dim.score, 70)
+    assert.equal(dim.status, 'fail')
+    assert.equal(snapshot.overallStatus, 'fail')
+
+    // Two criticals (score 40) fail on score too — status must not regress.
+    const two = computeQualityGate({
+      dimensions: ['x'],
+      findings: [
+        { dimension: 'x', severity: 'critical', file: 'a.ts' },
+        { dimension: 'x', severity: 'critical', file: 'b.ts' },
+      ],
+    })
+    assert.equal(two.dimensions[0]!.score, 40)
+    assert.equal(two.dimensions[0]!.status, 'fail')
+
+    // Non-critical dimensions keep the score bands: one high = 85 → pass.
+    const highOnly = computeQualityGate({
+      dimensions: ['x'],
+      findings: [{ dimension: 'x', severity: 'high', file: 'a.ts' }],
+    })
+    assert.equal(highOnly.dimensions[0]!.status, 'pass')
+    assert.equal(highOnly.overallStatus, 'pass')
+  })
+
   it('reports pending (not fail) for an empty review with nothing to gate', () => {
     // No dimensions, no findings, no validation results — there is nothing to
     // gate, so a fabricated FAIL("Overall score 0 below threshold") is wrong.

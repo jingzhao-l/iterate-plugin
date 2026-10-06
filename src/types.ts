@@ -41,7 +41,8 @@ export interface IterateConfig {
     capture?: boolean
     /**
      * Approval policy for destructive iterate tools (iterate_fix /
-     * iterate_rollback / iterate_prune with dryRun:false).
+     * iterate_rollback / iterate_prune with dryRun:false /
+     * iterate_config with operation:"write").
      * - 'ask': prompt the human through the dsh approval service before running.
      * - 'deny': refuse the call outright (fail-closed).
      * - 'allow': always run (debug/trusted). Default 'ask'.
@@ -328,6 +329,28 @@ export interface TranscriptCheckpoint {
 }
 
 /**
+ * One validation command outcome captured for the observatory.
+ *
+ * Client/server contract (agreed with the client implementation — do not
+ * deviate): every row is `{round, command, exitCode, allowed}` with an
+ * optional `rejectReason`. `exitCode` is `null` when the run never produced
+ * an exit code; `allowed:false` marks a command that is NOT in
+ * `validation.commands` (a config gap, not a code failure).
+ */
+export interface TranscriptValidation {
+  /** 1-based round that ran the command. */
+  round: number
+  /** The exact command string passed to `iterate_validate`. */
+  command: string
+  /** Process exit code, or null when unknown/never started. */
+  exitCode: number | null
+  /** False when the command was rejected by the allow-list (`rejectReason`). */
+  allowed: boolean
+  /** Why the command was rejected (present only when `allowed` is false). */
+  rejectReason?: string
+}
+
+/**
  * Serializable runtime-observatory manifest the client renders. Every field is
  * `JsonValue`-safe; the builder caps growth so a long run cannot blow up memory.
  */
@@ -348,6 +371,11 @@ export interface TranscriptManifest {
   checkpoint: TranscriptCheckpoint | null
   timeline: TranscriptEntry[]
   nudge: TranscriptNudge | null
+  /**
+   * Per-round validation outcomes (F6/F8 console). Absent on manifests
+   * captured before the field existed; always an array on new captures.
+   */
+  validations?: TranscriptValidation[]
   approval: {
     active: boolean
     policy: 'ask' | 'deny' | 'allow'

@@ -3,7 +3,8 @@
  *
  * Wires the {@link decideApproval} policy gate to dsh's `tools/pre-execute`
  * waterfall. This is the AUTHORITATIVE approval seam for destructive iterate
- * tools (`iterate_fix` / `iterate_rollback` / `iterate_prune` with dryRun:false):
+ * tools (`iterate_fix` / `iterate_rollback` / `iterate_prune` with dryRun:false
+ * / `iterate_config` with operation:"write"):
  *
  *   - `allow` policy      → the call runs.
  *   - `deny`  policy      → the call is refused (fail-closed), surfaced as an
@@ -13,11 +14,19 @@
  *                           plus the human-readable reason) so durable
  *                           projections can route it distinctly from a normal
  *                           tool failure.
- *   - `ask`   policy      → return `{ kind: 'ask', reason }`; dsh's own
- *                           scheduler routes it through the `approval` service
- *                           (see `@deepseek-ai/dsh-user-approval`), which
- *                           prompts the human and audits an approve/deny pair
- *                           on the session.
+ *   - `ask`   policy      → return `{ kind: 'ask', reason, displayReason }`;
+ *                           dsh's own scheduler routes it through the
+ *                           `approval` service (see
+ *                           `@deepseek-ai/dsh-user-approval`), which prompts
+ *                           the human and audits an approve/deny pair on the
+ *                           session. `reason` is the audited English summary;
+ *                           `displayReason` (dsh 0.2.x) is the localized
+ *                           prompt text. LANGUAGE RULE: human-facing text
+ *                           follows the project `language` (zh|en); every
+ *                           structured/durable field (deny reason,
+ *                           `info.reason`, decision-log entries, console
+ *                           logs) stays English so machine matchers never
+ *                           depend on a locale.
  *   - canceled            → if the caller aborted the invocation before
  *                           dispatch, return `{ kind: 'cancel' }` (the
  *                           canonical 0.1.6-alpha.1 cancellation result) so a
@@ -31,7 +40,15 @@
  *
  * Safety properties:
  *   - Read-only tools and non-iterate tools are always allowed (the gate only
- *     inspects the three destructive iterate toolnames).
+ *     inspects the four gated iterate toolnames, and of those only prune
+ *     `dryRun:false` and `iterate_config` `operation:"write"` — a config read
+ *     or a dry-run prune short-circuits to allow inside the policy gate).
+ *   - The approval policy is read from the SESSION workspace whenever a
+ *     session cwd is known — the model-controlled `path` argument can never
+ *     choose where the human's policy comes from (it is only consulted when
+ *     there is no session cwd at all). Otherwise `path:` could point at an
+ *     `approval: allow` directory to self-grant, or dodge a `deny` in the
+ *     workspace.
  *   - If the project root / observatory config cannot be resolved, the policy
  *     degrades to `ask` (fail-safe: destructive writes always require consent).
  */
@@ -77,8 +94,14 @@ export function gateDecision(exec) {
     if (signal && typeof signal.aborted === 'boolean' && signal.aborted) {
         return { kind: 'cancel' };
     }
-    // Resolve the project root (use the call's own `path` arg, else the agent's
-    // session cwd) to read the effective observatory policy.
+    // Resolve the project root whose observatory policy governs this call.
+    // SECURITY: the policy source must NOT be model-controlled. `path` is a
+    // model argument, so reading the policy from the path-resolved root let a
+    // call point `path:` at a directory with `approval: allow` (self-grant) or
+    // dodge a human's `deny` in the session workspace. When the session cwd is
+    // known, the SESSION workspace's config is authoritative and `path` is
+    // ignored; the path-resolved root is only the fallback when there is no
+    // session cwd at all (headless/tests). The `ask` default stays fail-closed.
     let argPath;
     let sessionCwd;
     try {
@@ -93,8 +116,15 @@ export function gateDecision(exec) {
     catch {
         // hostile/proxied exec — fall through with both undefined (defaults to ask)
     }
-    const resolved = resolveProjectRoot(argPath, sessionCwd);
+    // Passing sessionCwd as BOTH the input and the anchor makes the root the
+    // session cwd itself (no server-cwd fallback can sneak in), anchored there.
+    const resolved = sessionCwd
+        ? resolveProjectRoot(sessionCwd, sessionCwd)
+        : resolveProjectRoot(argPath, sessionCwd);
     let policy = 'ask';
+    // Project language for the HUMAN-FACING ask prompt only (see the header's
+    // language rule: structured deny/audit text stays English).
+    let language = 'en';
     if (resolved.ok) {
         const { config } = loadEffectiveConfig(resolved.root);
         const p = config.observatory?.approval;
@@ -103,8 +133,10 @@ export function gateDecision(exec) {
         else if (p === 'allow')
             policy = 'allow';
         // anything else (including a corrupt/missing `ask`) → 'ask'
+        if (config.language === 'zh')
+            language = 'zh';
     }
-    const decision = decideApproval(exec, policy);
+    const decision = decideApproval(exec, policy, language);
     if (decision.kind === 'deny') {
         return {
             kind: 'deny',
@@ -113,12 +145,19 @@ export function gateDecision(exec) {
                 ...DENY_INFO,
                 // ToolErrorInfo.reason (0.1.6-alpha.1): raw user-facing detail kept in
                 // durable state; the model-facing text still only sees `reason` above.
+                // Deliberately the ENGLISH structured reason, never the localized
+                // prompt — durable projections must match on a stable string.
                 reason: decision.reason,
             },
         };
     }
-    if (decision.kind === 'ask')
-        return { kind: 'ask', reason: decision.reason };
+    // dsh 0.2.x: `displayReason` is the localized prompt text (en + the
+    // configured locale); `reason` stays the audited English summary. Both are
+    // forwarded so the approval UI can show the full localized explanation
+    // (including the WARNING line for gate-disabling config writes).
+    if (decision.kind === 'ask') {
+        return { kind: 'ask', reason: decision.reason, displayReason: decision.displayReason };
+    }
     return { kind: 'allow' };
 }
 /**
@@ -139,6 +178,9 @@ export function registerSessionHooks(ctx) {
             return Promise.resolve({
                 kind: 'ask',
                 reason: 'iterate approval gate unavailable — require consent',
+                // Fail-safe path: no config was read, so the localized prompt falls
+                // back to English (displayReason requires at least an `en` entry).
+                displayReason: { en: 'iterate approval gate unavailable — require consent' },
             });
         }
         if (decision.kind === 'ask') {

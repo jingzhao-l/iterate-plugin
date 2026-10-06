@@ -13,7 +13,7 @@
  * the actual subagent-driven meta-review critique; all deterministic math
  * lives here.
  */
-import { sortFindings } from "./review.js";
+import { isValidRoundNumber, sortFindings } from "./review.js";
 /**
  * Number of distinct consistency checks performed by `metaReviewReport`.
  * The check set is: COUNT_MATCH, SEVERITY_SUM, DIMENSION_SUM, DIMENSION_UNKNOWN,
@@ -26,6 +26,50 @@ export const META_REVIEW_CHECKS = 10;
  * remainder is folded into a "+N more" suffix.
  */
 export const COVERAGE_LIST_TRUNCATE = 10;
+/**
+ * Hard sanity ceiling on a reported round number.
+ *
+ * `rounds[].round` is model/JSON-authored and only needs to be a number to
+ * reach this audit. Round-gap detection enumerates `min..max` of the PRESENT
+ * round numbers, so an absurd value (rounds `{1, 1e15}` or a round of
+ * `Infinity`) used to turn a linear check into an effectively-infinite loop —
+ * a trivial CPU/memory denial of service (and one ROUND_GAP issue per missing
+ * round). Anything above this ceiling is rejected as an invalid round
+ * (ROUND_NUMBER) and excluded from gap enumeration instead of being walked.
+ * Generously above any real run: `config.max_rounds` is capped at 100.
+ */
+export const MAX_REVIEW_ROUND_NUMBER = 1000;
+/**
+ * Max individual ROUND_GAP issues emitted per audit. The remainder is folded
+ * into a single "+N more" issue so a wide-but-legal gap can never flood the
+ * issue list (each issue carries a detail string).
+ */
+export const MAX_ROUND_GAP_REPORTS = 50;
+/**
+ * Hard bound on the round-gap enumeration span. Below
+ * MAX_REVIEW_ROUND_NUMBER on purpose: even a legal range (e.g. round 1 plus
+ * round 1000) is too wide for per-number gap reporting to mean anything, so
+ * it collapses to ONE "range too wide" issue instead of ~1000 iterations and
+ * ~1000 issues. Together with the round-number ceiling this makes the
+ * enumeration O(MAX_ROUND_GAP_SPAN) no matter what reaches it.
+ */
+export const MAX_ROUND_GAP_SPAN = 500;
+/** Bounded, non-throwing list preview for issue detail strings. */
+function previewList(values, max = 20) {
+    const shown = values
+        .slice(0, max)
+        .map((v) => (typeof v === 'number' ? String(v) : typeof v === 'string' ? v : '[object]'))
+        .join(', ');
+    return values.length > max ? `${shown}, … (+${values.length - max} more)` : shown;
+}
+/** Bounded, non-throwing object preview (a hostile round may be circular). */
+function previewRound(r) {
+    if (r === null || typeof r !== 'object')
+        return String(r);
+    const roundNo = r.round;
+    const findings = r.findings;
+    return `{round: ${String(roundNo)}, findings: ${Array.isArray(findings) ? `array(${findings.length})` : typeof findings}}`;
+}
 /**
  * Audit a ReviewReport for internal consistency.
  *
@@ -79,7 +123,9 @@ export function metaReviewReport(report) {
     const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
     for (const f of findings) {
         const s = f?.severity;
-        if (s && s in sevCounts)
+        // hasOwn, not `in`: `'__proto__' in sevCounts` is true via inheritance,
+        // and an out-of-spec severity must simply not be bucketed.
+        if (s && Object.hasOwn(sevCounts, s))
             sevCounts[s]++;
     }
     const bucketSum = sevCounts.critical + sevCounts.high + sevCounts.medium + sevCounts.low;
@@ -116,18 +162,23 @@ export function metaReviewReport(report) {
         : [];
     const convSum = findingsByRound.reduce((a, b) => a + Number(b) || 0, 0);
     if (convSum !== total) {
-        add('CONVERGENCE_SUM', 'high', 'convergence.findingsByRound does not sum to totalFindings', `findingsByRound ${JSON.stringify(findingsByRound)} sums to ${convSum}, ` +
+        add('CONVERGENCE_SUM', 'high', 'convergence.findingsByRound does not sum to totalFindings', `findingsByRound [${previewList(findingsByRound)}] sums to ${convSum}, ` +
             `but totalFindings is ${total}.`);
     }
     // `findingsByRound` is indexed by the actual round number (round r → index
-    // r-1), so the "last round" is the LAST RECORDED round's reported number, not
-    // the array's last index (the array is sized to the highest round, which only
-    // equals the record count for contiguous 1..N round numbers). Read the flag
-    // consistency the same way buildReviewReport/computeConvergence set it.
+    // r-1), so the "last round" is the HIGHEST VALID round number, not the
+    // array's last element (buildReviewReport sorts its round list, but this
+    // audit runs on arbitrary JSON, and a malformed trailing round — `1.5`,
+    // `Infinity` — must not be used as an index: Math.min(1.5, len) - 1 is
+    // fractional and reads `undefined` → 0 new → a false CONVERGENCE_FLAG).
     const reportRounds = Array.isArray(report.rounds) ? report.rounds : [];
-    const lastRecordedRound = reportRounds.length > 0 && typeof reportRounds[reportRounds.length - 1]?.round === 'number'
-        ? reportRounds[reportRounds.length - 1].round
-        : null;
+    let lastRecordedRound = null;
+    for (const r of reportRounds) {
+        if (!r || typeof r !== 'object' || !isValidRoundNumber(r.round))
+            continue;
+        if (lastRecordedRound === null || r.round > lastRecordedRound)
+            lastRecordedRound = r.round;
+    }
     const lastRoundNew = lastRecordedRound !== null && lastRecordedRound > 0
         // Over-cap rounds are FOLDED by aggregateRounds into the final slot, so a
         // reported round number may exceed the array length — read the SAME
@@ -144,8 +195,15 @@ export function metaReviewReport(report) {
     const rounds = Array.isArray(report.rounds) ? report.rounds : [];
     const seenRounds = new Set();
     for (const [index, r] of rounds.entries()) {
-        if (!r || typeof r.round !== 'number' || r.round < 1) {
-            add('ROUND_NUMBER', 'medium', 'A round has a missing or non-positive round number', `round: ${JSON.stringify(r)}`);
+        // Reject everything the deterministic core would refuse: a missing,
+        // non-integer, non-finite or absurdly large round number. This is also
+        // the DoS guard for ROUND_GAP below — a round of `Infinity`/1e15 would
+        // otherwise be treated as a legitimate endpoint of the enumeration range.
+        if (!r ||
+            typeof r !== 'object' ||
+            !isValidRoundNumber(r.round) ||
+            r.round > MAX_REVIEW_ROUND_NUMBER) {
+            add('ROUND_NUMBER', 'medium', 'A round has a missing, non-integer or out-of-range round number', `round: ${previewRound(r)} (round numbers must be integers in 1..${MAX_REVIEW_ROUND_NUMBER})`);
             continue;
         }
         seenRounds.add(r.round);
@@ -163,9 +221,30 @@ export function metaReviewReport(report) {
     if (present.length > 0) {
         const min = present[0];
         const max = present[present.length - 1];
-        for (let i = min; i <= max; i++) {
-            if (!seenRounds.has(i)) {
-                add('ROUND_GAP', 'medium', `Round ${i} is missing from the round sequence`, `rounds present: ${present.join(', ')}.`);
+        const span = max - min + 1;
+        const presentPreview = previewList(present, 20);
+        // Hard bound on the enumeration: `min`/`max` come from untrusted round
+        // numbers, so an unguarded `for (i = min; i <= max; i++)` over
+        // {1, 1e15} is an effectively-infinite loop (CPU DoS) that would also
+        // push ~1e15 issues. Rounds above MAX_REVIEW_ROUND_NUMBER are rejected
+        // above, which keeps `span` bounded on its own; this guard stays as the
+        // belt-and-braces backstop so the walk is O(MAX_ROUND_GAP_SPAN) no
+        // matter what reaches it.
+        if (span > MAX_ROUND_GAP_SPAN) {
+            add('ROUND_GAP', 'medium', `Round sequence ${min}..${max} is too wide to audit for gaps`, `${span} round numbers spanned; only rounds present were accepted: ${presentPreview}.`);
+        }
+        else {
+            const missing = [];
+            for (let i = min; i <= max; i++) {
+                if (!seenRounds.has(i))
+                    missing.push(i);
+            }
+            for (const m of missing.slice(0, MAX_ROUND_GAP_REPORTS)) {
+                add('ROUND_GAP', 'medium', `Round ${m} is missing from the round sequence`, `rounds present: ${presentPreview}.`);
+            }
+            if (missing.length > MAX_ROUND_GAP_REPORTS) {
+                add('ROUND_GAP', 'medium', `${missing.length - MAX_ROUND_GAP_REPORTS} more rounds are missing (list capped)`, `${missing.length} of the ${span} numbers in ${min}..${max} are absent; only the first ` +
+                    `${MAX_ROUND_GAP_REPORTS} are listed individually. rounds present: ${presentPreview}.`);
             }
         }
     }
@@ -176,6 +255,35 @@ export function metaReviewReport(report) {
         checksRun: META_REVIEW_CHECKS,
         issues,
     };
+}
+/**
+ * Human-readable reason for a failed evidence attestation.
+ *
+ * `file_too_large` / `binary_file` are DISTINCT from `line_out_of_range` (see
+ * evidence.ts): the file EXISTS but cannot be line-addressed, so saying
+ * "does not exist" would send the reader looking for a missing file.
+ */
+function describeEvidenceViolation(v) {
+    switch (v.error) {
+        case 'file_too_large':
+            return `${v.file} is too large to line-address (over the evidence size cap)`;
+        case 'binary_file':
+            return `${v.file} is a binary (NUL-containing) file that cannot be line-addressed`;
+        case 'line_out_of_range':
+            return v.lineTotal !== undefined && v.lineTotal !== null
+                ? `${v.line} is beyond this file's ${v.lineTotal} lines`
+                : `${v.file} is not a regular line-addressable file (directory/device/FIFO)`;
+        default:
+            return `${v.file} does not exist at all (verifiable read required)`;
+    }
+}
+/** Headline for a failed evidence attestation (matches the detail above). */
+function evidenceViolationSummary(v) {
+    const unaddressable = v.error === 'file_too_large' || v.error === 'binary_file';
+    const head = unaddressable
+        ? 'Finding cannot be anchored to line-addressable code'
+        : 'Finding references non-existent code';
+    return `${head}: ${v.file}${v.line ? `:${v.line}` : ''}`;
 }
 /**
  * Build the final review report: pair the source report with its meta-review
@@ -221,30 +329,26 @@ export function buildFinalReviewReport(report, opts = {}) {
             for (const violation of evidence.results) {
                 if (violation.error === undefined)
                     continue;
-                const detail = violation.error === 'line_out_of_range'
-                    ? violation.lineTotal !== undefined && violation.lineTotal !== null
-                        ? `${violation.line} is beyond this file's ${violation.lineTotal} lines`
-                        : `${violation.file} is a binary/unreadable file not line-addressable`
-                    : `${violation.file} does not exist at all (verifiable read required)`;
+                const detail = describeEvidenceViolation(violation);
+                const summary = evidenceViolationSummary(violation);
                 let roundHint = '';
                 if (report && violation.file) {
                     // Try to attribute the poisoned finding to the round that first
-                    // surfaced it (best-effort; report rounds carry it).
-                    for (const r of report.rounds ?? []) {
-                        const matched = (r.findings ?? []).some((fnd) => !!fnd && fnd?.file === violation.file && fnd?.line === violation.line);
+                    // surfaced it (best-effort; report rounds carry it). `rounds` is
+                    // untrusted JSON, so a null entry must not throw here.
+                    for (const r of (Array.isArray(report.rounds) ? report.rounds : []) ?? []) {
+                        const findings = Array.isArray(r?.findings) ? r.findings : [];
+                        const matched = findings.some((fnd) => !!fnd && fnd?.file === violation.file && fnd?.line === violation.line);
                         if (matched) {
-                            roundHint = ` (round ${r.round})`;
+                            roundHint = ` (round ${String(r.round)})`;
                             break;
                         }
                     }
                 }
-                const summary = `Finding references non-existent code: ${violation.file}` +
-                    (violation.line ? `:${violation.line}` : '') +
-                    roundHint;
                 meta.issues.push({
                     code: 'EVIDENCE_VIOLATION',
                     severity: 'critical',
-                    summary,
+                    summary: summary + roundHint,
                     detail: detail + '. Review results must anchor to real, read code.',
                 });
             }

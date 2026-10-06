@@ -16,13 +16,16 @@ import {
   upsertRecord,
   removeRecord,
   resolveProjectFile,
+  normalizeProjectPath,
+  resolveBackupPath,
   globMatch,
   registerFixTool,
   registerDiffTool,
   registerRollbackTool,
   MAX_FIX_CONTENT_CHARS,
 } from '../src/tools/fix.ts'
-import { fixBackupPath } from '../src/paths.ts'
+import { acquireProjectLock } from '../src/file-lock.ts'
+import { fixBackupPath, fixesDir } from '../src/paths.ts'
 import { readDecisionEntries, readDecisionLogDetailed } from '../src/tools/decision-log.ts'
 import type { FixRegistry, ReviewFinding } from '../src/types.ts'
 
@@ -112,6 +115,75 @@ describe('diff helpers', () => {
 
   it('summarizes added/removed counts', () => {
     assert.equal(buildDiffSummary(diffLines(ORIGINAL, FIXED)), '+1/-0 lines (1 hunk)')
+  })
+
+  it('splits a two-spot change into two hunks with exact counts', () => {
+    // Regression: the old single-hunk diff reported the WHOLE span between the
+    // two spots ({added:100, removed:100} here), which false-rejected the fix
+    // at the atomic gate and persisted wrong line counts.
+    const lines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`)
+    const before = lines.join('\n')
+    const mutated = [...lines]
+    mutated[0] = 'CHANGED line 1'
+    mutated[99] = 'CHANGED line 100'
+    const after = mutated.join('\n')
+    assert.deepEqual(countChangedLines(before, after), { added: 2, removed: 2 })
+    const hunks = diffLines(before, after)
+    assert.equal(hunks.length, 2)
+    assert.deepEqual(
+      hunks.map((h) => ({ oldStart: h.oldStart, oldLines: h.oldLines, newLines: h.newLines })),
+      [
+        { oldStart: 1, oldLines: 1, newLines: 1 },
+        { oldStart: 100, oldLines: 1, newLines: 1 },
+      ],
+    )
+    assert.equal(buildDiffSummary(hunks), '+2/-2 lines (2 hunks)')
+  })
+
+  it('reports pure insertions and deletions as single exact hunks', () => {
+    const before = 'a\nb\nc\n'
+    const inserted = 'a\nb\nx\ny\nc\n'
+    const insHunks = diffLines(before, inserted)
+    assert.equal(insHunks.length, 1)
+    assert.equal(insHunks[0]!.oldLines, 0)
+    assert.equal(insHunks[0]!.newLines, 2)
+    assert.deepEqual(countChangedLines(before, inserted), { added: 2, removed: 0 })
+
+    const delHunks = diffLines(inserted, before)
+    assert.equal(delHunks.length, 1)
+    assert.equal(delHunks[0]!.oldLines, 2)
+    assert.equal(delHunks[0]!.newLines, 0)
+    assert.deepEqual(countChangedLines(inserted, before), { added: 0, removed: 2 })
+  })
+
+  it('reports a single-line edit as one hunk with aligned coordinates', () => {
+    const hunks = diffLines('a\nb\nc\n', 'a\nB\nc\n')
+    assert.equal(hunks.length, 1)
+    assert.equal(hunks[0]!.oldStart, 2)
+    assert.equal(hunks[0]!.newStart, 2)
+    assert.equal(hunks[0]!.oldLines, 1)
+    assert.equal(hunks[0]!.newLines, 1)
+    assert.deepEqual(countChangedLines('a\nb\nc\n', 'a\nB\nc\n'), { added: 1, removed: 1 })
+  })
+
+  it('falls back to one hunk for over-budget regions instead of hanging', () => {
+    const mk = (n: number): string => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join('\n')
+    const mutateEnds = (n: number): string => {
+      const lines = mk(n).split('\n')
+      lines[0] = 'CHANGED first'
+      lines[n - 1] = 'CHANGED last'
+      return lines.join('\n')
+    }
+    const t0 = Date.now()
+    // 300x300 = 90k cells exceeds the DP budget → bounded single-hunk fallback.
+    const small = diffLines(mk(300), mutateEnds(300))
+    assert.equal(small.length, 1)
+    // 6000 lines per side exceeds the per-side guard → same fallback.
+    const big = diffLines(mk(6000), mutateEnds(6000))
+    assert.equal(big.length, 1)
+    assert.ok(big[0]!.oldLines > 0 && big[0]!.newLines > 0, 'fallback still reports both sides')
+    const elapsed = Date.now() - t0
+    assert.ok(elapsed < 5000, `bounded fallback must not hang (took ${elapsed}ms)`)
   })
 })
 
@@ -230,6 +302,34 @@ describe('registry helpers', () => {
       cleanup()
     }
   })
+
+  it('floors hand-edited float counters to integers (status schema is integer)', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      mkdirSync(join(dir, '.iterate', 'fixes'), { recursive: true })
+      writeFileSync(join(dir, '.iterate', 'fixes', 'registry.json'), JSON.stringify({
+        rounds: [
+          {
+            round: 1.9,
+            fixedCount: 1.5,
+            failedCount: 2.5,
+            records: [
+              { id: 'fix-ok', timestamp: 't', round: 1, finding: finding(), backupPath: '/b', diffSummary: 'x', linesAdded: 1, linesRemoved: 0, success: true },
+            ],
+          },
+        ],
+      }), 'utf-8')
+      const registry = readRegistry(dir)
+      const round = registry.rounds[0]!
+      assert.equal(round.round, 1)
+      assert.equal(round.fixedCount, 1)
+      assert.equal(round.failedCount, 2)
+      assert.equal(Number.isInteger(round.fixedCount), true)
+      assert.equal(Number.isInteger(round.failedCount), true)
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 // ─── resolveProjectFile (path safety) ────────────────────────────────────────
@@ -290,6 +390,62 @@ describe('resolveProjectFile', () => {
     assert.equal(resolveProjectFile('/proj', 'C:\\x').ok, false)
     assert.equal(resolveProjectFile('/proj', '../escape.ts').ok, false)
     assert.equal(resolveProjectFile('/proj', 'src/../../escape.ts').ok, false)
+  })
+})
+
+// ─── normalizeProjectPath / resolveBackupPath ───────────────────────────────
+
+describe('normalizeProjectPath', () => {
+  it('strips ./, collapses separators, and resolves . / .. segments', () => {
+    assert.equal(normalizeProjectPath('./README.md'), 'README.md')
+    assert.equal(normalizeProjectPath('src/../README.md'), 'README.md')
+    assert.equal(normalizeProjectPath('src//deep/./a.ts'), 'src/deep/a.ts')
+    assert.equal(normalizeProjectPath('README.md'), 'README.md')
+    // Escapes survive normalization — resolveProjectFile rejects them later.
+    assert.equal(normalizeProjectPath('../escape.ts'), '../escape.ts')
+    assert.equal(normalizeProjectPath(''), '')
+    assert.equal(normalizeProjectPath(undefined as unknown as string), '')
+  })
+})
+
+describe('resolveBackupPath', () => {
+  it('accepts a backup inside the project fixes dir (absolute and relative)', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      mkdirSync(fixesDir(dir), { recursive: true })
+      const inside = join(fixesDir(dir), 'fix-abc_x.bak')
+      writeFileSync(inside, 'orig', 'utf-8')
+      const abs = resolveBackupPath(dir, inside)
+      assert.equal(abs.ok, true)
+      // A legacy relative entry anchored at the project root also resolves.
+      const rel = resolveBackupPath(dir, '.iterate/fixes/fix-abc_x.bak')
+      assert.equal(rel.ok, true)
+      if (rel.ok) assert.equal(readFileSync(rel.resolved, 'utf-8'), 'orig')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rejects escapes (relative and absolute) and missing paths', () => {
+    assert.equal(resolveBackupPath('/proj', '../../etc/passwd').ok, false)
+    assert.equal(resolveBackupPath('/proj', '/etc/passwd').ok, false)
+    assert.equal(resolveBackupPath('/proj', '').ok, false)
+  })
+
+  it('rejects a symlink inside the fixes dir pointing outside', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'iterate-fix-outside-'))
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'secret', 'utf-8')
+      mkdirSync(fixesDir(dir), { recursive: true })
+      symlinkSync(join(outside, 'secret.txt'), join(fixesDir(dir), 'fix-abc_x.bak'))
+      const r = resolveBackupPath(dir, join(fixesDir(dir), 'fix-abc_x.bak'))
+      assert.equal(r.ok, false)
+      if (!r.ok) assert.match(r.reason, /symlink/)
+    } finally {
+      cleanup()
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })
 
@@ -577,6 +733,251 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
       const files = res.files as Array<{ file: string }>
       assert.equal(files.length, 1)
       assert.equal(files[0]!.file, 'src/app.ts')
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ─── Safety-gate / security regressions (atomicity, veto, containment, LIFO) ─
+
+describe('iterate_fix atomic gate with multi-hunk diffs', () => {
+  it('passes a two-spot 2-line change at max_lines=10 without force', async () => {
+    // Regression: the single-hunk diff reported {added:100, removed:100} for
+    // this change, false-rejecting it and pushing the model toward force:true
+    // (which bypasses the safety gate entirely).
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const lines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`)
+    const after = [...lines]
+    after[0] = 'CHANGED line 1'
+    after[99] = 'CHANGED line 100'
+    const { dir, cleanup } = tempProject({
+      'iterate.config.yaml': 'goal: test\natomic:\n  max_lines: 10\n  max_adjacent_methods: 3\n',
+      'src/big.ts': lines.join('\n'),
+    })
+    try {
+      const res = (await fix({
+        file: 'src/big.ts',
+        content: after.join('\n'),
+        finding: finding({ file: 'src/big.ts' }),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, true, String(res.error))
+      assert.equal(res.linesAdded, 2)
+      assert.equal(res.linesRemoved, 2)
+      assert.match(String(res.diffSummary), /\+2\/-2 lines \(2 hunks\)/)
+      const round = readRegistry(dir).rounds[0]!
+      assert.equal(round.records[0]!.linesAdded, 2)
+      assert.equal(round.records[0]!.linesRemoved, 2)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_fix protected_paths veto (normalized intake)', () => {
+  const config = 'goal: test\npersonalization:\n  protected_paths:\n    - README.md\n'
+
+  it('vetoes ./README.md against the pattern README.md', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({
+      'iterate.config.yaml': config,
+      'README.md': '# Readme\n',
+    })
+    try {
+      const res = (await fix({
+        file: './README.md',
+        content: '# Readme v2\n',
+        finding: finding({ file: './README.md' }),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /protected path "README\.md"/)
+      // Nothing was modified.
+      assert.equal(readFileSync(join(dir, 'README.md'), 'utf-8'), '# Readme\n')
+      assert.deepEqual(readRegistry(dir), { rounds: [] })
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('vetoes src/../README.md (normalized before matching)', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({
+      'iterate.config.yaml': config,
+      'README.md': '# Readme\n',
+    })
+    try {
+      const res = (await fix({
+        file: 'src/../README.md',
+        content: '# Readme v2\n',
+        finding: finding({ file: 'src/../README.md' }),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.match(String(res.error), /protected path "README\.md"/)
+      assert.equal(readFileSync(join(dir, 'README.md'), 'utf-8'), '# Readme\n')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('leaves legit paths unaffected and records the normalized path', async () => {
+    const [fix, diff] = captureTools([registerFixTool, registerDiffTool]) as [Tool, Tool]
+    const { dir, cleanup } = tempProject({
+      'iterate.config.yaml': config,
+      'README.md': '# Readme\n',
+      'src/app.ts': ORIGINAL,
+    })
+    try {
+      // A non-protected file still fixes fine under the same config…
+      const res = (await fix({
+        file: './src/app.ts',
+        content: FIXED,
+        finding: finding({ file: './src/app.ts' }),
+        round: 1,
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(res.ok, true, String(res.error))
+      assert.equal(res.file, 'src/app.ts')
+      // …and the persisted record uses the normalized path, so later lookups
+      // with the canonical form find it.
+      const record = readRegistry(dir).rounds[0]!.records[0]!
+      assert.equal(record.finding.file, 'src/app.ts')
+      const diffRes = (await diff({ file: 'src/app.ts', path: dir })) as Record<string, unknown>
+      assert.equal(diffRes.ok, true, String(diffRes.error))
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_rollback LIFO guard', () => {
+  const V2 = 'function greet(name) {\n  if (!name) return "ANON"\n  return String(name).toUpperCase()\n}\n'
+
+  it('refuses to roll back fix #1 while fix #2 on the same file exists, then unwinds in order', async () => {
+    const [fix, rollback] = captureTools([registerFixTool, registerRollbackTool]) as [Tool, Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      const f1 = (await fix({ file: 'src/app.ts', content: FIXED, finding: finding({ summary: 'First issue' }), round: 1, path: dir })) as Record<string, unknown>
+      const f2 = (await fix({ file: 'src/app.ts', content: V2, finding: finding({ summary: 'Second issue' }), round: 1, path: dir })) as Record<string, unknown>
+      assert.equal(f1.ok, true, String(f1.error))
+      assert.equal(f2.ok, true, String(f2.error))
+      const id1 = String(f1.id)
+      const id2 = String(f2.id)
+
+      // Rolling back #1 would destroy #2's write while #2's record stays
+      // success:true — refuse and name the clobbered id.
+      const refused = (await rollback({ id: id1, path: dir })) as Record<string, unknown>
+      assert.equal(refused.ok, false)
+      assert.match(String(refused.error), /LIFO/)
+      assert.ok(String(refused.error).includes(id2), `error must name clobbered id ${id2}: ${refused.error}`)
+      // Nothing changed: file, registry, and both records are intact.
+      assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), V2)
+      assert.equal(readRegistry(dir).rounds[0]!.records.length, 2)
+
+      // LIFO: newest first succeeds…
+      const rb2 = (await rollback({ id: id2, path: dir })) as Record<string, unknown>
+      assert.equal(rb2.ok, true, String(rb2.error))
+      assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), FIXED)
+      // …and now the older one is safe to roll back.
+      const rb1 = (await rollback({ id: id1, path: dir })) as Record<string, unknown>
+      assert.equal(rb1.ok, true, String(rb1.error))
+      assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), ORIGINAL)
+      assert.deepEqual(readRegistry(dir), { rounds: [] })
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('backupPath containment (tampered registry)', () => {
+  it('iterate_diff refuses backup paths outside the fixes dir (relative + absolute)', async () => {
+    const [fix, diff] = captureTools([registerFixTool, registerDiffTool]) as [Tool, Tool]
+    const outside = mkdtempSync(join(tmpdir(), 'iterate-fix-outside-'))
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'TOP-SECRET-CONTENTS', 'utf-8')
+      const fixed = (await fix({ file: 'src/app.ts', content: FIXED, finding: finding(), round: 1, path: dir })) as Record<string, unknown>
+      assert.equal(fixed.ok, true)
+      const regPath = join(fixesDir(dir), 'registry.json')
+
+      for (const evil of ['../../etc/passwd', join(outside, 'secret.txt')]) {
+        const reg = JSON.parse(readFileSync(regPath, 'utf-8'))
+        reg.rounds[0].records[0].backupPath = evil
+        writeFileSync(regPath, JSON.stringify(reg), 'utf-8')
+        const res = (await diff({ file: 'src/app.ts', path: dir })) as Record<string, unknown>
+        assert.equal(res.ok, false, `must refuse ${evil}`)
+        assert.match(String(res.error), /escapes the fixes directory/)
+        // The outside content was never read into the response.
+        assert.ok(!JSON.stringify(res).includes('TOP-SECRET-CONTENTS'))
+        assert.equal(res.diff, undefined)
+      }
+    } finally {
+      cleanup()
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('iterate_rollback refuses a tampered backupPath and writes nothing', async () => {
+    const [fix, rollback] = captureTools([registerFixTool, registerRollbackTool]) as [Tool, Tool]
+    const outside = mkdtempSync(join(tmpdir(), 'iterate-fix-outside-'))
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      writeFileSync(join(outside, 'evil.txt'), 'EVIL-PAYLOAD', 'utf-8')
+      const fixed = (await fix({ file: 'src/app.ts', content: FIXED, finding: finding(), round: 1, path: dir })) as Record<string, unknown>
+      assert.equal(fixed.ok, true)
+      const regPath = join(fixesDir(dir), 'registry.json')
+      const id = String(fixed.id)
+
+      for (const evil of ['../../etc/passwd', join(outside, 'evil.txt')]) {
+        const reg = JSON.parse(readFileSync(regPath, 'utf-8'))
+        reg.rounds[0].records[0].backupPath = evil
+        writeFileSync(regPath, JSON.stringify(reg), 'utf-8')
+        const res = (await rollback({ id, path: dir })) as Record<string, unknown>
+        assert.equal(res.ok, false, `must refuse ${evil}`)
+        assert.match(String(res.error), /escapes the fixes directory/)
+        // The project file still holds the fixed content (no injection) and
+        // the outside file is untouched (nothing was consumed/overwritten).
+        assert.equal(readFileSync(join(dir, 'src', 'app.ts'), 'utf-8'), FIXED)
+        assert.equal(readFileSync(join(outside, 'evil.txt'), 'utf-8'), 'EVIL-PAYLOAD')
+        // The record survives so a legitimate rollback stays possible after repair.
+        assert.equal(readRegistry(dir).rounds[0]!.records.length, 1)
+      }
+    } finally {
+      cleanup()
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('fix-registry cross-process lock', () => {
+  it('uses a valid lock name and leaves no lock file behind after fixes', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      // The lock name must satisfy acquireProjectLock's strict validation
+      // (an invalid name would throw here).
+      const release = acquireProjectLock(dir, 'fix-registry')
+      const lockPath = join(dir, '.iterate', '.fix-registry.lock')
+      assert.equal(existsSync(lockPath), true)
+      assert.equal(readFileSync(lockPath, 'utf-8').trim(), String(process.pid))
+      release()
+      assert.equal(existsSync(lockPath), false)
+
+      // Sequential behavior is unchanged under the lock: two distinct fixes
+      // both persist their records, and the lock is always released.
+      const v1 = 'function greet(name) {\n  if (!name) return "ANON"\n  return name.toUpperCase()\n}\n'
+      const v2 = 'function greet(name) {\n  if (!name) return "ANON"\n  return String(name).toUpperCase()\n}\n'
+      const f1 = (await fix({ file: 'src/app.ts', content: v1, finding: finding({ summary: 'First issue' }), round: 1, path: dir })) as Record<string, unknown>
+      const f2 = (await fix({ file: 'src/app.ts', content: v2, finding: finding({ summary: 'Second issue' }), round: 1, path: dir })) as Record<string, unknown>
+      assert.equal(f1.ok, true, String(f1.error))
+      assert.equal(f2.ok, true, String(f2.error))
+      assert.equal(readRegistry(dir).rounds[0]!.records.length, 2)
+      assert.equal(existsSync(lockPath), false)
     } finally {
       cleanup()
     }

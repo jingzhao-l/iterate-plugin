@@ -67,6 +67,11 @@ export function readQualityGate(projectRoot: string): QualityGateSnapshot {
             })
         : []
       return {
+        // Snapshot-level fallback timestamp: display-only metadata — the gate
+        // is a SINGLE snapshot file (overwritten wholesale), and nothing sorts
+        // or evicts by `timestamp`, so a missing/corrupt value degrading to
+        // "now" cannot affect retention or ordering. (Reaffirmed from the
+        // earlier review: comment only, behavior unchanged.)
         timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : emptySnapshot().timestamp,
         overallStatus: status,
         overallScore: num(parsed.overallScore),
@@ -191,6 +196,12 @@ export function computeQualityGate(opts: {
   }
 
   for (const finding of findings) {
+    // Findings in dimensions outside the gated list land here with no matching
+    // `dimensionStats` entry and are skipped — they never touch any dimension
+    // score (only a global critical still fails the gate). Scoring stays
+    // unchanged by contract; the tool layer surfaces the excluded dimensions
+    // as `warnings` so the numbers are never silently incomplete
+    // (see src/tools/quality-gate.ts).
     const stats = dimensionStats[finding.dimension]
     if (stats) {
       stats.count++
@@ -207,7 +218,13 @@ export function computeQualityGate(opts: {
     // Score: 100 - (critical*30 + high*15 + medium*5 + low*1), capped at 0
     const penalty = stats.critical * 30 + stats.high * 15 + stats.medium * 5 + stats.low * 1
     const score = Math.max(0, 100 - penalty)
-    const status: 'pass' | 'warn' | 'fail' = score >= 80 ? 'pass' : score >= 50 ? 'warn' : 'fail'
+    // Arithmetic alone would grade a single critical as 100-30=70 → 'warn',
+    // while the snapshot's overall status is 'fail' (hasCritical below) — a
+    // certificate that contradicts itself ("WARN" on the dimension that made
+    // the gate fail). Any critical finding is a hard FAIL for that dimension,
+    // regardless of its score; non-critical dimensions keep the score bands.
+    const status: 'pass' | 'warn' | 'fail' =
+      stats.critical > 0 ? 'fail' : score >= 80 ? 'pass' : score >= 50 ? 'warn' : 'fail'
     const series = findingsByRound?.[dim]
     const convergenceRate = convergenceRateFor(Array.isArray(series) ? series : undefined, stats.count)
 

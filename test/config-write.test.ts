@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, chmodSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -53,6 +53,30 @@ describe('configBackupSuffix', () => {
     assert.ok(!suffix.includes(':'))
     assert.ok(!suffix.includes('.'))
     assert.match(suffix, /^[0-9TZ-]+$/)
+  })
+
+  it('never collides for writes in the SAME millisecond', () => {
+    // Regression: two backups created in the same ms built the identical
+    // `config.bak-<iso>` path — the second overwrote the first and one
+    // snapshot was silently lost. The helper now appends a monotonic
+    // counter to repeats (a clock stepping backwards counts as a repeat).
+    const t = new Date('2026-08-17T00:00:00.000Z')
+    const first = configBackupSuffix(t)
+    const second = configBackupSuffix(t)
+    const third = configBackupSuffix(t)
+    assert.notEqual(first, second)
+    assert.notEqual(second, third)
+    assert.notEqual(first, third)
+    // The fresh-ms form stays verbatim (chronological sort); repeats only
+    // gain a `-N` disambiguator, still filesystem-safe.
+    assert.match(second, /^2026-08-17T00-00-00-000Z-1$/)
+    assert.match(third, /^2026-08-17T00-00-00-000Z-2$/)
+    for (const s of [first, second, third]) {
+      assert.match(s, /^[0-9TZ-]+$/)
+    }
+    // A LATER millisecond resets to the clean form.
+    const later = configBackupSuffix(new Date('2026-08-17T00:00:00.001Z'))
+    assert.equal(later, '2026-08-17T00-00-00-001Z')
   })
 })
 
@@ -141,6 +165,110 @@ describe('validateConfigUpdates', () => {
     assert.ok(validateConfigUpdates({ observatory: 'x' }).some((e) => e.includes('observatory')))
     assert.ok(validateConfigUpdates({ observatory: { capture: 'yes' } }).some((e) => e.includes('observatory.capture')))
     assert.ok(validateConfigUpdates({ observatory: { approval: 'ask', capture: false } }).some((e) => e.includes('observatory.approval')))
+  })
+
+  it('rejects unknown top-level keys with a structured error', () => {
+    // Unknown keys used to be merged straight into iterate.config.yaml, where
+    // they persisted forever and were never read by anything (a typo such as
+    // `maxRounds` silently became "config").
+    const errors = validateConfigUpdates({
+      maxRounds: 5,
+      task_mode: 'iterate',
+      validation: { command_whitelist: [] },
+    } as unknown as Record<string, unknown>)
+    assert.ok(errors.some((e) => e.includes('updates.maxRounds')), `got: ${errors.join('; ')}`)
+    assert.ok(errors.some((e) => e.includes('updates.task_mode')), `got: ${errors.join('; ')}`)
+    const unknown = errors.filter((e) => e.includes('not a supported config key'))
+    assert.equal(unknown.length, 2, `expected exactly the 2 unknown keys to be flagged: ${errors.join('; ')}`)
+    // The error tells the caller what IS accepted.
+    assert.match(unknown[0]!, /supported: .*goal/)
+    // A known key in the same update is not misreported.
+    assert.equal(errors.some((e) => e.includes('updates.validation')), false)
+  })
+
+  it('accepts every supported key when its value is well-formed', () => {
+    const errors = validateConfigUpdates({
+      goal: 'g',
+      language: 'en',
+      dimensions: ['correctness'],
+      max_rounds: 5,
+      reasoning_effort: 'high',
+      review: { scope: 'full' },
+      reviewer: { scope_chunk_size: 10 },
+      atomic: { max_lines: 20 },
+      git: { use_worktree: false },
+      validation: { command_whitelist: [] },
+      observatory: { capture: false },
+      personalization: {},
+      onboarding: {},
+    })
+    assert.deepEqual(errors, [], errors.join('; '))
+  })
+
+  it('validates the reviewer section: gate booleans must be booleans', () => {
+    // M2: a write path without a `reviewer` branch let
+    // `reviewer: {evidence_validation: "yes"}` (or the value `false` in a
+    // malformed shape) through unvalidated — the reviewer gates are policy.
+    const errors = validateConfigUpdates({
+      reviewer: {
+        evidence_validation: 'yes',
+        coverage_validation: 1,
+        output_schema_validation: 'false',
+        scope_chunk_size: 1_000_000,
+      },
+    } as unknown as Record<string, unknown>)
+    assert.ok(errors.some((e) => e.includes('reviewer.evidence_validation')), errors.join('; '))
+    assert.ok(errors.some((e) => e.includes('reviewer.coverage_validation')), errors.join('; '))
+    assert.ok(errors.some((e) => e.includes('reviewer.output_schema_validation')), errors.join('; '))
+    assert.ok(errors.some((e) => e.includes('reviewer.scope_chunk_size')), errors.join('; '))
+
+    // A reviewer that is not an object at all (array/scalar) is refused…
+    assert.ok(validateConfigUpdates({ reviewer: [] as unknown as Record<string, unknown> }).some((e) => e.includes('reviewer')))
+    assert.ok(validateConfigUpdates({ reviewer: 'on' as unknown as Record<string, unknown> }).some((e) => e.includes('reviewer')))
+    // …while well-formed gates (including `false`, which is legal config —
+    // the approval prompt warns about it) are accepted.
+    assert.deepEqual(
+      validateConfigUpdates({ reviewer: { evidence_validation: false, coverage_validation: true, scope_chunk_size: 1 } }),
+      [],
+    )
+  })
+
+  it('bounds reasoning_effort to the provider enum', () => {
+    assert.deepEqual(validateConfigUpdates({ reasoning_effort: 'low' }), [])
+    assert.deepEqual(validateConfigUpdates({ reasoning_effort: 'medium' }), [])
+    assert.deepEqual(validateConfigUpdates({ reasoning_effort: 'high' }), [])
+    for (const bad of ['ultra', 'MAXIMUM', 4, {}]) {
+      const errors = validateConfigUpdates({ reasoning_effort: bad } as unknown as Record<string, unknown>)
+      assert.ok(
+        errors.some((e) => e.includes('reasoning_effort')),
+        `reasoning_effort=${JSON.stringify(bad)} must be rejected: ${errors.join('; ')}`,
+      )
+    }
+  })
+
+  it('refuses an empty dimensions list (it validated clean and meant "review nothing")', () => {
+    const errors = validateConfigUpdates({ dimensions: [] })
+    assert.ok(errors.some((e) => e.includes('dimensions')), errors.join('; '))
+    assert.match(errors.join('; '), /non-empty/)
+    // Whitespace-only entries are equally meaningless.
+    assert.ok(validateConfigUpdates({ dimensions: ['  '] }).some((e) => e.includes('dimensions')))
+    assert.deepEqual(validateConfigUpdates({ dimensions: ['correctness'] }), [])
+  })
+
+  it('refuses validation.commands as an ARRAY (flattenCommands would drop it all)', () => {
+    // `typeof [] === 'object'` used to let `commands: ["npm t"]` validate
+    // clean; flattenCommands then discarded every entry — an allow-list that
+    // read as configured while matching nothing.
+    const asArray = validateConfigUpdates({ validation: { commands: ['npm t'] } } as unknown as Record<string, unknown>)
+    assert.ok(asArray.some((e) => e.includes('validation.commands')), asArray.join('; '))
+    assert.match(asArray.join('; '), /mapping/)
+    // Values must be string arrays too.
+    const badValues = validateConfigUpdates({
+      validation: { commands: { 'src/a.ts': [42] } },
+    } as unknown as Record<string, unknown>)
+    assert.ok(badValues.some((e) => e.includes('validation.commands')), badValues.join('; '))
+    // The real shape passes.
+    assert.deepEqual(validateConfigUpdates({ validation: { commands: { 'src/a.ts': ['npm t'] } } }), [])
   })
 })
 
@@ -260,6 +388,79 @@ describe('readRawConfig / writeConfigFile', () => {
       cleanup()
     }
   })
+
+  it('writeConfigFile restores the original file when serialization fails', () => {
+    // The write path is atomic: a config the YAML dumper cannot serialize
+    // throws BEFORE the temp file is written, so the target keeps its original
+    // bytes and the backup copy made a moment earlier is restored over it.
+    const { dir, cleanup } = tempProject(MINIMAL_CONFIG)
+    try {
+      const before = readFileSync(join(dir, CONFIG_FILE), 'utf-8')
+      const unserializable: Record<string, unknown> = { goal: 'g' }
+      Object.defineProperty(unserializable, 'boom', {
+        enumerable: true,
+        get() { throw new Error('unserializable') },
+      })
+      const res = writeConfigFile(dir, unserializable)
+      assert.equal(res.ok, false)
+      if (!res.ok) {
+        assert.match(res.error, /failed to write config/)
+        assert.ok(!res.error.includes('rollback also failed'), `rollback should succeed: ${res.error}`)
+      }
+      // We really did get past the backup step into the write-failure branch.
+      assert.equal(readdirSync(dir).filter((f) => f.includes('.bak-')).length, 1)
+      // The target was never modified and never left half-written.
+      assert.equal(readFileSync(join(dir, CONFIG_FILE), 'utf-8'), before)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeConfigFile reports when the rollback itself also fails', (t) => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      t.skip('root ignores file modes — the rollback cannot be made to fail')
+      return
+    }
+    const { dir, cleanup } = tempProject(MINIMAL_CONFIG)
+    try {
+      const configPath = join(dir, CONFIG_FILE)
+      // Read-only target: the backup copy (a read) succeeds, serialization
+      // throws, and the restoring copy is denied by the mode → the failure of
+      // the failure path is surfaced instead of being swallowed silently.
+      chmodSync(configPath, 0o444)
+      const unserializable: Record<string, unknown> = { goal: 'g' }
+      Object.defineProperty(unserializable, 'boom', {
+        enumerable: true,
+        get() { throw new Error('unserializable') },
+      })
+      const res = writeConfigFile(dir, unserializable)
+      assert.equal(res.ok, false)
+      if (!res.ok) {
+        assert.match(res.error, /failed to write config/)
+        assert.match(res.error, /rollback also failed/)
+      }
+      assert.equal(readFileSync(configPath, 'utf-8'), MINIMAL_CONFIG)
+    } finally {
+      chmodSync(join(dir, CONFIG_FILE), 0o644)
+      cleanup()
+    }
+  })
+
+  it('writeConfigFile fails before touching anything when the backup cannot be made', () => {
+    // `iterate.config.yaml` existing as a DIRECTORY: the backup copy fails, so
+    // the write must bail out with a backup error rather than proceed to
+    // replace the path (and there is nothing to roll back yet).
+    const { dir, cleanup } = tempProject()
+    try {
+      mkdirSync(join(dir, CONFIG_FILE))
+      const res = writeConfigFile(dir, { goal: 'g' })
+      assert.equal(res.ok, false)
+      if (!res.ok) assert.match(res.error, /failed to create backup/)
+      assert.ok(existsSync(join(dir, CONFIG_FILE)), 'the directory must be left in place')
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 // ─── End-to-end iterate_config write operation ───────────────────────────────
@@ -347,6 +548,30 @@ describe('iterate_config write operation', () => {
       })) as Record<string, unknown>
       assert.equal(res.ok, false)
       assert.ok(Array.isArray(res.errors))
+      assert.equal(readFileSync(join(dir, CONFIG_FILE), 'utf-8'), before)
+      assert.equal(readdirSync(dir).filter((f) => f.includes('.bak-')).length, 0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('refuses an unknown update key without writing', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const { dir, cleanup } = tempProject(MINIMAL_CONFIG)
+    const before = readFileSync(join(dir, CONFIG_FILE), 'utf-8')
+    try {
+      const res = (await configTool({
+        operation: 'write',
+        path: dir,
+        updates: { maxRounds: 5 },
+      } as unknown as Record<string, unknown>)) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.ok(Array.isArray(res.errors))
+      assert.ok(
+        (res.errors as string[]).some((e) => e.includes('maxRounds')),
+        `expected a structured unknown-key error: ${JSON.stringify(res.errors)}`,
+      )
+      // Nothing on disk changed — no stray key, no backup.
       assert.equal(readFileSync(join(dir, CONFIG_FILE), 'utf-8'), before)
       assert.equal(readdirSync(dir).filter((f) => f.includes('.bak-')).length, 0)
     } finally {

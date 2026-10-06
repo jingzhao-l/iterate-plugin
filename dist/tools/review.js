@@ -1,13 +1,73 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { loadEffectiveConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { runWithJob } from "../jobs.js";
-import { buildReviewPlan, buildReviewReport, sanitizeRounds, validateRoundsSchema, } from "../review.js";
+import { buildReviewPlan, buildReviewReport, sanitizeRounds, validateRoundsSchema, MAX_REVIEW_ROUNDS_CAP, } from "../review.js";
 import { buildFinalReviewReport, metaReviewReport } from "../meta-review.js";
-import { evidenceToPlain, verifyFindings } from "../evidence.js";
+import { evidenceToPlain, resolveWithin, verifyFindings } from "../evidence.js";
+import { readKnownIntentional } from "./triage.js";
+import { asNumber, asRecord, parseRenderedJson } from "./present.js";
 import { collectScopeFiles, computeCoverage, coverageToDict, } from "../review-scope.js";
 import { resolveChangedFiles } from "../git-scope.js";
 /** Default round cap when neither the arg nor config provides one. */
 const DEFAULT_MAX_REVIEW_ROUNDS = 3;
+/**
+ * Resolve the effective round cap at the TOOL boundary so `plan` and
+ * `aggregate` can never disagree on it (the plan advertises a cap the
+ * aggregate must then honor).
+ *
+ * Precedence: a FINITE caller value → a FINITE config value → the default (3).
+ * A non-finite / non-numeric caller value does NOT collapse to 1 — it falls
+ * through to the config value (the old doc comment claimed otherwise, which
+ * the implementation never did). Only a finite `≤ 0` value collapses to 1,
+ * the smallest sane cap.
+ *
+ * The resolved value is then clamped to `[1, MAX_REVIEW_ROUNDS_CAP]`, so an
+ * absurd caller value (1e15) can no longer leak an unbounded cap into the
+ * report's `maxReviewRounds` field (`buildReviewReport` echoes its input and
+ * `aggregateRounds` sizes `findingsByRound` from it). Upper clamp mirrors
+ * `clampMaxReviewRounds` in src/review.ts.
+ */
+export function resolveMaxReviewRounds(argsMax, configMax) {
+    const raw = typeof argsMax === 'number' && Number.isFinite(argsMax)
+        ? argsMax
+        : typeof configMax === 'number' && Number.isFinite(configMax)
+            ? configMax
+            : DEFAULT_MAX_REVIEW_ROUNDS;
+    return Math.min(MAX_REVIEW_ROUNDS_CAP, Math.max(1, Math.floor(raw)));
+}
+/**
+ * Build the READ set backing the meta-review evidence verdict from the
+ * report's self-reported `readFiles` (aggregated across rounds; falls back to
+ * the per-round lists for older reports that predate the flat field).
+ *
+ * Entries are resolved the SAME way `verifyFinding` resolves a finding's
+ * `file` (lexical, root-relative) so the Set membership check matches, and
+ * entries escaping the project root are dropped. Returns `undefined` when
+ * nothing was read — an absent read set keeps `readVerified` "not checkable"
+ * (null ratio) instead of a misleading `0.0`.
+ */
+function buildReadSet(projectRoot, report) {
+    const raw = [];
+    if (Array.isArray(report.readFiles)) {
+        raw.push(...report.readFiles);
+    }
+    else if (Array.isArray(report.rounds)) {
+        for (const r of report.rounds) {
+            const files = r?.readFiles;
+            if (Array.isArray(files))
+                raw.push(...files);
+        }
+    }
+    const set = new Set();
+    for (const p of raw) {
+        if (typeof p !== 'string' || p === '')
+            continue;
+        const abs = resolveWithin(projectRoot, p);
+        if (abs !== null)
+            set.add(abs);
+    }
+    return set.size > 0 ? set : undefined;
+}
 /**
  * Register the `iterate_review` tool.
  *
@@ -21,9 +81,73 @@ const DEFAULT_MAX_REVIEW_ROUNDS = 3;
  *                 severity sort, and convergence stats; returns a ReviewReport.
  *                 Purely computational — NEVER touches the filesystem.
  */
+/**
+ * Card headline for an `aggregate` result: what the report found and where
+ * convergence stands (#12). Defensive — returns `undefined` whenever the
+ * payload is not the shape this tool renders, so the card is declined rather
+ * than guessed at.
+ */
+function aggregateHeadline(value) {
+    const report = asRecord(value.report);
+    const summary = report ? asRecord(report.summary) : undefined;
+    const total = summary ? asNumber(summary.totalFindings) : undefined;
+    if (total === undefined || !summary)
+        return undefined;
+    const buckets = ['critical', 'high', 'medium', 'low']
+        .map((k) => ({ label: k, n: asNumber(summary[k]) ?? 0 }))
+        .filter((b) => b.n > 0)
+        .map((b) => `${b.n} ${b.label}`);
+    const convergence = report ? asRecord(report.convergence) : undefined;
+    // A mid-run aggregate legitimately has converged:false — say so instead of
+    // implying the run is over.
+    const status = convergence && convergence.converged === true ? 'converged' : 'not converged yet';
+    return (`Review report: ${total} finding${total === 1 ? '' : 's'}` +
+        (buckets.length > 0 ? ` (${buckets.join(', ')})` : '') +
+        ` — ${status}`);
+}
+/**
+ * Card headline for a `meta-review` result: the verdict plus what the audit
+ * checked (#12). Same defensive contract as {@link aggregateHeadline}.
+ */
+function metaReviewHeadline(value) {
+    const finalReport = asRecord(value.finalReport);
+    if (!finalReport)
+        return undefined;
+    const verdict = typeof finalReport.verdict === 'string' && finalReport.verdict
+        ? finalReport.verdict
+        : undefined;
+    if (!verdict)
+        return undefined;
+    const meta = asRecord(finalReport.metaReview);
+    const issues = meta && Array.isArray(meta.issues) ? meta.issues.length : undefined;
+    const checks = meta ? asNumber(meta.checksRun) : undefined;
+    const bits = [
+        issues !== undefined ? `${issues} issue${issues === 1 ? '' : 's'}` : '',
+        checks !== undefined ? `${checks} check${checks === 1 ? '' : 's'} run` : '',
+    ].filter(Boolean);
+    return `Meta-review: ${verdict}` + (bits.length > 0 ? ` (${bits.join(', ')})` : '');
+}
 export function registerReviewTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_review',
+        // Result card (#12): aggregate/meta-review results are large raw-JSON
+        // bodies — give them a readable headline (finding counts + convergence /
+        // verdict) instead of an unsummarized blob. Only these two operations
+        // get a card; `plan` keeps the default. Pure: parsed from the rendered
+        // result only (replay-safe); a shape miss declines the card.
+        presentResult: (args, result) => {
+            if (result.isError)
+                return undefined;
+            const a = args;
+            const op = a.operation;
+            if (op !== 'aggregate' && op !== 'meta-review')
+                return undefined;
+            const value = parseRenderedJson(result);
+            if (!value)
+                return undefined;
+            const title = op === 'aggregate' ? aggregateHeadline(value) : metaReviewHeadline(value);
+            return title ? { card: 'generic', title } : undefined;
+        },
         description: 'Deterministic review engine for the iterate workflow. ' +
             'Use `plan` to generate the review plan (dimensions, reviewer prompts, findings schema, round cap) ' +
             'for normal or dry-run mode. Use `aggregate` to merge raw per-round findings into a deduped, ' +
@@ -128,7 +252,7 @@ export function registerReviewTool(ctx) {
                 const { config } = loadEffectiveConfig(projectRoot);
                 const mode = args.mode ?? 'dry-run';
                 if (args.operation === 'plan') {
-                    const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS;
+                    const maxReviewRounds = resolveMaxReviewRounds(args.maxReviewRounds, config.max_rounds);
                     const knownIntentional = config.personalization
                         ?.known_intentional;
                     // changed-only scope: resolve the changed-file set against
@@ -169,7 +293,12 @@ export function registerReviewTool(ctx) {
                             : [];
                         return { round: typeof rr?.round === 'number' ? rr.round : 0, findings, readFiles };
                     })
-                        .filter((r) => r.round > 0);
+                        // Boundary guard: convergence is keyed on `round - 1`, so a
+                        // fractional/zero/NaN round (`1.5`, `NaN` — all passable through
+                        // the `json` argument) must never reach the deterministic core.
+                        // Mirrors the core's own `Number.isInteger(round) && round >= 1`
+                        // filter; a non-integer round is simply "not a round" here.
+                        .filter((r) => Number.isInteger(r.round) && r.round >= 1);
                     if (rounds.length === 0) {
                         return {
                             operation: 'aggregate',
@@ -177,7 +306,7 @@ export function registerReviewTool(ctx) {
                             error: 'rounds must be a non-empty array of {round, findings}.',
                         };
                     }
-                    const maxReviewRounds = args.maxReviewRounds ?? config.max_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS;
+                    const maxReviewRounds = resolveMaxReviewRounds(args.maxReviewRounds, config.max_rounds);
                     const goal = args.goal ?? config.goal ?? '';
                     const dimensions = config.dimensions ?? [];
                     // Output schema validation gate (reviewer.output_schema_validation,
@@ -197,7 +326,18 @@ export function registerReviewTool(ctx) {
                         dimensions,
                         maxReviewRounds,
                         rounds: cleanRounds,
-                        knownIntentional: args.knownIntentional,
+                        // `type:'json'` passes schema validation for ANY JSON value, so a
+                        // bare string/object used to reach filterKnownIntentional →
+                        // `known.some` TypeError that escaped execute. Every sibling json
+                        // arg is guarded the same way: a non-array means "no known
+                        // entries" (identical to omitting it). The element shape reuses
+                        // triage's guard — the same one behind the config-sourced list —
+                        // so config-provided and arg-provided rows stay interchangeable.
+                        knownIntentional: Array.isArray(args.knownIntentional)
+                            ? readKnownIntentional({
+                                personalization: { known_intentional: args.knownIntentional },
+                            })
+                            : undefined,
                         fixedCount: typeof args.fixedCount === 'number' ? args.fixedCount : undefined,
                     });
                     return {
@@ -222,7 +362,18 @@ export function registerReviewTool(ctx) {
                     // verdict. Disable via config `reviewer.evidence_validation: false`.
                     const evidenceEnabled = config.reviewer?.evidence_validation !== false;
                     const findings = Array.isArray(source.findings) ? source.findings : [];
-                    const evidence = evidenceEnabled ? verifyFindings(projectRoot, findings) : null;
+                    // READ set for the evidence verdict: `readVerified`/`readVerifiedRatio`
+                    // are only computable when the audit knows which files reviewers
+                    // actually opened, yet the tool never supplied one — so the skill
+                    // prompt's "every finding anchors to real, READ code" was
+                    // unverifiable (always null). The report already aggregates every
+                    // round's self-reported `readFiles`; wiring it through evidence.ts's
+                    // existing optional `readSet` needs no core change. An empty read
+                    // list keeps the "not checkable" (null) semantics instead of 0.0.
+                    const readSet = buildReadSet(projectRoot, source);
+                    const evidence = evidenceEnabled
+                        ? verifyFindings(projectRoot, findings, readSet ? { readSet } : {})
+                        : null;
                     // Prompt-informative coverage: compare the reviewer's self-reported
                     // reads against the assigned scope inventory (never flips the
                     // verdict). Disable via config `reviewer.coverage_validation: false`.

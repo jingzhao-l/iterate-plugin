@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import {
   countLines,
+  createEvidenceCache,
   resolveWithin,
   verifyFinding,
   verifyFindings,
@@ -56,6 +57,16 @@ describe('verifyLineBounds', () => {
     assert.deepEqual(verifyLineBounds(WHOLE_FILE_LINE, 'line1\nline2'), { inBounds: true, lineTotal: 2 })
   })
 
+  it('rejects a fractional / NaN / infinite / negative line even inside the file', () => {
+    // 42.5-style anchors can never point at real code: the gate must not
+    // accept them just because the integer part is in range.
+    for (const bad of [42.5, 1.5, 2.0001, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, -0.5]) {
+      const res = verifyLineBounds(bad, 'line1\nline2\nline3')
+      assert.equal(res.inBounds, false, `${bad} must be out of bounds`)
+      assert.equal(res.lineTotal, 3)
+    }
+  })
+
   it('anchored line 1 and the last line are in bounds, out-of-range is not', () => {
     assert.deepEqual(verifyLineBounds(1, 'line1\nline2'), { inBounds: true, lineTotal: 2 })
     assert.deepEqual(verifyLineBounds(2, 'line1\nline2'), { inBounds: true, lineTotal: 2 })
@@ -103,12 +114,48 @@ describe('verifyFinding', () => {
     assert.equal(res.lineTotal, 3)
   })
 
+  it('rejects a fractional line that would otherwise fall inside the file', () => {
+    const root = realRepo()
+    for (const line of [1.5, 2.5, 0.5]) {
+      const res = verifyFinding(root, { file: 'src/a.ts', line })
+      assert.equal(res.verified, false, `line ${line} must not pass the gate`)
+      assert.equal(res.error, 'line_out_of_range')
+    }
+    // The integer anchors around them still behave: 1..3 valid, 0 whole-file.
+    assert.equal(verifyFinding(root, { file: 'src/a.ts', line: 3 }).verified, true)
+    assert.equal(verifyFinding(root, { file: 'src/a.ts', line: 0 }).verified, true)
+    // Non-finite values are equally unanchorable.
+    for (const line of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.equal(verifyFinding(root, { file: 'src/a.ts', line }).verified, false)
+    }
+  })
+
+  it('rejects a present-but-non-numeric line instead of degrading to whole-file', () => {
+    const root = realRepo()
+    // `"2"` / `true` reach the gate only when schema validation is off; they
+    // claim an anchor we cannot resolve, so they must not silently become a
+    // passing whole-file finding.
+    for (const line of ['2', true, {}, []] as unknown as number[]) {
+      const res = verifyFinding(root, { file: 'src/a.ts', line })
+      assert.equal(res.verified, false, `${JSON.stringify(line)} must not pass the gate`)
+      assert.equal(res.error, 'line_out_of_range')
+    }
+    // Absent / null keep the whole-file semantics (WHOLE_FILE_LINE = 0).
+    const absent = verifyFinding(root, { file: 'src/a.ts' })
+    assert.equal(absent.verified, true)
+    assert.equal(absent.line, null)
+    const nulled = verifyFinding(root, { file: 'src/a.ts', line: null as unknown as number })
+    assert.equal(nulled.verified, true)
+    assert.equal(nulled.line, null)
+  })
+
   it('treats a binary (NUL-containing) file as not line-addressable', () => {
     const root = mkdtempSync(join(tmpdir(), 'evidence-bin-'))
     writeFileSync(join(root, 'blob.bin'), Buffer.from([0x00, 0x01, 0x02, 0x0a]))
     const res = verifyFinding(root, { file: 'blob.bin', line: 1 })
     assert.equal(res.verified, false)
-    assert.equal(res.error, 'line_out_of_range')
+    // Distinct code: the file EXISTS, it just cannot be line-addressed.
+    assert.equal(res.error, 'binary_file')
     assert.equal(res.lineTotal, null) // binary → no addressable line count
   })
 
@@ -183,7 +230,8 @@ describe('verifyFinding', () => {
     writeFileSync(join(root, 'huge.ts'), big)
     const res = verifyFinding(root, { file: 'huge.ts', line: 1 })
     assert.equal(res.verified, false)
-    assert.equal(res.error, 'line_out_of_range')
+    // Distinct code: the file EXISTS, it is just over the read cap.
+    assert.equal(res.error, 'file_too_large')
     assert.equal(res.lineTotal, null)
     assert.equal(res.resolvedPath, join(root, 'huge.ts'))
   })
@@ -221,5 +269,125 @@ describe('verifyFindings / evidencePassed / evidenceViolations / evidenceToPlain
     )
     const plain = evidenceToPlain(audit)
     assert.equal(plain.readVerifiedRatio, 1)
+  })
+})
+describe('per-file probe cache (memoized stat/read)', () => {
+  it('probes each resolved path once per audit and shares the outcome', () => {
+    const root = realRepo()
+    const cache = createEvidenceCache()
+    const audit = verifyFindings(
+      root,
+      [
+        { file: 'src/a.ts', line: 1 },
+        { file: 'src/a.ts', line: 2 },
+        { file: 'src/a.ts', line: 3 },
+        { file: 'src/a.ts', line: 0 },
+      ],
+      { cache },
+    )
+    // Four findings, ONE filesystem probe.
+    assert.equal(cache.size, 1)
+    assert.equal(audit.checked, 4)
+    assert.equal(audit.results.every((r) => r.verified), true)
+    // The per-finding line check still runs against each finding's own line.
+    assert.deepEqual(audit.results.map((r) => r.line), [1, 2, 3, 0])
+  })
+
+  it('caches failing probes too (missing file costs one lookup, not one stat each)', () => {
+    const root = realRepo()
+    const cache = createEvidenceCache()
+    const audit = verifyFindings(
+      root,
+      [{ file: 'src/ghost.ts', line: 1 }, { file: 'src/ghost.ts', line: 5 }],
+      { cache },
+    )
+    assert.equal(cache.size, 1)
+    assert.equal(audit.results.every((r) => r.error === 'file_not_found'), true)
+  })
+
+  it('a default (per-call) cache never leaks between audits', () => {
+    const root = realRepo()
+    const first = verifyFindings(root, [{ file: 'src/a.ts', line: 1 }])
+    assert.equal(first.results[0]!.verified, true)
+    // Delete the file: the NEXT audit must re-probe and see the real FS state.
+    rmSync(join(root, 'src', 'a.ts'))
+    const second = verifyFindings(root, [{ file: 'src/a.ts', line: 1 }])
+    assert.equal(second.results[0]!.verified, false)
+    assert.equal(second.results[0]!.error, 'file_not_found')
+  })
+
+  it('an explicitly supplied cache is a deliberate snapshot across calls', () => {
+    const root = realRepo()
+    const cache = createEvidenceCache()
+    const first = verifyFindings(root, [{ file: 'src/a.ts', line: 1 }], { cache })
+    assert.equal(first.results[0]!.verified, true)
+    rmSync(join(root, 'src', 'a.ts'))
+    // Same cache → answered from the first probe (documented snapshot), and
+    // no new probe is recorded.
+    const second = verifyFindings(root, [{ file: 'src/a.ts', line: 1 }], { cache })
+    assert.equal(cache.size, 1)
+    assert.equal(second.results[0]!.verified, true)
+  })
+
+  it('keeps the readSet verdict per-finding while the probe is cached', () => {
+    const root = realRepo()
+    const resolved = join(root, 'src', 'a.ts')
+    const cache = createEvidenceCache()
+    const read = verifyFindings(
+      root,
+      [{ file: 'src/a.ts', line: 1 }, { file: 'src/a.ts', line: 2 }],
+      { cache, readSet: new Set([resolved]) },
+    )
+    assert.equal(cache.size, 1)
+    assert.deepEqual(read.results.map((r) => r.readVerified), [true, true])
+    // A different read set on the SAME cache still gets its own verdict: the
+    // cached probe never carries readVerified (that is per-call state).
+    const unread = verifyFindings(
+      root,
+      [{ file: 'src/a.ts', line: 1 }],
+      { cache, readSet: new Set<string>() },
+    )
+    assert.equal(cache.size, 1)
+    assert.equal(unread.results[0]!.readVerified, false)
+    // And without a read set the hint stays "not checkable".
+    const hintless = verifyFindings(root, [{ file: 'src/a.ts', line: 1 }], { cache })
+    assert.equal(hintless.results[0]!.readVerified, undefined)
+  })
+
+  it('createEvidenceCache returns a fresh empty map each call', () => {
+    const a = createEvidenceCache()
+    const b = createEvidenceCache()
+    assert.notEqual(a, b)
+    assert.equal(a.size, 0)
+    assert.equal(b.size, 0)
+  })
+})
+
+describe('distinct evidence error codes', () => {
+  it('reports file_not_found / line_out_of_range / binary_file / file_too_large distinctly', () => {
+    const root = mkdtempSync(join(tmpdir(), 'evidence-codes-'))
+    writeFileSync(join(root, 'text.ts'), 'one\ntwo\n')
+    writeFileSync(join(root, 'blob.bin'), Buffer.from([0x00, 0x61]))
+    writeFileSync(join(root, 'huge.ts'), Buffer.alloc(10 * 1024 * 1024 + 1, 0x61))
+    mkdirSync(join(root, 'adir'))
+    const audit = verifyFindings(root, [
+      { file: 'missing.ts', line: 1 },
+      { file: 'text.ts', line: 9 },
+      { file: 'blob.bin', line: 1 },
+      { file: 'huge.ts', line: 1 },
+      { file: 'adir', line: 1 },
+    ])
+    assert.deepEqual(
+      audit.results.map((r) => r.error),
+      ['file_not_found', 'line_out_of_range', 'binary_file', 'file_too_large', 'line_out_of_range'],
+    )
+    // Every one of them fails the gate.
+    assert.equal(evidencePassed(audit), false)
+    assert.equal(evidenceViolations(audit).length, 5)
+    const plain = evidenceToPlain(audit) as { violations: { error?: string }[] }
+    assert.deepEqual(
+      plain.violations.map((v) => v.error),
+      ['file_not_found', 'line_out_of_range', 'binary_file', 'file_too_large', 'line_out_of_range'],
+    )
   })
 })

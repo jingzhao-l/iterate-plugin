@@ -16,7 +16,20 @@ import type { IterationCheckpoint } from '../src/types.ts'
 // ─── Test harness ────────────────────────────────────────────────────────────
 
 type ToolDef = { execute: (a: unknown, e: unknown) => Promise<unknown> }
+type PresenterDef = ToolDef & {
+  presentResult?: (a: unknown, r: { content?: unknown; isError?: unknown }) => unknown
+}
 type Tool = (args: unknown) => Promise<unknown>
+
+/** Capture a tool definition WITH its presenters, for card assertions (#12). */
+function captureDef(
+  registrar: (ctx: { tools: { register: (d: unknown) => void } }) => void,
+): PresenterDef {
+  let def: PresenterDef | null = null
+  registrar({ tools: { register: (d: unknown) => { def = d as PresenterDef } } })
+  if (!def) throw new Error('tool was not registered')
+  return def
+}
 
 function captureTools(
   registrars: Array<(ctx: { tools: { register: (d: unknown) => void } }) => void>,
@@ -138,6 +151,38 @@ describe('readCheckpoint', () => {
       assert.equal(loaded.architecturalCount, 0)
       assert.equal(loaded.resumeCount, 0)
       assert.deepEqual(loaded.findings, [])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('floors float counters and rejects a round past the cap (hand-edited checkpoint)', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      // F11: floats leak into iterate_status fields declared `type: 'integer'`.
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify(checkpoint({
+        round: 2.9, maxRounds: 5.9, fixedCount: 7.5, architecturalCount: 2.7, resumeCount: 1.9,
+      })), 'utf-8')
+      const loaded = readCheckpoint(dir)
+      assert.ok(loaded)
+      assert.equal(loaded.round, 2)
+      assert.equal(loaded.maxRounds, 5)
+      assert.equal(loaded.fixedCount, 7)
+      assert.equal(loaded.architecturalCount, 2)
+      assert.equal(loaded.resumeCount, 1)
+      for (const v of [loaded.round, loaded.maxRounds, loaded.fixedCount, loaded.architecturalCount, loaded.resumeCount]) {
+        assert.equal(Number.isInteger(v), true, `${v} must be an integer`)
+      }
+
+      // F12: a checkpoint claiming a round beyond its own cap is corrupt —
+      // otherwise iterate_status renders "Round 99 / 5".
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify({ ...checkpoint(), round: 99, maxRounds: 5 }), 'utf-8')
+      assert.equal(readCheckpoint(dir), null)
+      // Negative and absurd (over MAX_COUNTER) rounds are corrupt too.
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify({ ...checkpoint(), round: -1 }), 'utf-8')
+      assert.equal(readCheckpoint(dir), null)
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'), JSON.stringify({ ...checkpoint(), round: 1e12 }), 'utf-8')
+      assert.equal(readCheckpoint(dir), null)
     } finally {
       cleanup()
     }
@@ -282,6 +327,49 @@ describe('computeStatus', () => {
     assert.equal(status.qualityGate, undefined)
     assert.equal(status.experienceBank, undefined)
     assert.equal(status.defenseEvents, undefined)
+  })
+
+  it('floors float rounds and registry counts so every status field is an integer', () => {
+    // F11: a hand-edited decision-log line (`round: 2.5`) or a float registry
+    // count (1.5) previously flowed straight into fields the output schema
+    // declares `type: 'integer'` → INVALID_TOOL_OUTPUT on iterate_status.
+    const status = computeStatus({
+      checkpoint: null,
+      decisionEntries: [
+        { timestamp: 't1', type: 'review_result', round: 2.5 },
+        { timestamp: 't2', type: 'review_result', round: 3.9 },
+      ],
+      fixRegistry: {
+        rounds: [
+          { round: 1, fixedCount: 1.5, failedCount: 0.4 },
+          { round: 2, fixedCount: 0.9, failedCount: 1.1 },
+        ],
+      },
+    })
+    assert.equal(status.currentRound, 3)
+    assert.equal(status.fixedCount, 1) // floor(1.5) + floor(0.9) = 1 + 0
+    assert.equal(status.architecturalCount, 0)
+    for (const [k, v] of Object.entries(status)) {
+      if (typeof v === 'number') assert.equal(Number.isInteger(v), true, `${k}=${v} must be an integer`)
+    }
+  })
+
+  it('floors float checkpoint counters handed to it directly', () => {
+    // readCheckpoint normalizes what is ON DISK; computeStatus must ALSO be
+    // safe for callers that inject an already-parsed checkpoint object.
+    const status = computeStatus({
+      checkpoint: checkpoint({ round: 3.7, maxRounds: 5.5, fixedCount: 7.9, architecturalCount: 2.2, resumeCount: 1.5 }),
+      decisionEntries: [],
+      fixRegistry: { rounds: [] },
+    })
+    assert.equal(status.currentRound, 3)
+    assert.equal(status.totalRounds, 5)
+    assert.equal(status.fixedCount, 7)
+    assert.equal(status.architecturalCount, 2)
+    assert.equal(status.resumeCount, 1)
+    for (const [k, v] of Object.entries(status)) {
+      if (typeof v === 'number') assert.equal(Number.isInteger(v), true, `${k}=${v} must be an integer`)
+    }
   })
 })
 
@@ -543,6 +631,109 @@ describe('iterate_checkpoint / iterate_status execute', () => {
       const def = res.defenseEvents as Record<string, unknown>
       assert.equal(def.totalEvents, 1)
       assert.equal((def.counts as Record<string, number>).precondition_failed, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('status emits only integer fields for a hand-edited float checkpoint + log (F11/F12)', async () => {
+    const [checkpointTool, statusTool] = captureTools([registerCheckpointTool, registerStatusTool]) as [Tool, Tool]
+    const { dir, cleanup } = tempProject()
+    try {
+      // A corrupt checkpoint claiming round 99 of 5 must be ignored entirely
+      // (F12): status falls back to the decision log instead of "Round 99 / 5".
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'),
+        JSON.stringify(checkpoint({ round: 99, maxRounds: 5 })), 'utf-8')
+      const corrupt = (await statusTool({ path: dir })) as Record<string, unknown>
+      assert.equal(corrupt.ok, true)
+      assert.equal(corrupt.hasCheckpoint, false, 'corrupt checkpoint must not surface')
+      assert.equal(corrupt.currentRound, 0)
+      assert.equal(corrupt.totalRounds, 0)
+
+      // Float counters on disk (F11): every integer-typed output field must be
+      // an integer, and the tool call must not reject its own output schema.
+      writeFileSync(join(dir, '.iterate', 'checkpoint.json'),
+        JSON.stringify(checkpoint({ round: 2.9, maxRounds: 5.9, fixedCount: 7.5, architecturalCount: 2.7, resumeCount: 1.5 })),
+        'utf-8')
+      writeFileSync(join(dir, '.iterate', 'decision-log.jsonl'),
+        JSON.stringify({ timestamp: new Date().toISOString(), round: 2.5, type: 'review_result', data: {} }) + '\n',
+        'utf-8')
+
+      const res = (await statusTool({ path: dir })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      const intFields = ['currentRound', 'totalRounds', 'fixedCount', 'architecturalCount', 'findingsCount', 'totalDecisionLogEntries', 'resumeCount']
+      for (const f of intFields) {
+        assert.equal(Number.isInteger(res[f]), true, `${f}=${String(res[f])} must be an integer`)
+      }
+      assert.equal(res.currentRound, 2)
+      assert.equal(res.totalRounds, 5)
+      assert.equal(res.fixedCount, 7)
+      assert.equal(res.architecturalCount, 2)
+      assert.equal(res.resumeCount, 1)
+      assert.equal(res.hasCheckpoint, true)
+
+      // Float round in the LOG (no checkpoint): currentRound comes from the
+      // log and must be floored, not 3.9.
+      const cleared = (await checkpointTool({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(cleared.ok, true)
+      writeFileSync(join(dir, '.iterate', 'decision-log.jsonl'),
+        JSON.stringify({ timestamp: new Date().toISOString(), round: 3.9, type: 'review_result', data: {} }) + '\n',
+        'utf-8')
+      const fromLog = (await statusTool({ path: dir })) as Record<string, unknown>
+      assert.equal(fromLog.ok, true)
+      assert.equal(fromLog.currentRound, 3)
+      assert.equal(Number.isInteger(fromLog.currentRound), true)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_checkpoint presentResult (#12)', () => {
+  it('titles save/load/resume/clear with progress and declines unreadable results', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const def = captureDef(registerCheckpointTool)
+      const exec = { signal: new AbortController().signal }
+      // Mirror the tool's JSON render as the durable content projection.
+      const content = (v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 2) }]
+      const present = (args: unknown, v: unknown, isError = false) =>
+        def.presentResult!(args, { content: content(v), isError }) as { card: string; title: string } | undefined
+
+      const saved = await def.execute(
+        { operation: 'save', mode: 'normal', round: 2, maxRounds: 5, fixedCount: 3, architecturalCount: 1, path: dir },
+        exec as never,
+      )
+      const saveCard = present({ operation: 'save' }, saved)
+      assert.equal(saveCard?.card, 'generic')
+      assert.equal(saveCard?.title, 'Checkpoint saved — round 2/5 (3 fixed)')
+
+      const loaded = await def.execute({ operation: 'load', path: dir }, exec as never)
+      assert.equal(present({ operation: 'load' }, loaded)?.title, 'Checkpoint loaded — round 2/5 (3 fixed)')
+
+      const resumed = await def.execute({ operation: 'resume', path: dir }, exec as never)
+      assert.equal(present({ operation: 'resume' }, resumed)?.title, 'Checkpoint resumed (resume #1) — round 2/5 (3 fixed)')
+
+      const cleared = await def.execute({ operation: 'clear', path: dir }, exec as never)
+      assert.equal(present({ operation: 'clear' }, cleared)?.title, 'Checkpoint cleared')
+      const clearedAgain = await def.execute({ operation: 'clear', path: dir }, exec as never)
+      assert.equal(present({ operation: 'clear' }, clearedAgain)?.title, 'No checkpoint to clear')
+
+      // load with nothing on disk is a valid outcome with its own headline.
+      const emptyLoad = await def.execute({ operation: 'load', path: dir }, exec as never)
+      assert.equal(present({ operation: 'load' }, emptyLoad)?.title, 'No checkpoint on disk')
+
+      // Structured failure (ok:false) → failure headline; hard failures and
+      // content the presenter cannot read decline the card entirely.
+      const failedResume = await def.execute({ operation: 'resume', path: dir }, exec as never)
+      assert.match(present({ operation: 'resume' }, failedResume)!.title, /^Checkpoint resume failed: no checkpoint to resume/)
+      assert.equal(present({ operation: 'save' }, saved, true), undefined)
+      assert.equal(
+        def.presentResult!({ operation: 'load' }, { content: [{ type: 'text', text: 'not json' }], isError: false }),
+        undefined,
+      )
+      // Without a readable operation there is nothing to headline.
+      assert.equal(present({}, loaded), undefined)
     } finally {
       cleanup()
     }

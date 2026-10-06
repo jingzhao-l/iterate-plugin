@@ -88,3 +88,75 @@ test('lib/client.js only requires the shell-provided react externals', () => {
     )
   }
 })
+
+// ─── UX gap-fix surface shipped inside the bundle ───────────────────────────
+//
+// These guard the pieces of gaps #1/#4/#6/#11/#13/#14 that only exist in the
+// built artifact (the shell never imports `src/client/index.ts` directly).
+//
+// esbuild escapes non-ASCII as `\uXXXX` (uppercase hex), so every Chinese
+// needle has to be checked in both raw and escaped form.
+
+/** Encode `text` the way esbuild escapes non-ASCII string literals. */
+function esbuildEscaped(text: string): string {
+  let out = ''
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    out += code > 0x7e
+      ? '\\u' + code.toString(16).toUpperCase().padStart(4, '0')
+      : ch
+  }
+  return out
+}
+
+function bundleHas(code: string, text: string): boolean {
+  return code.includes(text) || code.includes(esbuildEscaped(text))
+}
+
+function assertBundleHas(code: string, text: string, why: string): void {
+  assert.ok(bundleHas(code, text), `${why}: missing "${text}"`)
+}
+
+test('lib/client.js ships the Fn tab labels and digit hotkey map (gap #14)', () => {
+  const code = readFileSync(clientPath, 'utf8')
+  // Labels are rendered as `F{n} {label}` at runtime, so assert the pieces:
+  // every panel label, the number prefix helper, and the digit hotkey map.
+  for (const label of ['审查线程', '断点恢复', '质量门禁', '防御事件', '经验银行']) {
+    assertBundleHas(code, label, 'tab label')
+  }
+  assert.ok(code.includes('toUpperCase()'), 'tab labels must be prefixed with their Fn number')
+  assert.ok(/0:\s*"f10"/.test(code), 'digit hotkey map (0 → F10) missing')
+  assert.ok(/"-":\s*"live"/.test(code), 'digit hotkey map (- → live feed) missing')
+  assert.ok(code.includes('iterate-obs-tab'), 'tab rendering missing')
+  assert.ok(code.includes('aria-selected'), 'tabs must expose their selected state')
+})
+
+test('lib/client.js ships the disk-snapshot pull instruction (gap #4)', () => {
+  const code = readFileSync(clientPath, 'utf8')
+  assertBundleHas(code, '拉取磁盘快照', 'pull-snapshot action')
+  for (const tool of ['iterate_status', 'iterate_transcript', 'iterate_quality_gate', 'iterate_experience', 'iterate_defense_events']) {
+    assert.ok(code.includes(tool), `${tool} missing from the bundled pull instruction`)
+  }
+  assertBundleHas(code, '尚未从磁盘拉取', 'empty states must distinguish "not pulled" from "empty"')
+})
+
+test('lib/client.js renders validation rows and the cross-round comparison (gaps #6/#13)', () => {
+  const code = readFileSync(clientPath, 'utf8')
+  assertBundleHas(code, '验证结果', 'F6 validation block')
+  assert.ok(code.includes('aborted_by_validation'), 'failure highlight condition missing')
+  assertBundleHas(code, '跨轮对比', 'cross-round comparison table')
+})
+
+test('lib/client.js export payload carries the four on-disk artifacts (gap #11)', () => {
+  const code = readFileSync(clientPath, 'utf8')
+  for (const key of ['qualityGate', 'experienceBank', 'defenseEvents', 'report']) {
+    assert.ok(new RegExp(`\\b${key}\\b`).test(code), `export key ${key} missing`)
+  }
+})
+
+test('lib/client.js copies the registered startup instructions, not a slash command (gap #1)', () => {
+  const code = readFileSync(clientPath, 'utf8')
+  assert.ok(code.includes('START_INSTRUCTIONS'), 'startup instruction registry missing')
+  assert.ok(code.includes('workflow'), 'startup text must route through the workflow tool')
+  assert.ok(!/copy\(key,\s*['"]\/iterate/.test(code), 'no slash-command copy path')
+})

@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, readdirSync, utimesSync } from 'node:fs'
+import {
+  mkdtempSync,
+  writeFileSync,
+  appendFileSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  utimesSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -9,6 +19,7 @@ import {
   inspectPrune,
   executePrune,
   isPrunableTemp,
+  rewriteDecisionLogKeepingRecent,
   registerPruneTool,
   sweepExperienceBank,
   sweepDefenseEvents,
@@ -26,10 +37,12 @@ import type { DecisionLogEntry, DefenseEvent, ExperienceBank, FixRecord, ReviewF
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+  presentCall: (args: unknown) => { card?: string; title?: string; kind?: string } | undefined
 } {
   let def: {
     execute: (a: unknown, e: unknown) => Promise<unknown>
     output: { render: (a: unknown, v: unknown) => unknown }
+    presentCall?: (a: unknown) => unknown
   } | null = null
   registerPruneTool({
     tools: { register: (d: never) => { def = d as typeof def } },
@@ -39,6 +52,7 @@ function captureTool(): {
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
+    presentCall: (args) => def!.presentCall?.(args) as { card?: string; title?: string; kind?: string } | undefined,
   }
 }
 
@@ -267,6 +281,7 @@ describe('executePrune', () => {
       emptyRounds: [] as number[],
       totalLogEntries: 0,
       registryRounds: 0,
+      registryError: null,
       totalExperiences: 0,
       experienceOversize: 0,
       totalDefenseEvents: 0,
@@ -276,6 +291,77 @@ describe('executePrune', () => {
     assert.equal(result.deletedBackups.length, 0)
     assert.equal(result.errors.length, 1)
     assert.match(result.errors[0]!, /fix-dead/)
+    cleanup()
+  })
+
+  it('keeps every backup and refuses deletion when the registry is corrupt (F5)', () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(fixesDir(dir), { recursive: true })
+    // Registry present but NOT parseable: readRegistry() would silently hand
+    // back an EMPTY active-id set, so every backup would classify stale and one
+    // dryRun:false prune would wipe the rollback safety net.
+    writeFileSync(fixRegistryPath(dir), '{ this is not json', 'utf-8')
+    writeFileSync(join(fixesDir(dir), 'fix-dead_2026-08-17T00-00-00-000Z.bak'), 'x', 'utf-8')
+    writeFileSync(join(fixesDir(dir), 'fix-live_2026-08-17T00-00-00-000Z.bak'), 'y', 'utf-8')
+
+    const report = inspectPrune(dir, 30)
+    assert.equal(typeof report.registryError, 'string')
+    assert.match(report.registryError!, /fix registry is present but unreadable/)
+    assert.deepEqual(report.staleBackups, [], 'nothing may classify stale without a readable registry')
+
+    const result = executePrune(dir, 30, report)
+    assert.deepEqual(result.deletedBackups, [])
+    assert.ok(result.errors.some((e) => e.includes('fix registry is present but unreadable')),
+      `expected a refusal error in ${JSON.stringify(result.errors)}`)
+    // Both backups — and the corrupt registry itself — survive untouched.
+    const remaining = readdirSync(fixesDir(dir)).filter((f) => f.endsWith('.bak')).sort()
+    assert.deepEqual(remaining, ['fix-dead_2026-08-17T00-00-00-000Z.bak', 'fix-live_2026-08-17T00-00-00-000Z.bak'])
+    assert.equal(existsSync(fixRegistryPath(dir)), true)
+    cleanup()
+  })
+
+  it('still deletes orphaned backups when the registry file is simply absent', () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(fixesDir(dir), { recursive: true })
+    // No registry at all ⇒ there are no active fix ids ⇒ every backup is an
+    // orphan and the pre-existing deletion behavior must be unchanged.
+    writeFileSync(join(fixesDir(dir), 'fix-dead_2026-08-17T00-00-00-000Z.bak'), 'x', 'utf-8')
+
+    const report = inspectPrune(dir, 30)
+    assert.equal(report.registryError, null)
+    assert.deepEqual(report.staleBackups, ['fix-dead_2026-08-17T00-00-00-000Z.bak'])
+
+    const result = executePrune(dir, 30, report)
+    assert.deepEqual(result.deletedBackups, ['fix-dead_2026-08-17T00-00-00-000Z.bak'])
+    assert.deepEqual(result.errors, [])
+    assert.equal(existsSync(join(fixesDir(dir), 'fix-dead_2026-08-17T00-00-00-000Z.bak')), false)
+    cleanup()
+  })
+
+  it('trims an empty round through the fix-registry lock (no lock file left behind)', () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(fixesDir(dir), { recursive: true })
+    const registry = upsertRecord(emptyRegistry(), record({ id: 'fix-live' }))
+    // Synthesize an empty round (round 2) alongside the live one.
+    const withEmpty = {
+      rounds: [
+        registry.rounds[0]!,
+        { round: 2, fixedCount: 0, failedCount: 0, records: [] },
+      ],
+    }
+    writeFileSync(fixRegistryPath(dir), JSON.stringify(withEmpty, null, 2), 'utf-8')
+
+    const report = inspectPrune(dir, 30)
+    assert.deepEqual(report.emptyRounds, [2])
+
+    const result = executePrune(dir, 30, report)
+    assert.equal(result.trimmedEmptyRounds, 1)
+    assert.deepEqual(result.errors, [])
+    const next = JSON.parse(readFileSync(fixRegistryPath(dir), 'utf-8')) as { rounds: Array<{ round: number }> }
+    assert.deepEqual(next.rounds.map((r) => r.round), [1])
+    // The lock guard must release its own lock file — a leaked lock would wedge
+    // the next fix/rollback for LOCK_STALE_MS.
+    assert.equal(existsSync(join(iterateDir(dir), '.fix-registry.lock')), false)
     cleanup()
   })
 })
@@ -468,6 +554,23 @@ describe('iterate_prune tool', () => {
     cleanup()
   })
 
+  it('dry-run render refuses deletions when the registry is unreadable (F5)', async () => {
+    const { dir, cleanup } = tempProject()
+    mkdirSync(fixesDir(dir), { recursive: true })
+    writeFileSync(fixRegistryPath(dir), 'not json at all', 'utf-8')
+    writeFileSync(join(fixesDir(dir), 'fix-dead_2026-08-17T00-00-00-000Z.bak'), 'x', 'utf-8')
+
+    const tool = captureTool()
+    const out = (await tool.execute({ path: dir })) as Record<string, unknown>
+    assert.equal(out.ok, true)
+    const report = out.report as { registryError: string | null; staleBackups: string[] }
+    assert.match(report.registryError!, /unreadable/)
+    assert.deepEqual(report.staleBackups, [])
+    const text = tool.render({ path: dir }, out).map((m) => m.text).join('\n')
+    assert.match(text, /Stale backups to delete: none — refusing to delete fix backups/)
+    cleanup()
+  })
+
   it('reports an error for an invalid path', async () => {
     const tool = captureTool()
     const out = (await tool.execute({ path: '/' })) as Record<string, unknown>
@@ -491,6 +594,77 @@ describe('decision-log lock', () => {
     assert.equal(readDecisionEntries(dir).length, 1)
     // The lock was released cleanly after the append.
     assert.equal(existsSync(join(iterateDir(dir), '.decision-log.lock')), false)
+    cleanup()
+  })
+})
+
+// ─── decision-log rewrite accumulation (F6) ─────────────────────────────────
+
+describe('rewriteDecisionLogKeepingRecent', () => {
+  const logLine = (iso: string): string =>
+    JSON.stringify(entry({ timestamp: iso, type: 'decision', data: { tag: iso } })) + '\n'
+
+  it('accumulates deletions across the concurrent-appender retry loop', () => {
+    const { dir, cleanup } = tempProject()
+    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: { fresh: true } }))
+    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+
+    // Simulate a concurrent appender landing one MORE stale line right after
+    // the first rewrite: the loop must re-prune AND report 1 + 1 = 2 removed,
+    // not just the final attempt's slice (nor 0, as the exhaustion path used to).
+    let appended = false
+    const res = rewriteDecisionLogKeepingRecent(dir, cutoffTimestamp(30), {
+      afterRewrite: () => {
+        if (appended) return
+        appended = true
+        appendFileSync(logPath, logLine(daysAgoISO(45)), 'utf-8')
+      },
+    })
+
+    assert.equal(res.error, undefined)
+    assert.equal(res.deleted, 2, 'deletions must accumulate across retries')
+    const remaining = readDecisionEntries(dir)
+    assert.equal(remaining.length, 1)
+    assert.equal(remaining[0]!.timestamp >= cutoffTimestamp(30), true)
+    cleanup()
+  })
+
+  it('reports the accumulated total when the bounded retry budget is exhausted', () => {
+    const { dir, cleanup } = tempProject()
+    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: { fresh: true } }))
+    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+
+    // Append after EVERY attempt: the loop never stabilizes within its bounded
+    // budget, so it must give up with an error — but still count what it did.
+    const res = rewriteDecisionLogKeepingRecent(dir, cutoffTimestamp(30), {
+      afterRewrite: () => {
+        appendFileSync(logPath, logLine(daysAgoISO(50)), 'utf-8')
+      },
+    })
+
+    assert.match(res.error ?? '', /after 3 attempts/)
+    assert.equal(res.deleted, 3, 'every attempt removed an entry; the total must not reset to 0')
+    cleanup()
+  })
+
+  it('refuses to rewrite when the cross-process log lock cannot be taken', () => {
+    const { dir, cleanup } = tempProject()
+    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+    const before = readFileSync(logPath, 'utf-8')
+    // A LIVE holder: our own pid is alive and the file is fresh, so it cannot
+    // be stolen — the rewrite must refuse rather than rename unlocked (an
+    // unlocked rename can drop a concurrent appender's audit line silently).
+    writeFileSync(join(iterateDir(dir), '.decision-log.lock'), String(process.pid), 'utf-8')
+
+    const res = rewriteDecisionLogKeepingRecent(dir, cutoffTimestamp(30), { lock: { waitMs: 50 } })
+
+    assert.match(res.error ?? '', /decision-log lock/)
+    assert.equal(res.deleted, 0)
+    assert.equal(readFileSync(logPath, 'utf-8'), before, 'the log must be untouched after a refusal')
+    rmSync(join(iterateDir(dir), '.decision-log.lock'), { force: true })
     cleanup()
   })
 })
@@ -537,6 +711,26 @@ describe('sweepExperienceBank', () => {
     const { removed, bank: next } = sweepExperienceBank(bank, MAX_EXPERIENCE_ENTRIES)
     assert.equal(removed, 0)
     assert.deepEqual(next.entries.map((e) => e.id), bank.entries.map((e) => e.id))
+  })
+
+  it('applies the cap to DUPLICATE ids instead of letting them defeat it', () => {
+    // A hand-edited/double-written bank can hold several entries sharing one
+    // id. Keeping by a Set of ids meant every copy of a kept id survived, so
+    // `removed` stayed 0 and the cap never bound.
+    const dup = (iso: string): ExperienceBank['entries'][number] => mkEntry('dup', iso)
+    // Timestamps are computed ONCE: daysAgoISO() reads the clock, so calling it
+    // again at assert time would compare different millisecond values.
+    const t = [daysAgoISO(5), daysAgoISO(4), daysAgoISO(3), daysAgoISO(2), daysAgoISO(1)]
+    const bank: ExperienceBank = {
+      lastUpdated: 't',
+      totalHits: 5,
+      entries: t.map((iso) => dup(iso)),
+    }
+    const { removed, bank: next } = sweepExperienceBank(bank, 3)
+    assert.equal(removed, 2)
+    assert.equal(next.entries.length, 3)
+    // Position-based ranking keeps the 3 NEWEST slots regardless of id equality.
+    assert.deepEqual(next.entries.map((e) => e.timestamp), [t[2], t[3], t[4]])
   })
 })
 
@@ -639,5 +833,26 @@ describe('ExperienceBank/DefenseEvent pruning (end-to-end)', () => {
     assert.equal(report.totalDefenseEvents, 0)
     assert.equal(report.staleDefenseEvents, 0)
     cleanup()
+  })
+})
+
+describe('iterate_prune presentCall (#12)', () => {
+  it('separates the default dry-run preview from a real deletion', () => {
+    const tool = captureTool()
+    // Default (no args) and explicit dryRun:true are report-only.
+    for (const args of [{}, { dryRun: true }]) {
+      const card = tool.presentCall(args)
+      assert.equal(card?.card, 'generic')
+      assert.match(card!.title!, /dry run/i, `preview card must say nothing is deleted: ${card!.title}`)
+      assert.equal(card!.kind, 'read')
+    }
+    // The opt-in deletion is labelled as such and categorised as a delete.
+    const deleting = tool.presentCall({ dryRun: false })
+    assert.match(deleting!.title!, /delete/i, `deletion card must say delete: ${deleting!.title}`)
+    assert.equal(deleting!.kind, 'delete')
+    // Args that fail the parameter schema are declined by defineTool's
+    // presenter gate (default presentation) — a non-boolean `dryRun` never
+    // reaches the tool's own classifier, so no card is fabricated for it.
+    assert.equal(tool.presentCall({ dryRun: 'false' }), undefined)
   })
 })

@@ -1,6 +1,6 @@
 # iterate-plugin for DeepSeek Harness (dsh)
 
-> dsh 桌面端的 iterate 质量指挥中心 + 经验银行插件（v3.2）。把 iterate 生态的同一套 review/fix loop 直接搬进 dsh 界面，新增质量门禁、经验银行、防御事件流与原生指挥操作。
+> dsh 桌面端的 iterate 质量指挥中心 + 经验银行插件（v3.6）。把 iterate 生态的同一套 review/fix loop 直接搬进 dsh 界面，新增质量门禁、经验银行、防御事件流与原生指挥操作。
 
 <p align="center">
   <a href="README.md"><strong>English</strong></a> ·
@@ -60,7 +60,7 @@ dsh plugin --profile web add iterate-plugin
 
 **v3.2 质量指挥中心**：插件已从"被动观察面板"升级为"主动指挥中心 + 知识库"。新增质量门禁读取与可写计算（compute）、经验银行（检索 / 采纳 / 新增 add）、防御事件流（记录 + 中英双语标签）、原生命令按钮与 `task_mode` 指示器。
 
-除 17 个纯函数工具外，还内置一套**免构建的 Web UI 层**（收敛看板、分诊面板、统计卡片、10 标签页运行时观测台、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（[技能](https://github.com/jingzhao-l/iterate-skill) / [无头引擎](https://github.com/jingzhao-l/iterate-harness)）完全一致，迁移零成本。
+除 17 个纯函数工具外，还内置一套**免构建的 Web UI 层**（收敛看板、分诊面板、统计卡片、11 页签运行时观测台——实时活动流 + F1–F10——、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（[技能](https://github.com/jingzhao-l/iterate-skill) / [无头引擎](https://github.com/jingzhao-l/iterate-harness)）完全一致，迁移零成本。
 
 ---
 
@@ -68,6 +68,7 @@ dsh plugin --profile web add iterate-plugin
 
 - [✨ 特性](#-特性)
 - [📦 安装](#-安装)
+- [🧭 在 dsh 中使用 UI](#️-在-dsh-中使用-ui)
 - [💬 使用](#-使用)
 - [⚙️ 项目配置](#️-项目配置)
 - [🔧 注册工具](#-注册工具)
@@ -102,15 +103,15 @@ dsh plugin --profile web add iterate-plugin
 - 每轮修复后验证
 - 修复失败自动回滚
 
-### UI 层（客户端免构建槽位，v3.2：10 个标签页）
+### UI 层（客户端免构建槽位，v3.6：11 个页签）
 
-- **收敛看板 `ConvergenceDashboard`**（`conversation.input.dock`）— 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图；normal 模式另显示修复计数徽章；还有运行阶段芯片（当前工作流阶段 + 运行中/已结束）与 **v3.2 task_mode 指示器（code / iterate）**。
-- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十个标签页**运行时观测台：实时活动流（支持按活动类型筛选）、审查线程（支持全部展开/全部收起）、收敛趋势、发现定位（支持按严重度/维度/关键词筛选）、修复与回滚、断点恢复、决策时间线（支持按类型/轮次筛选与关键词搜索）。**v3.2 新增标签：质量门禁（F8）、经验银行（F9）、防御事件（F10）**；支持一键导出全部观测数据为 JSON（优先下载，失败回退复制）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
-- **Findings 分诊面板 `TriagePanel`**（`conversation.chat.turnTail`）— 逐条 y/n/a 判定，支持筛选、批量（含一键全选所有 findings）、键盘快捷键、localStorage 持久化、复制 YAML / 应用指令。**v3.2：原生命令按钮**（批准架构修复、触发新一轮、回滚到断点）。
+- **收敛看板 `ConvergenceDashboard`**（`conversation.input.dock`）— 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图；normal 模式另显示修复计数徽章；还有运行阶段芯片（当前工作流阶段 + 运行中/已结束）与 **task_mode 指示器（code / iterate）**。运行期间看板切换为"运行中"状态（显示轮次与阶段），并隐藏启动按钮。
+- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十一个页签**运行时观测台：**实时活动流**（默认页，支持按活动类型筛选）+ **F1** 审查线程（全部展开/全部收起）、**F2** 收敛趋势（含跨轮对比表：每轮 findings / fixed / 严重度分布 / 验证结果）、**F3** 发现定位（按严重度/维度/关键词筛选）、**F4** 修复与回滚、**F5** 断点恢复、**F6** 运行控制台、**F7** 决策时间线（按类型/轮次筛选与关键词搜索）、**F8** 质量门禁、**F9** 经验银行、**F10** 防御事件。数字键快捷键：`1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。**F8/F9/F10 为实时数据**——扫描会话流中最近一次 `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` 结果并渲染真实数据（PASS/FAIL 徽章 + 分维度评分条、经验条目（含采纳按钮 + 客户端搜索）、防御类型计数芯片 + 筛选后的事件流）；会话流中没有数据时区分"磁盘无数据"与"尚未拉取"，并提供**拉取磁盘快照**指令（让模型调用只读工具、把 `.iterate/` 产物回显进会话流）。一键导出全部观测数据为 JSON——manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report`（优先下载，失败回退复制）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
+- **Findings 分诊面板 `TriagePanel`**（`conversation.chat.turnTail`）— 逐条分诊，键盘快捷键 `y`（保留→修复）、`n`（跳过）、`a`（已知有意）与 `↑`/`↓` 移动（焦点守卫：仅面板内焦点时生效），支持筛选、批量（含一键全选所有 findings）、localStorage 持久化。**写回闭环**：主按钮复制已标记条目的 `iterate_triage apply` 指令（工具负责校验、去重、备份、失败回滚）；次按钮复制裸 `known_intentional` YAML；**回读已写入条目**复制 `iterate_triage list` 指令核对实际落盘内容。复制载荷与目标工具 schema 对齐。**v3.2：原生命令按钮**（批准架构修复、触发新一轮、回滚到断点）。
 - **收敛统计卡片 `StatsCard`**（`conversation.chat.turnTail`）— 无 findings 时显示收敛统计、历史轮次、趋势图、完成摘要。
 - **iterate 主题皮肤**（`theme.overrideTokens`）— 暖琥珀配色的 13 个 `--dsw-*` token 覆盖，明暗双模式，可在设置页开关。
 - **进度胶囊 `ProgressCapsule`**（`shell.overlay`）— 每轮完成 / 收敛时右下角弹出通知（含收敛确认）。
-- **iterate 设置区 `SettingsPanel`**（`settings.section`）— 主题开关、分诊持久化说明、配置管理指引、运行时状态概览（产物布局 + 查看/清理工具指引）、一键清空分诊数据。
+- **iterate 设置区 `SettingsPanel`**（`settings.section`）— 主题开关、分诊持久化说明、配置管理指引（覆盖 `validation.commands` / `language` / `personalization.known_intentional`，并显式警告"validation.commands 为空 = 本轮不受任何测试保护"；字段选择器可生成对应的 `iterate_config write` 指令）、运行时状态概览（产物布局 + 查看/清理工具指引 + 磁盘快照拉取）、一键清空分诊数据。
 
 UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自动降级，不会崩溃客户端。
 
@@ -121,7 +122,7 @@ UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自
 - **findings 分诊闭环** — 审查 → UI 分诊（y/n/a）→ `iterate_triage` 写回 `known_intentional` → 下一轮自动过滤
 - **结构化修复系统** — 每次修复先备份、写注册表、记录 diff，验证失败可 `iterate_rollback` 还原
 - **断点续跑** — 长迭代在每轮开头保存 checkpoint，中断后可恢复进度
-- **历史审计** — `iterate_history` 读取决策日志（按类型/时间/数量过滤）与修复注册表汇总，审查运行过程与修复明细
+- **历史审计** — `iterate_history` 读取决策日志（可按 `type` / `since` / `round` / 修复文件 `file` / `limit` 过滤，默认取最新 50 条，上限 200 条）与修复注册表汇总（各轮 fixed/failed 计数，按同一 round/file 过滤收窄），审查运行过程与修复明细
 - **运行时清理** — `iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份、空轮次与原子写入崩溃残留的临时文件；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
 - **配置读写** — `iterate_config` 支持带校验、备份、回滚的局部写入
 - **v3.2 经验银行** — `iterate_experience` 以检索 / 过滤 / 采纳查阅历史修复与模式，并可 `add` 持久化新的已验证修复——重复添加同一 pattern + dimension 时累加命中次数而非重复写入
@@ -166,7 +167,46 @@ pnpm add /path/to/iterate-skill/harness/iterate-plugin
     name: 'iterate-plugin'
 ```
 
-> 插件包自带 `dsh.bundle.patch`（即 `cordis.patch.yml`），npm 包内 `files` 已白名单化（`src` / `lib` / `dist` / `cordis.patch.yml` / `README.md` / `LICENSE`）。其中 `dist/` 为 TypeScript 服务端逻辑的编译产物，随包分发以兼容 dsh 的 `github:owner/repo#ref` git-clone 安装方式（Node 不擦除 `node_modules` 下的 TS 类型）。
+> 插件包自带 `dsh.bundle.patch`（即 `cordis.patch.yml`），npm 包内 `files` 已白名单化（`src` / `lib` / `dist` / `cordis.patch.yml` / `README.md` / `README.zh-CN.md` / `LICENSE`）。其中 `dist/` 为 TypeScript 服务端逻辑的编译产物，随包分发以兼容 dsh 的 `github:owner/repo#ref` git-clone 安装方式（Node 不擦除 `node_modules` 下的 TS 类型）。
+
+---
+
+## 🧭 在 dsh 中使用 UI
+
+浏览器客户端**没有文件系统访问权限**——所有面板渲染的都是 dsh 会话流里的数据（模型回显的工具结果）。因此本插件的 UI 围绕一个交互范式构建：**从按钮复制指令 → 粘贴回对话 → 模型调用对应工具 → 面板自动填充**。客户端按钮从不启动任何进程。
+
+### 启动一次迭代（空态仪表盘）
+
+还没有任何 report 时，收敛看板显示两个按钮——**「完整迭代」**与**「仅评审」**——各自把一段**自然语言指令**复制到剪贴板。这些**不是 slash 命令**：插件没有注册 `/iterate` 之类的命令；把文本粘贴进对话即可，模型会通过 dsh 的 `workflow` 工具运行 iterate 工作流。完整迭代指令还要求模型先预检 `validation.commands`——若未配置则停下来提示你写入（与工作流自身的 fail-closed 规则一致），不受测试保护的迭代绝不会看起来"全绿"。
+
+运行期间，看板切换为**运行中状态**（显示轮次与工作流阶段芯片），并隐藏启动按钮。
+
+### 分诊面板快捷键
+
+快捷键只在分诊面板内焦点时生效（在别处输入时处理器会忽略）：
+
+- `y` — 保留该 finding（进入修复）；`n` — 跳过；`a` — 标记为已知有意（写回候选）
+- `↑` / `↓` — 在 findings 之间移动（判定后自动前进）
+- 批量按钮 `y` / `n` / `a` 一次性对全部 findings 应用同一判定
+
+要写回配置，用 `a` 标记条目后点击**生成应用指令**——它会为这些条目复制一条 `iterate_triage apply` 指令（工具负责校验、按 file|dimension|line 去重、备份、失败回滚）。粘贴回会话后，点击**回读已写入条目**复制 `iterate_triage list` 指令核对实际落盘内容——写回 → 回读闭环。
+
+### 观测台页签与快捷键
+
+输入框下方的观测台共 **11 个页签**：实时活动流（默认页）+ **F1–F10**：
+
+`F1` 审查线程 · `F2` 收敛趋势（含跨轮对比）· `F3` 发现定位 · `F4` 修复与回滚 · `F5` 断点恢复 · `F6` 运行控制台 · `F7` 决策时间线 · `F8` 质量门禁 · `F9` 经验银行 · `F10` 防御事件
+
+按 `1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。
+
+### 磁盘快照拉取与导出
+
+- **拉取磁盘快照**——新会话（或刷新后）面板是空的，哪怕磁盘上 `.iterate/` 早有产物。拉取按钮复制一条指令，让模型调用只读工具（`iterate_status`、`iterate_transcript` `read`、`iterate_quality_gate` `read`、`iterate_experience` `list`、`iterate_defense_events` `list`、`iterate_history`）并把**完整**结果回显进会话流；会话扫描器随之填充看板、F2、F5、F8、F9、F10。空态文案区分"磁盘无数据"与"尚未拉取"。
+- **导出 JSON**——一键把整个观测台序列化为 JSON：manifest + 实时流 + `qualityGate` + `experienceBank` + `defenseEvents` + `report`（优先下载，失败回退复制到剪贴板）。
+
+### 从设置页管理配置
+
+设置区复制一份配置编辑指引，列出支持的 `iterate.config.yaml` 字段——包括 `validation.commands`（并显式警告：留空意味着每一轮迭代都不受任何测试保护）——并提供**字段选择器**：选中字段后，按钮会生成对应的 `iterate_config write` 指令（schema 校验、自动备份、失败自动回滚）供你粘贴回会话。
 
 ---
 
@@ -243,7 +283,7 @@ validation:
 
 ---
 
-## 🔧 注册工具（v3.2：17 个）
+## 🔧 注册工具（17 个）
 
 - `iterate_config` — 读取 / 写入 `iterate.config.yaml`。`operation=read` 返回完整配置或指定 section；`operation=write` 做 schema 校验、备份后局部合并写入，失败自动回滚
 - `iterate_validate` — 运行白名单验证命令，返回结果
@@ -256,7 +296,7 @@ validation:
 - `iterate_rollback` — 回滚一个已应用的修复：从备份还原文件、从注册表移除该 FixRecord、追加 `revert` 日志。用于某轮验证失败后
 - `iterate_checkpoint` — 迭代断点：`save` 保存当前进度到 `.iterate/checkpoint.json`，`load` 读回，`resume` 加载并累加恢复计数（中断恢复），`clear` 清除（findings 载荷有上限，强制 `round ≤ maxRounds`）。长迭代可中断续跑
 - `iterate_status` — 汇总当前迭代状态：模式、当前轮/总轮、已修复数、剩余 architectural、决策日志条数、是否存在 checkpoint；**v3.4：同时返回持久化的质量门禁快照、经验银行摘要与防御事件摘要**（`qualityGate` / `experienceBank` / `defenseEvents`）
-- `iterate_history` — 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数）。用于审查运行过程、审计日志、盘点修复
+- `iterate_history` — 读取迭代历史（只读）：决策日志条目（可按 `type` / `since` / `round` / 修复文件 `file` / `limit` 过滤，默认取最新 50 条，上限 200 条）+ 修复注册表汇总（各轮 fixed/failed 计数，按同一 round/file 过滤收窄；`file` 过滤时按保留的记录重算计数）。用于审查运行过程、审计日志、盘点修复
 - `iterate_prune` — 清理运行时产物：过期决策日志条目（按 `retainDays`，默认 30 天）、陈旧断点、孤儿修复备份、空轮次、崩溃原子写入残留的临时文件。默认 dry-run 只报告不删除；`dryRun:false` 才真正清理，每次清理写入决策日志
 - `iterate_transcript` — 运行时观测台：把审查转录、线程、修复与 nudge 指令持久化到 `.iterate/transcript.json`，供客户端观测台读取
 - `iterate_experience` — **v3.2** 查询经验银行（list / search / get），或 `add` 一条新的已验证修复：重复添加同一 pattern + dimension 累加命中次数而非重复写入。**v3.5 新增 `remove`：按 `id` 删除过时或错误的经验条目**。持久化到 `.iterate/experience.json`
@@ -290,11 +330,7 @@ validation:
 ### Node.js / DSH 兼容范围
 
 - **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
-- **DSH**：在 `dsh.compatibility.dshReleases` 中声明官方 `0.1.1-rc.1`、
-  `0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1` 五个版本为
-  `compatible`。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values`
-  `0.1.2-rc.1` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）；
-  `0.1.3-alpha.1` 为匹配当前 DSH 发布窗口的源码声明，插件不使用该发布变更的任何 API。
+- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`（共 18 个版本，`0.1.1-rc.1` … `0.2.1-alpha.1`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.1-alpha.1` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。
 - **一次性 Profile 证据（真实，`dsh` CLI `0.1.1-rc.1`）**：在临时 `$DSH_HOME` 下
   `dsh plugin --profile <p> add <本仓库>` 约 449ms 完成安装；`dsh --profile <p>
   --dump-config` 正确合成 `iterate-plugin` bundle patch；`dsh plugin --profile <p>
@@ -363,7 +399,7 @@ npm test
 
 所有测试通过：
 
-- **466 个单元测试全绿**，类型检查通过
+- **全量单元测试 + 类型检查通过**（`npm test`、`npm run typecheck`——此处刻意不写具体数量以根除文档漂移，各版本量级见 `CHANGELOG.md`）
 - 覆盖：去重、过滤、排序、多轮收敛、meta-review 审计、路径安全、超时钳制、配置读写与回滚、triage 合并、diff 计算、checkpoint 校验、修复注册表、历史读取与过滤、prune 清理报告与 dry-run 语义、UI 纯函数（select-all 键、运行时状态指引）、**v3.2：经验银行、质量门禁、防御事件、审批门禁 fail-open 路径**等
 
 ---

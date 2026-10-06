@@ -9,15 +9,22 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
-import { readExperienceBank, writeExperienceBank, searchExperienceEntries, upsertExperience, removeExperience } from './experience-store.ts'
+import { withProjectLock } from '../file-lock.ts'
+import { readExperienceBank, writeExperienceBank, searchExperienceEntries, upsertExperience, removeExperience, isValidExperienceId, MAX_EXPERIENCE_ID_LENGTH } from './experience-store.ts'
+import { resultHeadline } from './present.ts'
 import type { ExperienceEntryInput } from './experience-store.ts'
 import type { ExperienceEntry } from '../types.ts'
 
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT = 100
 
-/** Clamp a caller-supplied limit to a sane range. */
-function clampLimit(limit: number | undefined): number {
+/**
+ * Clamp a caller-supplied limit to a sane range.
+ * Anything that is not a positive integer falls back to the default — the
+ * parameter schema already rejects non-integers, but hand-constructed args
+ * (and future internal callers) still land here. Pure — exported for unit tests.
+ */
+export function clampLimit(limit: number | undefined): number {
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
     return DEFAULT_LIMIT
   }
@@ -72,6 +79,13 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
   ctx.tools.register(
     defineTool({
       name: 'iterate_experience',
+      // Result card (#12): each operation renders a self-describing first line
+      // ("Found 3 experience(s)…", "Recorded new experience: exp-…") — reuse it
+      // as the card title. Pure: rendered result only; failures decline.
+      presentResult: (_args, result) => {
+        const title = resultHeadline(result)
+        return title ? { card: 'generic', title } : undefined
+      },
       // List/search/get never write; `add` upserts the bank and `remove`
       // rewrites it → only the read shapes may join a parallel dispatch group.
       isConcurrencySafe: (args) => {
@@ -107,7 +121,9 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
         },
         id: {
           type: 'string',
-          description: 'Experience ID (for get operation, or to update a specific entry via add).',
+          description:
+            'Experience ID (required for get and remove). For `add`, name the entry via `entry.id` ' +
+            '— a top-level `id` is not read on add.',
         },
         entry: {
           type: 'json',
@@ -203,22 +219,47 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
               error: `Invalid experience entry: ${errors.join('; ')}`,
             }
           }
-          const bank = readExperienceBank(projectRoot)
-          const { bank: next, added, entryId } = upsertExperience(bank, normalizeExperienceInput(raw as Record<string, unknown>))
-          const write = writeExperienceBank(projectRoot, next)
-          if (!write.ok) {
-            return { ok: false, kind: 'experience', operation: 'add', error: write.error }
-          }
-          const entry = next.entries.find((e) => e.id === entryId)
-          return {
-            ok: true,
-            kind: 'experience',
-            operation: 'add',
-            added,
-            count: next.entries.length,
-            entry: entry as unknown as JsonValue,
-            totalHits: next.totalHits,
-          }
+          // Serialize the read→modify→write cycle: two processes adding to the
+          // same bank concurrently would otherwise lose one of the entries
+          // (exactly the race the shared advisory lock exists for; fail-open
+          // on lock timeout is built into the helper).
+          return withProjectLock(projectRoot, 'experience-bank', () => {
+            const bank = readExperienceBank(projectRoot)
+            const input = normalizeExperienceInput(raw as Record<string, unknown>)
+            // A caller-supplied id may only NAME a new entry — reject ids that
+            // would not survive contact with disk/output (oversized or
+            // control-byte). An id that matches an EXISTING entry is an update
+            // and keeps working unchanged.
+            if (
+              input.id !== undefined &&
+              !bank.entries.some((e) => e.id === input.id) &&
+              !isValidExperienceId(input.id)
+            ) {
+              return {
+                ok: false,
+                kind: 'experience',
+                operation: 'add',
+                error:
+                  `entry.id must be a printable string of at most ${MAX_EXPERIENCE_ID_LENGTH} characters ` +
+                  '(non-empty, no control characters) when it does not match an existing entry',
+              }
+            }
+            const { bank: next, added, entryId } = upsertExperience(bank, input)
+            const write = writeExperienceBank(projectRoot, next)
+            if (!write.ok) {
+              return { ok: false, kind: 'experience', operation: 'add', error: write.error }
+            }
+            const entry = next.entries.find((e) => e.id === entryId)
+            return {
+              ok: true,
+              kind: 'experience',
+              operation: 'add',
+              added,
+              count: next.entries.length,
+              entry: entry as unknown as JsonValue,
+              totalHits: next.totalHits,
+            }
+          })
         }
 
         if (operation === 'remove') {
@@ -231,35 +272,51 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
               error: 'id is required for remove',
             }
           }
-          const bank = readExperienceBank(projectRoot)
-          const { bank: next, removed } = removeExperience(bank, id)
-          if (!removed) {
+          // Same read→modify→write hazard as `add` — hold the shared lock for
+          // the whole cycle so a concurrent remove cannot resurrect a deleted
+          // entry.
+          return withProjectLock(projectRoot, 'experience-bank', () => {
+            const bank = readExperienceBank(projectRoot)
+            const { bank: next, removed } = removeExperience(bank, id)
+            if (!removed) {
+              return {
+                ok: false,
+                kind: 'experience',
+                operation: 'remove',
+                error: `Experience not found: ${id}`,
+              }
+            }
+            const write = writeExperienceBank(projectRoot, next)
+            if (!write.ok) {
+              return { ok: false, kind: 'experience', operation: 'remove', error: write.error }
+            }
+            return {
+              ok: true,
+              kind: 'experience',
+              operation: 'remove',
+              count: next.entries.length,
+              totalHits: next.totalHits,
+            }
+          })
+        }
+
+        // `get`/`search` require their argument: silently falling through to
+        // `list` would answer a get with a DIFFERENT operation's payload
+        // (ok:true + entries) — mirror the `remove` contract and error instead.
+        if (operation === 'get') {
+          const id = typeof args.id === 'string' && args.id ? args.id : ''
+          if (!id) {
             return {
               ok: false,
               kind: 'experience',
-              operation: 'remove',
-              error: `Experience not found: ${id}`,
+              operation: 'get',
+              error: 'id is required for get',
             }
           }
-          const write = writeExperienceBank(projectRoot, next)
-          if (!write.ok) {
-            return { ok: false, kind: 'experience', operation: 'remove', error: write.error }
-          }
-          return {
-            ok: true,
-            kind: 'experience',
-            operation: 'remove',
-            count: next.entries.length,
-            totalHits: next.totalHits,
-          }
-        }
-
-        const bank = readExperienceBank(projectRoot)
-
-        if (operation === 'get' && typeof args.id === 'string') {
-          const entry = bank.entries.find((e) => e.id === args.id)
+          const bank = readExperienceBank(projectRoot)
+          const entry = bank.entries.find((e) => e.id === id)
           if (!entry) {
-            return { ok: false, kind: 'experience', error: `Experience not found: ${args.id}` }
+            return { ok: false, kind: 'experience', operation: 'get', error: `Experience not found: ${id}` }
           }
           return {
             ok: true,
@@ -271,8 +328,18 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
           }
         }
 
-        if (operation === 'search' && typeof args.query === 'string') {
-          const entries = searchExperienceEntries(bank.entries, args.query, {
+        if (operation === 'search') {
+          const query = typeof args.query === 'string' && args.query ? args.query : ''
+          if (!query) {
+            return {
+              ok: false,
+              kind: 'experience',
+              operation: 'search',
+              error: 'query is required for search',
+            }
+          }
+          const bank = readExperienceBank(projectRoot)
+          const entries = searchExperienceEntries(bank.entries, query, {
             dimension: typeof args.dimension === 'string' ? args.dimension : undefined,
             tags: Array.isArray(args.tags) ? args.tags : undefined,
           }).slice(0, limit)
@@ -288,6 +355,7 @@ export function registerExperienceBankTool(ctx: { tools: { register: (def: Retur
         }
 
         // Default: list with optional filters
+        const bank = readExperienceBank(projectRoot)
         let entries = bank.entries
         if (typeof args.dimension === 'string' && args.dimension) {
           entries = entries.filter((e) => e.dimension === args.dimension)

@@ -43,6 +43,15 @@ function emptyStream() {
 /** Valid severity values (kept in sync with DefenseEvent). */
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 /**
+ * Sentinel timestamp for events persisted WITHOUT one. Reads must be
+ * deterministic: stamping `new Date()` here meant two reads of the same
+ * hand-edited file produced different JSON, and the next write persisted that
+ * read-time churn as real history. The epoch sentinel is stable across reads
+ * AND sorts as the oldest event (list output is newest-first), so a timestamp-less
+ * event degrades to "the beginning of time" instead of "just now".
+ */
+const MISSING_TIMESTAMP_SENTINEL = '1970-01-01T00:00:00.000Z';
+/**
  * Normalize one persisted event. Hand-edited files can carry events missing
  * `timestamp`/`round`/`description`/`defense`/`outcome`/`severity` — readers
  * (list sort by timestamp, render label selection) must never crash or emit
@@ -61,14 +70,18 @@ function normalizeEvent(raw, index) {
     const derivedId = `def-${hashString(`${index}|${String(e.timestamp ?? '')}|${e.type}|${String(e.description ?? '')}|${String(e.defense ?? '')}`)}`;
     return {
         id: typeof e.id === 'string' && e.id ? e.id : derivedId,
-        timestamp: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : new Date().toISOString(),
+        timestamp: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : MISSING_TIMESTAMP_SENTINEL,
         round: typeof e.round === 'number' && Number.isFinite(e.round) ? Math.floor(e.round) : 0,
         type: e.type,
         description: typeof e.description === 'string' ? e.description : '',
         defense: typeof e.defense === 'string' ? e.defense : '',
         outcome: typeof e.outcome === 'string' ? e.outcome : '',
         ...(typeof e.file === 'string' && e.file.length > 0 ? { file: e.file } : {}),
-        ...(typeof e.line === 'number' && Number.isFinite(e.line) && e.line >= 0 ? { line: e.line } : {}),
+        // Only 1-based lines are a usable position (see the record-side check in
+        // src/tools/defense-events.ts): a hand-edited `line: 0`/negative/non-integer
+        // is dropped rather than echoed back to a renderer that would print the
+        // file WITHOUT a position anyway (`line ? ':' + line : ''`).
+        ...(typeof e.line === 'number' && Number.isInteger(e.line) && e.line >= 1 ? { line: e.line } : {}),
         severity: VALID_SEVERITIES.has(String(e.severity)) ? e.severity : 'low',
     };
 }
@@ -92,6 +105,11 @@ export function readDefenseEvents(projectRoot) {
             const counts = computeCounts(events);
             return {
                 events,
+                // Stream-level fallback timestamp: display-only metadata — retention
+                // and sweeps rank per-EVENT `event.timestamp`, never `lastUpdated`, so
+                // a missing/corrupt value degrading to "now" cannot reorder or
+                // resurrect events. (Reaffirmed from the earlier review: comment only,
+                // behavior unchanged.)
                 lastUpdated: typeof parsed.lastUpdated === 'string' ? parsed.lastUpdated : emptyStream().lastUpdated,
                 counts,
             };
@@ -145,11 +163,18 @@ export function clearDefenseEvents(projectRoot) {
 }
 /** Add a defense event to the stream. */
 export function addDefenseEvent(stream, event) {
+    // Storage-side line check, mirroring the tool's record validation: a
+    // non-integer / < 1 line is not a usable position (the renderer prints the
+    // file WITHOUT a position for a falsy line), so it is dropped instead of
+    // being persisted as a silent 0.
+    const { line, ...rest } = event;
+    const usableLine = typeof line === 'number' && Number.isInteger(line) && line >= 1 ? line : undefined;
     // Spread the caller-shaped event FIRST so the store-generated `id` and
     // `timestamp` always win — a caller-supplied id/timestamp must never
     // override the stream's own identity fields.
     const newEvent = {
-        ...event,
+        ...rest,
+        ...(usableLine !== undefined ? { line: usableLine } : {}),
         id: `def-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp: new Date().toISOString(),
     };

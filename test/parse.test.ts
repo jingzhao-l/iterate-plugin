@@ -53,6 +53,46 @@ import {
   serializeObservatoryExport,
   latestPhase,
   stoppedReasonLabel,
+  TRIAGE_VERDICTS,
+  VERDICT_SHORTCUTS,
+  isQualityGateSnapshot,
+  findFirstInObject,
+  latestToolResultNode,
+  currentRoundNumber,
+  attachLive,
+  extractTranscript,
+  computeSummaryFromFindings,
+  normalizeQualityGateSnapshot,
+  normalizeExperienceBankResult,
+  normalizeDefenseEventsResult,
+  // gap-fix helpers
+  START_INSTRUCTION_FULL,
+  START_INSTRUCTION_REVIEW_ONLY,
+  START_INSTRUCTIONS,
+  dashboardRunState,
+  buildRoundComparison,
+  serializeObservatoryExport as serializeExportWithExtras,
+  EXPORT_EXTRA_KEYS,
+  buildDiskSnapshotInstruction,
+  DISK_SNAPSHOT_SOURCES,
+  diskEmptyStateText,
+  toolCalledInSession,
+  buildFixInstruction,
+  buildAssignFixesInstruction,
+  buildArchitecturalFixInstruction,
+  buildCheckpointResumeInstruction,
+  buildCheckpointClearInstruction,
+  buildQualityGateQueryInstruction,
+  buildQualityGateClearInstruction,
+  buildRollbackInstruction,
+  buildExperienceListInstruction,
+  buildDefenseEventsListInstruction,
+  buildTriageReadbackInstruction,
+  buildConfigFieldInstruction,
+  configFieldByKey,
+  CONFIG_EDIT_FIELDS,
+  CONFIG_VALUE_PLACEHOLDER,
+  normalizeValidations,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -170,6 +210,37 @@ describe('scanSessionForReport', () => {
     assert.equal(scanSessionForReport({ toolCalls: [{ tool: 'other', result: {} }] }), null)
     assert.equal(scanSessionForReport(null), null)
   })
+
+  it('rejects a junk result.report and keeps scanning deeper in the same result', () => {
+    // Regression: an unvalidated `result.report` was returned as-is (feeding
+    // normalizeReport) AND shadowed a valid report nested in the same result.
+    const deeper = makeReport()
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_review', result: { report: { junk: true }, payload: { review: deeper } } },
+      ],
+    }
+    assert.equal(scanSessionForReport(session), deeper)
+  })
+
+  it('returns null when the only result.report is junk', () => {
+    const session = {
+      toolCalls: [{ tool: 'iterate_review', result: { report: { junk: true } } }],
+      messages: [{ tool_calls: [{ function: { name: 'iterate_review', arguments: '{"report":{"junk":true}}' } }] }],
+    }
+    assert.equal(scanSessionForReport(session), null)
+  })
+
+  it('falls back to an OLDER valid call when the newest report is junk', () => {
+    const olderValid = makeReport()
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_review', result: { report: olderValid } },
+        { tool: 'iterate_review', result: { report: { junk: true } } },
+      ],
+    }
+    assert.equal(scanSessionForReport(session), olderValid)
+  })
 })
 
 // ─── normalizeReport ─────────────────────────────────────────────────────────
@@ -228,6 +299,70 @@ describe('normalizeReport', () => {
     assert.equal(sum.totalFindings, 2)
     assert.equal(sum.high, 1)
     assert.equal(sum.byDimension.security, 1)
+  })
+
+  it('coerces non-array findings / rounds instead of throwing', () => {
+    // Regression: `{findings:{a:1},rounds:{}}` (arbitrary session text) threw
+    // `findings is not iterable` / `rounds.map is not a function` during render.
+    const norm = normalizeReport({
+      convergence: { findingsByRound: {} },
+      findings: { a: 1 },
+      rounds: {},
+    })
+    assert.deepEqual(norm.findings, [])
+    assert.deepEqual(norm.rounds, [])
+    const conv = norm.convergence as { totalRounds: number; findingsByRound: number[] }
+    assert.equal(conv.totalRounds, 0)
+    assert.deepEqual(conv.findingsByRound, []) // derived from the coerced rounds
+    const sum = norm.summary as { totalFindings: number; byDimension: Record<string, number> }
+    assert.equal(sum.totalFindings, 0)
+    // byDimension is a null-prototype map (prototype-pollution guard), so the
+    // comparison has to go through a plain-object copy.
+    assert.deepEqual({ ...sum.byDimension }, {})
+    // Junk scalar shapes must degrade the same way.
+    const scalars = normalizeReport({ convergence: {}, findings: 'junk', rounds: 42 })
+    assert.deepEqual(scalars.findings, [])
+    assert.deepEqual(scalars.rounds, [])
+  })
+
+  it('derives stoppedReason only for FINISHED runs (in-progress stays null)', () => {
+    // Regression: an in-progress run (1 of 5 rounds) was stamped 'converged'.
+    const inProgress = normalizeReport({
+      convergence: { totalRounds: 5 },
+      rounds: [{ round: 1, findings: [] }],
+      findings: [],
+    })
+    const inConv = inProgress.convergence as { stoppedReason: string | null }
+    assert.equal(inConv.stoppedReason, null)
+
+    const finished = normalizeReport({
+      convergence: { totalRounds: 2 },
+      rounds: [{ round: 1, findings: [] }, { round: 2, findings: [] }],
+      findings: [],
+    })
+    assert.equal((finished.convergence as { stoppedReason: string | null }).stoppedReason, 'max_rounds_reached')
+
+    const convergedEarly = normalizeReport({
+      convergence: { totalRounds: 5, converged: true },
+      rounds: [{ round: 1, findings: [] }],
+      findings: [],
+    })
+    assert.equal((convergedEarly.convergence as { stoppedReason: string | null }).stoppedReason, 'converged')
+
+    const explicit = normalizeReport({
+      convergence: { totalRounds: 5, stoppedReason: 'aborted_by_validation' },
+      rounds: [{ round: 1, findings: [] }],
+      findings: [],
+    })
+    assert.equal((explicit.convergence as { stoppedReason: string | null }).stoppedReason, 'aborted_by_validation')
+
+    // A junk (non-string) explicit reason must not survive either.
+    const junkReason = normalizeReport({
+      convergence: { totalRounds: 5, stoppedReason: 42 },
+      rounds: [{ round: 1, findings: [] }],
+      findings: [],
+    })
+    assert.equal((junkReason.convergence as { stoppedReason: string | null }).stoppedReason, null)
   })
 })
 
@@ -289,6 +424,18 @@ describe('convergence helpers', () => {
     assert.equal(getCurrentRound(report), 2)
     assert.equal(computeConvergenceProgress(report), Math.round((2 / 5) * 100))
   })
+
+  it('tolerates non-array rounds / findings on a RAW (un-normalized) report', () => {
+    // Regression: `rounds: {}` made computeConvergenceProgress throw
+    // `report.rounds is not iterable` when a raw scan result reached render.
+    const raw = { convergence: { totalRounds: 5 }, rounds: {}, findings: {} }
+    assert.equal(computeConvergenceProgress(raw), 0)
+    assert.equal(getCurrentRound(raw), 0)
+    assert.equal(computeConvergenceProgress(normalizeReport(raw)), 0)
+    // Junk scalar shapes degrade to the same empty state.
+    assert.equal(getCurrentRound({ rounds: 'nope' }), 0)
+    assert.equal(getCurrentRound({}), 0)
+  })
 })
 
 // ─── severityStats / groupByDimension ────────────────────────────────────────
@@ -308,7 +455,7 @@ describe('severityStats / groupByDimension', () => {
   it('skips null / non-object findings instead of crashing', () => {
     const report = { findings: [null, 42, 'x', { severity: 'high', dimension: 'correctness' }] }
     assert.deepEqual(severityStats(report), { critical: 0, high: 1, medium: 0, low: 0 })
-    assert.deepEqual(groupByDimension(report), { correctness: [{ severity: 'high', dimension: 'correctness' }] })
+    assert.deepEqual({ ...groupByDimension(report) }, { correctness: [{ severity: 'high', dimension: 'correctness' }] })
   })
 
   it('buildRoundHistory tolerates a null round element', () => {
@@ -317,6 +464,15 @@ describe('severityStats / groupByDimension', () => {
       { round: 0, count: 0, critical: 0, high: 0, medium: 0, low: 0 },
       { round: 2, count: 0, critical: 0, high: 0, medium: 0, low: 0 },
     ])
+  })
+
+  it('tolerates a non-array findings value instead of throwing', () => {
+    // Regression: `findings: {}` threw `findings is not iterable` in both.
+    const report = { findings: {} }
+    assert.deepEqual(severityStats(report), { critical: 0, high: 0, medium: 0, low: 0 })
+    assert.deepEqual({ ...groupByDimension(report) }, {})
+    // …and in the summary / triage / hash consumers of the same field.
+    assert.equal(computeSummaryFromFindings([] as unknown as Record<string, unknown>[]).totalFindings, 0)
   })
 })
 
@@ -332,6 +488,14 @@ describe('buildTriageState / hashReport', () => {
     const report = makeReport()
     assert.equal(hashReport(report), hashReport(makeReport()))
     assert.ok(hashReport(report).startsWith('iterate-triage-'))
+  })
+
+  it('tolerates a non-array findings value', () => {
+    // Regression: `findings: {}` must not throw in the triage-state builders.
+    assert.deepEqual(buildTriageState({ findings: {} }), {})
+    assert.ok(hashReport({ mode: 'dry-run', findings: {} }).startsWith('iterate-triage-'))
+    // A string findings value must never fabricate index keys from its length.
+    assert.deepEqual(buildTriageState({ findings: 'ab' }), {})
   })
 })
 
@@ -371,6 +535,12 @@ describe('triage serialization helpers', () => {
     assert.equal(entries[0]!.file, 'src/auth.ts')
     assert.equal(entries[0]!.dimension, 'security')
     assert.equal(entries[0]!.line, 12)
+  })
+
+  it('ignores a non-array findings value (never indexes string characters)', () => {
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'ignore' }
+    assert.deepEqual(collectIgnoredEntries(state, 'junk' as unknown as Record<string, unknown>[]), [])
+    assert.deepEqual(collectIgnoredEntries(state, {} as unknown as Record<string, unknown>[]), [])
   })
 })
 
@@ -439,6 +609,18 @@ describe('filter options & batch verdicts', () => {
     assert.equal(opts.dimensions.find((d) => d.value === 'security')!.count, 1)
   })
 
+  it('buildFilterOptions skips null / non-object findings instead of crashing', () => {
+    // Regression: ONE null finding killed the whole TriagePanel filter bar
+    // with `Cannot read properties of null (reading 'severity')`.
+    assert.doesNotThrow(() => buildFilterOptions([null] as unknown as Record<string, unknown>[]))
+    const opts = buildFilterOptions(
+      [null, 42, 'x', { severity: 'high', dimension: 'security' }] as unknown as Record<string, unknown>[],
+    )
+    assert.equal(opts.severities.find((s) => s.value === 'high')!.count, 1)
+    assert.equal(opts.severities.find((s) => s.value === 'low')!.count, 0)
+    assert.deepEqual(opts.dimensions, [{ value: 'security', count: 1 }])
+  })
+
   it('countVerdicts tallies each verdict', () => {
     assert.deepEqual(countVerdicts({ '0': 'keep', '1': 'ignore', '2': 'skip' }), { keep: 1, skip: 1, ignore: 1 })
     assert.deepEqual(countVerdicts({}), { keep: 0, skip: 0, ignore: 0 })
@@ -464,6 +646,12 @@ describe('filter options & batch verdicts', () => {
     const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep', '1': 'keep' }
     assert.deepEqual(setAllVerdicts(state, 'skip'), { '0': 'skip', '1': 'skip' })
     assert.deepEqual(setAllVerdicts(state, 'ignore', [0]), { '0': 'ignore', '1': 'keep' })
+  })
+
+  it('setAllVerdicts rejects verdicts outside TRIAGE_VERDICTS (via batchSetVerdict)', () => {
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep', '1': 'keep' }
+    assert.equal(setAllVerdicts(state, 'bogus' as 'keep' | 'skip' | 'ignore'), state)
+    assert.deepEqual(state, { '0': 'keep', '1': 'keep' })
   })
 })
 
@@ -507,6 +695,18 @@ describe('history & trend', () => {
     assert.equal(trendMax([]), 1)
     assert.equal(trendMax([{ round: 1, count: 0 }]), 1)
     assert.equal(trendMax([{ round: 1, count: 3 }, { round: 2, count: 7 }]), 7)
+  })
+
+  it('computeTrendMetrics degrades for non-array rounds / findingsByRound', () => {
+    // Regression: `rounds: {}` + `convergence.findingsByRound: {}` threw
+    // inside the trend derivation during render.
+    const metrics = computeTrendMetrics({ rounds: {}, convergence: { findingsByRound: {} } })
+    assert.deepEqual(metrics.points, [])
+    assert.equal(metrics.total, 0)
+    assert.equal(metrics.firstRound, 0)
+    assert.equal(metrics.reductionPercent, 0)
+    assert.equal(metrics.converged, false)
+    assert.deepEqual(buildRoundHistory({ rounds: 'junk' }), [])
   })
 })
 
@@ -1370,5 +1570,862 @@ describe('latestPhase', () => {
     assert.equal(latestPhase([]), '')
     assert.equal(latestPhase(null), '')
     assert.equal(latestPhase('plan'), '')
+  })
+})
+
+// ─── Exported core deep-scan helpers ─────────────────────────────────────────
+
+describe('findFirstInObject', () => {
+  const findGate = (o: Record<string, unknown>) => isQualityGateSnapshot(o)
+
+  it('finds the first node satisfying the predicate', () => {
+    const tree = { wrap: { nested: [{ nope: true }, { snapshot: snap('pass') }] } }
+    const found = findFirstInObject(tree, findGate)
+    assert.ok(found)
+    assert.equal(found.overallStatus, 'pass')
+  })
+
+  it('sees through STRING-encoded JSON nodes (tool results / contents)', () => {
+    const wrapped = findFirstInObject('  ' + JSON.stringify({ snapshot: snap('fail') }), findGate)
+    assert.ok(wrapped)
+    assert.equal(wrapped.overallStatus, 'fail')
+    const asArray = findFirstInObject(JSON.stringify([{ snapshot: snap('pass') }]), findGate)
+    assert.ok(asArray)
+    assert.equal(asArray.overallStatus, 'pass')
+  })
+
+  it('returns null for plain / broken strings and primitives', () => {
+    assert.equal(findFirstInObject('门禁已刷新', findGate), null)
+    assert.equal(findFirstInObject('{"overallStatus":"pass"', findGate), null) // broken JSON text
+    assert.equal(findFirstInObject('{"overallStatus":"pass"}', findGate), null) // parses, no match
+    assert.equal(findFirstInObject(42, findGate), null)
+    assert.equal(findFirstInObject(true, findGate), null)
+    assert.equal(findFirstInObject(null, findGate), null)
+  })
+
+  it('keeps the circular-reference and depth guards', () => {
+    const node: Record<string, unknown> = { name: 'root' }
+    node.self = node
+    assert.equal(findFirstInObject(node, findGate), null)
+    const deep = { a: { b: { snapshot: snap('pass') } } }
+    assert.equal(findFirstInObject(deep, findGate, undefined, 1), null)
+    assert.ok(findFirstInObject(deep, findGate, undefined, 8))
+  })
+})
+
+describe('latestToolResultNode', () => {
+  const findGate = (n: unknown) => findFirstInObject(n, (o) => isQualityGateSnapshot(o))
+
+  it('returns the newest matching toolCalls result (reverse chronological)', () => {
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_quality_gate', result: { snapshot: snap('pass') } },
+        { tool: 'iterate_quality_gate', result: { snapshot: snap('fail') } },
+      ],
+    }
+    const node = latestToolResultNode(session, 'iterate_quality_gate', findGate) as Record<string, any> | null
+    assert.ok(node)
+    assert.equal(node.snapshot.overallStatus, 'fail')
+  })
+
+  it('skips a junk LATEST result so an older valid one still surfaces', () => {
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_quality_gate', result: { snapshot: snap('pass') } },
+        { tool: 'iterate_quality_gate', result: { error: 'boom' } },
+      ],
+    }
+    const node = latestToolResultNode(session, 'iterate_quality_gate', findGate) as Record<string, any> | null
+    assert.ok(node)
+    assert.equal(node.snapshot.overallStatus, 'pass')
+  })
+
+  it('reads assistant message.tool_calls results too', () => {
+    const session = {
+      messages: [
+        { role: 'assistant', tool_calls: [{ name: 'iterate_quality_gate', result: { snapshot: snap('pass') } }] },
+      ],
+    }
+    const node = latestToolResultNode(session, 'iterate_quality_gate', findGate) as Record<string, any> | null
+    assert.ok(node)
+    assert.equal(node.snapshot.overallStatus, 'pass')
+  })
+
+  it('scans contents newest→oldest so a closing message never shadows an embedded payload', () => {
+    const payload = JSON.stringify({ snapshot: snap('pass') })
+    const session = { messages: [{ content: payload }, { content: '门禁已刷新，一切正常。' }] }
+    assert.equal(latestToolResultNode(session, 'iterate_quality_gate', findGate), payload)
+  })
+
+  it('prefers the newest content when several messages embed a match', () => {
+    const olderPayload = JSON.stringify({ snapshot: snap('pass') })
+    const newerPayload = JSON.stringify({ snapshot: snap('fail') })
+    const session = { messages: [{ content: olderPayload }, { content: newerPayload }] }
+    assert.equal(latestToolResultNode(session, 'iterate_quality_gate', findGate), newerPayload)
+  })
+
+  it('returns null for non-object sessions or when nothing matches', () => {
+    assert.equal(latestToolResultNode(null, 'iterate_quality_gate', findGate), null)
+    assert.equal(latestToolResultNode('session', 'iterate_quality_gate', findGate), null)
+    assert.equal(
+      latestToolResultNode({ toolCalls: [{ tool: 'iterate_quality_gate', result: { error: 'boom' } }] }, 'iterate_quality_gate', findGate),
+      null,
+    )
+    assert.equal(latestToolResultNode({ messages: [{ content: 'plain text' }] }, 'iterate_quality_gate', findGate), null)
+  })
+})
+
+describe('currentRoundNumber', () => {
+  it('reads the highest per-round number (normal-mode live-round aggregate)', () => {
+    assert.equal(currentRoundNumber({ rounds: [{ round: 3 }, { round: 1 }] }), 3)
+    assert.equal(currentRoundNumber({ rounds: [{ round: 2 }, { round: 5 }] }), 5)
+  })
+
+  it('falls back to the array length when round numbers are unusable', () => {
+    assert.equal(currentRoundNumber({ rounds: [{}, {}] }), 2)
+    assert.equal(currentRoundNumber({ rounds: [{ round: 0 }] }), 1)
+    assert.equal(currentRoundNumber({ rounds: [null, 'x'] }), 2) // junk elements → length
+  })
+
+  it('returns 0 for non-array / missing rounds', () => {
+    // Regression: `rounds: {}` threw `report.rounds is not iterable`.
+    assert.equal(currentRoundNumber({ rounds: {} }), 0)
+    assert.equal(currentRoundNumber({ rounds: 'junk' }), 0)
+    assert.equal(currentRoundNumber({}), 0)
+  })
+
+  it('agrees with getCurrentRound on the same input', () => {
+    const report = { rounds: [{ round: 4 }] }
+    assert.equal(currentRoundNumber(report), getCurrentRound(report))
+  })
+})
+
+// ─── Transcript extraction helpers (attachLive / extractTranscript) ─────────
+
+describe('attachLive / extractTranscript', () => {
+  it('attachLive copies the sibling live array without mutating the manifest', () => {
+    const manifest = makeTranscriptManifest()
+    const out = attachLive(manifest, { live: LIVE_SAMPLE })
+    assert.ok(out)
+    assert.notEqual(out, manifest) // defensive shallow copy
+    assert.equal(safeLiveOf(out), LIVE_SAMPLE) // same array reference, copied on
+    assert.equal((manifest as Record<string, unknown>).live, undefined) // input untouched
+  })
+
+  it('attachLive keeps the manifest unchanged when there is nothing to attach', () => {
+    const manifest = makeTranscriptManifest()
+    assert.equal(attachLive(manifest, {}), manifest)
+    assert.equal(attachLive(manifest, { live: 'junk' }), manifest)
+    assert.equal(attachLive(null, { live: LIVE_SAMPLE }), null)
+    const withLive = { ...makeTranscriptManifest(), live: LIVE_SAMPLE }
+    assert.equal(attachLive(withLive, { live: [{ ts: 'x' }] }), withLive) // already carries live
+  })
+
+  it('extractTranscript parses a STRING-wrapped manifest payload', () => {
+    const manifest = makeTranscriptManifest()
+    assert.deepEqual(extractTranscript(JSON.stringify(manifest)), manifest)
+    assert.equal(extractTranscript(manifest), manifest) // raw object passes through
+  })
+
+  it('extractTranscript handles capture wrappers (live attached) and message wrappers', () => {
+    const manifest = makeTranscriptManifest()
+    const captured = extractTranscript({ operation: 'capture', transcript: manifest, live: LIVE_SAMPLE })
+    assert.ok(captured)
+    assert.equal(captured.version, manifest.version)
+    assert.equal(safeLiveOf(captured), LIVE_SAMPLE)
+    assert.equal(extractTranscript({ message: manifest }), manifest)
+    assert.equal(extractTranscript({ content: [manifest] }), manifest)
+  })
+
+  it('extractTranscript returns null for non-JSON strings, primitives and cycles', () => {
+    assert.equal(extractTranscript('plain text'), null)
+    assert.equal(extractTranscript('{"broken'), null)
+    assert.equal(extractTranscript(42), null)
+    assert.equal(extractTranscript(null), null)
+    const cycle: Record<string, unknown> = { name: 'root' }
+    cycle.self = cycle
+    assert.equal(extractTranscript(cycle), null)
+  })
+})
+
+// ─── String-encoded session payloads (scanSessionFor* scanners) ─────────────
+
+describe('string-encoded session payloads', () => {
+  it('scanSessionForQualityGate reads a STRING-encoded tool result', () => {
+    const session = { toolCalls: [{ tool: 'iterate_quality_gate', result: JSON.stringify({ snapshot: snap('pass') }) }] }
+    const out = scanSessionForQualityGate(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.overallStatus, 'pass')
+    assert.equal(out.dimensions.length, 2)
+  })
+
+  it('scanSessionForQualityGate reads STRING-encoded message content', () => {
+    const session = { messages: [{ role: 'assistant', content: JSON.stringify({ snapshot: snap('fail') }) }] }
+    const out = scanSessionForQualityGate(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.overallStatus, 'fail')
+  })
+
+  it('scanSessionForExperienceBank reads a STRING-encoded tool result', () => {
+    const session = { toolCalls: [{ tool: 'iterate_experience', result: JSON.stringify(listResult) }] }
+    const out = scanSessionForExperienceBank(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.count, 2)
+    assert.equal(out.entries.length, 2)
+  })
+
+  it('scanSessionForDefenseEvents reads a STRING-encoded tool result', () => {
+    const session = {
+      toolCalls: [{
+        tool: 'iterate_defense_events',
+        result: JSON.stringify({ ok: true, kind: 'defense_events', operation: 'list', language: 'zh', count: 1, events: [eventRec], counts: eventCounts }),
+      }],
+    }
+    const out = scanSessionForDefenseEvents(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.count, 1)
+    assert.equal(out.counts.rollback, 2)
+  })
+
+  it('scanSessionForReport reads a STRING-encoded iterate_review result', () => {
+    const report = makeReport()
+    const session = { toolCalls: [{ tool: 'iterate_review', result: JSON.stringify({ report }) }] }
+    // A string payload round-trips through JSON.parse, so assert deep equality
+    // (the recovered report is a fresh object, not the original reference).
+    assert.deepEqual(scanSessionForReport(session), report)
+  })
+
+  it('never false-positives on plain / broken non-JSON strings', () => {
+    assert.equal(scanSessionForQualityGate({ toolCalls: [{ tool: 'iterate_quality_gate', result: '门禁已刷新' }] }), null)
+    assert.equal(scanSessionForQualityGate({ messages: [{ content: '{"overallStatus":"pass"' }] }), null)
+    assert.equal(scanSessionForReport({ toolCalls: [{ tool: 'iterate_review', result: 'not json at all' }] }), null)
+  })
+})
+
+// ─── Message content fallback recency ────────────────────────────────────────
+
+describe('message content fallback recency', () => {
+  it('a conversational closing message does not shadow an earlier embedded result', () => {
+    // Regression: [{content:'{"overallStatus":…}'},{content:'门禁已刷新'}] → null.
+    const session = {
+      messages: [
+        { content: JSON.stringify({ snapshot: snap('pass') }) },
+        { content: '门禁已刷新' },
+      ],
+    }
+    const out = scanSessionForQualityGate(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.overallStatus, 'pass')
+  })
+
+  it('prefers the newest embedded result when several contents carry one', () => {
+    const session = {
+      messages: [
+        { content: JSON.stringify({ snapshot: snap('pass') }) },
+        { content: JSON.stringify({ snapshot: snap('fail') }) },
+      ],
+    }
+    const out = scanSessionForQualityGate(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.overallStatus, 'fail')
+  })
+})
+
+// ─── Parallel tool-call recency (within one assistant message) ──────────────
+
+describe('parallel tool-call recency', () => {
+  it('the NEWER of two parallel iterate_review calls wins', () => {
+    // Regression: tool_calls were scanned forward, so the OLDER result won
+    // ("Prefers the most recent one" was contradicted).
+    const olderReport = { ...makeReport(), marker: 'OLD' }
+    const newerReport = { ...makeReport(), marker: 'NEW' }
+    const session = {
+      messages: [{
+        tool_calls: [
+          { function: { name: 'iterate_review', arguments: JSON.stringify({ report: olderReport }) } },
+          { function: { name: 'iterate_review', arguments: JSON.stringify({ report: newerReport }) } },
+        ],
+      }],
+    }
+    const found = scanSessionForReport(session) as { marker?: string } | null
+    assert.ok(found)
+    assert.equal(found.marker, 'NEW')
+  })
+
+  it('the NEWER of two parallel iterate_transcript calls wins', () => {
+    const olderManifest = { ...makeTranscriptManifest(), marker: 'OLD' }
+    const newerManifest = { ...makeTranscriptManifest(), marker: 'NEW' }
+    const session = {
+      messages: [{
+        tool_calls: [
+          { arguments: JSON.stringify({ operation: 'capture', transcript: olderManifest }) },
+          { arguments: JSON.stringify({ operation: 'capture', transcript: newerManifest }) },
+        ],
+      }],
+    }
+    const found = scanSessionForTranscript(session) as { marker?: string } | null
+    assert.ok(found)
+    assert.equal(found.marker, 'NEW')
+  })
+})
+
+// ─── TRIAGE_VERDICTS as the verdict source of truth ─────────────────────────
+
+describe('TRIAGE_VERDICTS as the verdict source of truth', () => {
+  it('lists exactly the three triage verdicts every shortcut maps into', () => {
+    assert.deepEqual([...TRIAGE_VERDICTS], ['keep', 'skip', 'ignore'])
+    for (const v of Object.values(VERDICT_SHORTCUTS)) {
+      assert.ok(TRIAGE_VERDICTS.includes(v))
+    }
+  })
+
+  it('keyToVerdict rejects shortcut entries outside TRIAGE_VERDICTS', () => {
+    const shortcuts = VERDICT_SHORTCUTS as Record<string, string>
+    shortcuts.bogus_key = 'bogus'
+    try {
+      assert.equal(keyToVerdict('bogus_key'), null)
+    } finally {
+      delete shortcuts.bogus_key
+    }
+    // The genuine mappings still resolve after the guard.
+    assert.equal(keyToVerdict('y'), 'keep')
+    assert.equal(keyToVerdict('n'), 'skip')
+    assert.equal(keyToVerdict('a'), 'ignore')
+    assert.equal(keyToVerdict('x'), null)
+  })
+
+  it('batchSetVerdict and setAllVerdicts share the same validation', () => {
+    const state: Record<string, 'keep' | 'skip' | 'ignore'> = { '0': 'keep' }
+    assert.equal(batchSetVerdict(state, [0], 'bogus' as 'keep' | 'skip' | 'ignore'), state)
+    assert.equal(setAllVerdicts(state, 'bogus' as 'keep' | 'skip' | 'ignore'), state)
+    assert.deepEqual(setAllVerdicts(state, 'skip'), { '0': 'skip' })
+    assert.deepEqual(countVerdicts(setAllVerdicts(state, 'ignore')), { keep: 0, skip: 0, ignore: 1 })
+  })
+})
+
+// ─── Command-center normalizers (edge inputs) ───────────────────────────────
+
+describe('command-center normalizers (edge inputs)', () => {
+  it('computeSummaryFromFindings tolerates empty, junk and non-array input', () => {
+    // `byDimension` is a null-prototype map (prototype-pollution guard), so the
+    // deep-equalities below compare plain-object copies of it.
+    const empty = { totalFindings: 0, critical: 0, high: 0, medium: 0, low: 0, byDimension: {} }
+    const plain = (s: any) => ({ ...s, byDimension: { ...s.byDimension } })
+    assert.deepEqual(plain(computeSummaryFromFindings([] as unknown as Record<string, unknown>[])), empty)
+    assert.deepEqual(plain(computeSummaryFromFindings({} as unknown as Record<string, unknown>[])), empty)
+
+    const junk = computeSummaryFromFindings(
+      [null, 42, 'x', { severity: 'high', dimension: 'security' }, { severity: 'blocker' }] as unknown as Record<string, unknown>[],
+    )
+    assert.equal(junk.totalFindings, 5) // length counts every element…
+    assert.equal(junk.high, 1) // …while junk is skipped for severity
+    assert.equal(junk.critical, 0)
+    assert.deepEqual({ ...junk.byDimension }, { security: 1, unknown: 1 })
+    // …and the map must not inherit Object.prototype keys (a `__proto__`
+    // finding would otherwise have been able to write to it).
+    assert.equal(Object.getPrototypeOf(junk.byDimension), null)
+    assert.equal((junk.byDimension as any).constructor, undefined)
+  })
+
+  it('normalizeQualityGateSnapshot degrades null / junk fields to defaults', () => {
+    const empty = normalizeQualityGateSnapshot(null) as Record<string, any>
+    assert.equal(empty.overallStatus, 'pending')
+    assert.equal(empty.overallScore, 0)
+    assert.equal(empty.failReason, null)
+    assert.deepEqual(empty.dimensions, [])
+
+    const junk = normalizeQualityGateSnapshot({
+      overallStatus: 'bogus',
+      overallScore: 'high',
+      verificationPassRate: Number.NaN,
+      totalFindings: 7,
+      dimensions: [null, 'x', { dimension: 'correctness', score: 3, status: 'bogus' }],
+    }) as Record<string, any>
+    assert.equal(junk.overallStatus, 'pending')
+    assert.equal(junk.overallScore, 0)
+    assert.equal(junk.verificationPassRate, 0)
+    assert.equal(junk.totalFindings, 7)
+    assert.equal(junk.dimensions.length, 3)
+    assert.deepEqual(junk.dimensions[0], { dimension: '', convergenceRate: 0, findingsCount: 0, fixedCount: 0, score: 0, status: 'warn' })
+    assert.equal(junk.dimensions[2].dimension, 'correctness')
+    assert.equal(junk.dimensions[2].score, 3)
+    assert.equal(junk.dimensions[2].status, 'warn') // unknown status degrades to warn
+  })
+
+  it('normalizeExperienceBankResult tolerates junk entries and field types', () => {
+    const empty = normalizeExperienceBankResult(null) as Record<string, any>
+    assert.equal(empty.operation, '')
+    assert.equal(empty.count, 0)
+    assert.equal(empty.added, false)
+    assert.deepEqual(empty.entries, [])
+
+    const junk = normalizeExperienceBankResult({
+      operation: 'list',
+      count: 'two',
+      added: 1,
+      entries: [null, 'x', { id: 'e1', hitCount: 'many', files: [1, 'a'], tags: null }],
+    }) as Record<string, any>
+    assert.equal(junk.count, 0)
+    assert.equal(junk.added, false)
+    assert.equal(junk.entries.length, 3)
+    assert.deepEqual(junk.entries[0], {
+      id: '', timestamp: '', dimension: '', pattern: '', description: '',
+      verifiedFix: '', findingSummary: '', severity: '', hitCount: 0,
+      lastHitAt: null, files: [], tags: [],
+    })
+    assert.equal(junk.entries[2].id, 'e1')
+    assert.equal(junk.entries[2].hitCount, 0)
+    assert.deepEqual(junk.entries[2].files, ['', 'a'])
+    assert.deepEqual(junk.entries[2].tags, [])
+
+    // A `get`/`add` result with a junk entry degrades to an empty list.
+    const noEntry = normalizeExperienceBankResult({ operation: 'get', entry: null }) as Record<string, any>
+    assert.deepEqual(noEntry.entries, [])
+  })
+
+  it('normalizeDefenseEventsResult tolerates junk counts and event elements', () => {
+    const empty = normalizeDefenseEventsResult(null) as Record<string, any>
+    assert.equal(empty.operation, '')
+    assert.equal(empty.count, 0)
+    assert.deepEqual(empty.counts, { precondition_failed: 0, rollback: 0, invariant_violated: 0, assumption_falsified: 0 })
+    assert.deepEqual(empty.events, [])
+
+    const junk = normalizeDefenseEventsResult({
+      operation: 'list',
+      count: 'many',
+      counts: { rollback: -1, invariant_violated: 'x', precondition_failed: 2, bogus_type: 9 },
+      events: [null, 'x', { id: 'd1', round: '2', type: 'rollback', line: 0 }],
+    }) as Record<string, any>
+    assert.equal(junk.count, 0)
+    // Negative / non-numeric counts degrade to 0; unknown keys are dropped.
+    assert.deepEqual(junk.counts, { precondition_failed: 2, rollback: 0, invariant_violated: 0, assumption_falsified: 0 })
+    assert.equal(junk.events.length, 3)
+    assert.equal(junk.events[0].type, '')
+    assert.equal(junk.events[2].round, 0)
+    assert.equal(junk.events[2].line, null) // line 0 is not a usable position
+  })
+})
+
+// ═══ Gap-fix helpers ═══════════════════════════════════════════════════════
+//
+// These lock the copy-to-instruction contract: every paste-able payload the
+// client generates must match the target tool's parameter schema, and the
+// startup text must be an instruction (dsh exposes NO command API to plugins,
+// so a `/iterate` slash command can never exist).
+
+/** Extract the first ```json fenced block from an instruction, if any. */
+function jsonBlockOf(text: string): Record<string, unknown> | null {
+  const m = /```json\n([\s\S]*?)```/.exec(text)
+  if (!m) return null
+  try {
+    const parsed = JSON.parse(m[1]!)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+// ─── #1 startup instructions ────────────────────────────────────────────────
+
+describe('startup instructions (gap #1)', () => {
+  it('are natural-language instructions, never slash commands', () => {
+    // `src/index.ts` registers 17 tools + a system prompt only; there is no
+    // command registry, so a copied `/iterate` would paste into a command that
+    // does not exist.
+    for (const text of [START_INSTRUCTION_FULL, START_INSTRUCTION_REVIEW_ONLY]) {
+      assert.ok(text.trim().length > 0)
+      assert.ok(!text.startsWith('/'), `startup copy must not look like a slash command: ${text.slice(0, 40)}`)
+      assert.match(text, /workflow/, 'must route through the `workflow` tool the skill prompt teaches')
+    }
+  })
+
+  it('the registered set exposes both modes', () => {
+    assert.equal(START_INSTRUCTIONS.full, START_INSTRUCTION_FULL)
+    assert.equal(START_INSTRUCTIONS.reviewOnly, START_INSTRUCTION_REVIEW_ONLY)
+    assert.match(START_INSTRUCTION_FULL, /"normal"/)
+    assert.match(START_INSTRUCTION_REVIEW_ONLY, /"dry-run"/)
+  })
+
+  it('the full instruction preflights validation.commands', () => {
+    // The full-loop CTA is the one place a first-time user is guaranteed to
+    // read; it must surface the zero-verification hazard (gap #2's client half).
+    assert.match(START_INSTRUCTION_FULL, /validation\.commands/)
+    assert.match(START_INSTRUCTION_FULL, /iterate_config/)
+  })
+})
+
+// ─── #5 dashboard run state ─────────────────────────────────────────────────
+
+describe('dashboardRunState (gap #5)', () => {
+  it('reports empty when there is no manifest at all', () => {
+    assert.deepEqual(dashboardRunState(null), { state: 'empty', round: 0, phase: '', stoppedReason: '' })
+    assert.equal(dashboardRunState(undefined).state, 'empty')
+    assert.equal(dashboardRunState('junk').state, 'empty')
+  })
+
+  it('reports running (with round + phase) while the run is active', () => {
+    const state = dashboardRunState({ active: true, round: 2, maxRounds: 5, phases: ['plan', 'review'] })
+    assert.equal(state.state, 'running')
+    assert.equal(state.round, 2)
+    assert.equal(state.phase, 'review')
+    assert.equal(state.stoppedReason, '')
+  })
+
+  it('reports done once the run is no longer active', () => {
+    const state = dashboardRunState({ active: false, round: 3, phases: ['report'], stoppedReason: 'converged' })
+    assert.equal(state.state, 'done')
+    assert.equal(state.round, 3)
+    assert.equal(state.stoppedReason, 'converged')
+    assert.equal(state.phase, 'report')
+  })
+
+  it('clamps a junk round to 1 instead of rendering Round 0', () => {
+    assert.equal(dashboardRunState({ active: true, round: 'nope' }).round, 1)
+    assert.equal(dashboardRunState({ active: true, round: -4 }).round, 1)
+  })
+})
+
+// ─── #6 validations normalization ───────────────────────────────────────────
+
+describe('validations contract (gap #6)', () => {
+  it('keeps only well-formed rows and drops junk', () => {
+    const rows = normalizeValidations([
+      { round: 2, command: 'npm test', exitCode: 1, allowed: false, rejectReason: 'unit failures' },
+      { round: '3', command: 'npm run lint', exitCode: 0, allowed: true },
+      { round: 0, command: '', allowed: false }, // no command → dropped
+      null,
+      'junk',
+      { round: 1, command: 'npm run build', exitCode: 'x', allowed: false }, // exitCode → null
+    ])
+    assert.equal(rows.length, 3)
+    assert.deepEqual(rows[0], { round: 2, command: 'npm test', exitCode: 1, allowed: false, rejectReason: 'unit failures' })
+    assert.deepEqual(rows[1], { round: 3, command: 'npm run lint', exitCode: 0, allowed: true })
+    assert.deepEqual(rows[2], { round: 1, command: 'npm run build', exitCode: null, allowed: false })
+  })
+
+  it('non-array input degrades to []', () => {
+    assert.deepEqual(normalizeValidations(null), [])
+    assert.deepEqual(normalizeValidations({}), [])
+    assert.deepEqual(normalizeValidations('x'), [])
+  })
+
+  it('normalizeTranscript exposes the rows on the manifest', () => {
+    const t = normalizeTranscript({
+      active: true,
+      validations: [{ round: 1, command: 'npm test', exitCode: 0, allowed: true }],
+    }) as { validations: Array<Record<string, unknown>> }
+    assert.equal(t.validations.length, 1)
+    assert.equal(t.validations[0]!.command, 'npm test')
+    // Absent field still yields an array (the UI branches on length, not null).
+    assert.deepEqual((normalizeTranscript({}) as { validations: unknown[] }).validations, [])
+  })
+
+  it('an aborted_by_validation manifest keeps its reason so the UI can highlight', () => {
+    const t = normalizeTranscript({ stoppedReason: 'aborted_by_validation' }) as { stoppedReason: string }
+    assert.equal(t.stoppedReason, 'aborted_by_validation')
+  })
+})
+
+// ─── #7 triage write-back loop ──────────────────────────────────────────────
+
+describe('triage readback instruction (gap #7)', () => {
+  it('names iterate_triage with operation list', () => {
+    const text = buildTriageReadbackInstruction()
+    assert.match(text, /iterate_triage/)
+    assert.deepEqual(jsonBlockOf(text), { operation: 'list' })
+  })
+
+  it('the apply instruction still drives a validated write', () => {
+    const text = buildApplyInstruction([{ file: 'src/a.ts', dimension: 'security', reason: 'r' }])
+    assert.deepEqual(jsonBlockOf(text)?.operation, 'apply')
+    assert.match(text, /iterate_triage/)
+  })
+})
+
+// ─── #8 config fields + field instruction ───────────────────────────────────
+
+describe('config field picker (gap #8)', () => {
+  it('CONFIG_EDIT_FIELDS includes validation.commands with an explicit empty warning', () => {
+    const field = configFieldByKey('validation.commands')
+    assert.ok(field, 'validation.commands must be selectable in the settings UI')
+    assert.match(field!.hint, /npm test/)
+    assert.match(field!.hint, /不验证/)
+  })
+
+  it('also lists language and personalization.known_intentional', () => {
+    assert.ok(configFieldByKey('language'))
+    assert.ok(configFieldByKey('personalization.known_intentional'))
+    assert.equal(configFieldByKey('nope'), null)
+    assert.equal(configFieldByKey(''), null)
+  })
+
+  it('the guide warns about running with no verification commands', () => {
+    const guide = buildConfigEditGuide()
+    assert.match(guide, /validation\.commands/)
+    assert.match(guide, /不被保护|不受任何测试保护/)
+    assert.match(guide, /选字段/)
+  })
+
+  it('buildConfigFieldInstruction emits an iterate_config write payload', () => {
+    const text = buildConfigFieldInstruction('max_rounds', 5)
+    const payload = jsonBlockOf(text)
+    assert.ok(payload)
+    assert.equal(payload!.operation, 'write')
+    assert.deepEqual((payload!.updates as Record<string, unknown>).max_rounds, 5)
+    assert.match(text, /iterate_config/)
+    assert.match(text, /备份/)
+  })
+
+  it('omitted values become an explicit model-filled placeholder', () => {
+    const payload = jsonBlockOf(buildConfigFieldInstruction('validation.commands'))
+    assert.deepEqual(payload!.updates, { 'validation.commands': CONFIG_VALUE_PLACEHOLDER })
+    assert.match(CONFIG_VALUE_PLACEHOLDER, /由模型填写/)
+  })
+
+  it('every listed field round-trips through the instruction builder', () => {
+    for (const f of CONFIG_EDIT_FIELDS) {
+      const payload = jsonBlockOf(buildConfigFieldInstruction(f.key))
+      assert.ok(payload, `no payload for ${f.key}`)
+      assert.deepEqual(Object.keys(payload!.updates as object), [f.key])
+      assert.match(buildConfigFieldInstruction(f.key), new RegExp(f.key.replace(/\./g, '\\.')))
+    }
+  })
+})
+
+// ─── #10 instruction payloads vs tool schemas ───────────────────────────────
+
+describe('instruction payloads match tool schemas (gap #10)', () => {
+  const requiredFixParams = ['file', 'content', 'finding', 'round']
+
+  it('buildFixInstruction carries all four required iterate_fix params', () => {
+    const text = buildFixInstruction(makeFinding())
+    const payload = jsonBlockOf(text)
+    assert.ok(payload, 'must emit a JSON call block')
+    for (const p of requiredFixParams) assert.ok(p in payload!, `missing required param ${p}`)
+    // …and the two model-supplied ones are explicitly placeholders.
+    assert.match(String(payload!.content), /由模型填写/)
+    assert.deepEqual(payload!.round, '<由模型填写：当前迭代轮次（≥1 的整数）>')
+    assert.match(text, /iterate_fix/)
+    assert.match(text, /force/)
+  })
+
+  it('buildFixInstruction fills round when the UI knows it', () => {
+    const payload = jsonBlockOf(buildFixInstruction(makeFinding(), { round: 3 }))
+    assert.equal(payload!.round, 3)
+  })
+
+  it('buildFixInstruction refuses a finding without a file', () => {
+    assert.equal(buildFixInstruction({ summary: 'x' }), '')
+  })
+
+  it('buildAssignFixesInstruction says one call per finding (no array param)', () => {
+    const text = buildAssignFixesInstruction([makeFinding(), makeFinding({ file: 'src/b.ts' })])
+    assert.match(text, /iterate_fix/)
+    assert.match(text, /一次/)
+    assert.match(text, /一个/, 'must state that iterate_fix takes exactly one finding')
+    const block = jsonBlockOf(text)
+    assert.ok(Array.isArray(block), 'the payload is a LIST of findings, not a fake single call')
+    assert.equal((block as unknown as unknown[]).length, 2)
+    assert.ok(!('content' in (block as object)), 'an array payload cannot carry content — hence the staged text')
+  })
+
+  it('buildAssignFixesInstruction returns empty for no findings', () => {
+    assert.equal(buildAssignFixesInstruction([]), '')
+    assert.equal(buildAssignFixesInstruction([null] as never), '')
+  })
+
+  it('buildArchitecturalFixInstruction keeps force:true but lists required params', () => {
+    const text = buildArchitecturalFixInstruction([makeFinding()])
+    assert.match(text, /force/)
+    for (const p of requiredFixParams) assert.ok(text.includes(p), `missing ${p}`)
+    assert.match(text, /iterate_fix/)
+  })
+
+  it('checkpoint resume/clear payloads carry ONLY the operation', () => {
+    // `maxRounds`/`mode`/`round` are save-side inputs; `maxRounds: null` was
+    // an invalid-integer field on a positive-integer schema.
+    assert.deepEqual(jsonBlockOf(buildCheckpointResumeInstruction()), { operation: 'resume' })
+    assert.deepEqual(jsonBlockOf(buildCheckpointClearInstruction()), { operation: 'clear' })
+    assert.match(buildCheckpointResumeInstruction(), /iterate_checkpoint/)
+  })
+
+  it('quality-gate query/clear payloads carry an operation enum value', () => {
+    assert.deepEqual(jsonBlockOf(buildQualityGateQueryInstruction()), { operation: 'read' })
+    assert.deepEqual(jsonBlockOf(buildQualityGateClearInstruction()), { operation: 'clear' })
+    assert.match(buildQualityGateQueryInstruction(), /iterate_quality_gate/)
+  })
+
+  it('rollback payload is exactly { id }', () => {
+    assert.deepEqual(jsonBlockOf(buildRollbackInstruction('fix-7')), { id: 'fix-7' })
+    assert.match(buildRollbackInstruction('fix-7'), /iterate_rollback/)
+  })
+
+  it('experience / defense-events list payloads use their operations', () => {
+    assert.deepEqual(jsonBlockOf(buildExperienceListInstruction()), { operation: 'list' })
+    assert.deepEqual(jsonBlockOf(buildDefenseEventsListInstruction()), { operation: 'list' })
+    assert.match(buildExperienceListInstruction(), /iterate_experience/)
+    assert.match(buildDefenseEventsListInstruction(), /iterate_defense_events/)
+  })
+})
+
+// ─── #11 export extras ──────────────────────────────────────────────────────
+
+describe('serializeObservatoryExport extras (gap #11)', () => {
+  it('includes the four on-disk artifacts when supplied', () => {
+    const extras = {
+      qualityGate: { overallStatus: 'pass' },
+      experienceBank: { entries: [] },
+      defenseEvents: { counts: {} },
+      report: { findings: [] },
+    }
+    const parsed = JSON.parse(serializeExportWithExtras({ version: 1 }, [], extras)) as Record<string, unknown>
+    for (const key of EXPORT_EXTRA_KEYS) assert.ok(key in parsed, `missing ${key} in export`)
+    assert.deepEqual(parsed.qualityGate, extras.qualityGate)
+    assert.deepEqual(parsed.report, extras.report)
+  })
+
+  it('stays shape-stable when extras are absent / partial / undefined', () => {
+    const bare = JSON.parse(serializeExportWithExtras({ version: 1 }, [])) as Record<string, unknown>
+    for (const key of EXPORT_EXTRA_KEYS) assert.ok(!(key in bare), `${key} must be omitted, not null, when unknown`)
+    const partial = JSON.parse(
+      serializeExportWithExtras(null, [], { qualityGate: null, report: undefined, experienceBank: 'junk' } as never),
+    ) as Record<string, unknown>
+    assert.ok('qualityGate' in partial, 'explicit null is preserved')
+    assert.ok(!('report' in partial), 'undefined is dropped')
+    assert.equal(partial.experienceBank, 'junk')
+    assert.ok(!('defenseEvents' in partial))
+  })
+
+  it('ignores unknown extra keys and non-object extras', () => {
+    const parsed = JSON.parse(
+      serializeExportWithExtras({}, [], { evil: 1, qualityGate: { ok: true } } as never),
+    ) as Record<string, unknown>
+    assert.ok(!('evil' in parsed))
+    assert.deepEqual(JSON.parse(serializeExportWithExtras({}, [], 'junk' as never)), JSON.parse(serializeExportWithExtras({}, [], undefined)))
+  })
+
+  it('keeps the cyclic fallback', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const parsed = JSON.parse(serializeExportWithExtras(cyclic, [], { report: cyclic })) as { manifest: unknown }
+    assert.equal(parsed.manifest, null)
+  })
+})
+
+// ─── #13 cross-round comparison ─────────────────────────────────────────────
+
+describe('buildRoundComparison (gap #13)', () => {
+  const report = {
+    findings: [
+      { round: 1, severity: 'high', status: 'fixed' },
+      { round: 1, severity: 'critical', status: 'open' },
+      { round: 2, severity: 'high', status: 'fixed' },
+      { severity: 'low', status: 'open' }, // round 0 → dropped
+    ],
+  }
+
+  it('builds one sorted row per round', () => {
+    const rows = buildRoundComparison(report, [])
+    assert.deepEqual(rows.map((r) => r.round), [1, 2])
+    assert.equal(rows[0]!.findings, 2)
+    assert.equal(rows[0]!.fixed, 1)
+    assert.deepEqual(rows[0]!.severities, { high: 1, critical: 1 })
+    assert.deepEqual(rows[1]!.severities, { high: 1 })
+    assert.deepEqual(rows[0]!.validations, [])
+  })
+
+  it('merges validation rows into the matching round', () => {
+    const rows = buildRoundComparison(report, [
+      { round: 1, command: 'npm test', exitCode: 1, allowed: false },
+      { round: 2, command: 'npm test', exitCode: 0, allowed: true },
+      { round: 4, command: 'npm run lint', exitCode: 0, allowed: true },
+    ])
+    assert.deepEqual(rows.map((r) => r.round), [1, 2, 4])
+    assert.equal(rows[0]!.validations[0]!.allowed, false)
+    assert.equal(rows[1]!.validations[0]!.allowed, true)
+    assert.equal(rows[2]!.findings, 0)
+    assert.equal(rows[2]!.fixed, 0)
+  })
+
+  it('tolerates junk report / validations', () => {
+    assert.deepEqual(buildRoundComparison(null, null), [])
+    assert.deepEqual(buildRoundComparison({}, 'x' as never), [])
+    const rows = buildRoundComparison({ findings: [null, 42, 'x'] } as never, [null, 'y'] as never)
+    // Junk findings still count (length semantics match the summary builder)
+    // but no round>0 rows are produced without a usable round.
+    assert.deepEqual(rows, [])
+  })
+})
+
+// ─── #4 disk snapshot pull ──────────────────────────────────────────────────
+
+describe('disk snapshot pull instruction (gap #4)', () => {
+  it('lists every read-side tool with its JSON args', () => {
+    const text = buildDiskSnapshotInstruction()
+    for (const src of DISK_SNAPSHOT_SOURCES) {
+      assert.ok(text.includes(src.tool), `${src.tool} missing from the pull instruction`)
+      assert.ok(text.includes(JSON.stringify(src.args)), `args missing for ${src.tool}`)
+    }
+    assert.match(text, /完整返回结果/)
+  })
+
+  it('covers the four panel data sources plus status + history', () => {
+    const tools = DISK_SNAPSHOT_SOURCES.map((s) => s.tool)
+    for (const t of [
+      'iterate_status',
+      'iterate_transcript',
+      'iterate_quality_gate',
+      'iterate_experience',
+      'iterate_defense_events',
+      'iterate_history',
+    ]) assert.ok(tools.includes(t as never), `${t} must be pullable`)
+  })
+
+  it('separates "not pulled" from "pulled and empty"', () => {
+    assert.match(diskEmptyStateText(false, '质量门禁证书'), /尚未从磁盘拉取质量门禁证书/)
+    assert.match(diskEmptyStateText(false, '质量门禁证书'), /拉取磁盘快照/)
+    assert.match(diskEmptyStateText(true, '质量门禁证书'), /已从磁盘拉取/)
+    assert.match(diskEmptyStateText(true, '质量门禁证书'), /磁盘无数据/)
+    assert.match(diskEmptyStateText(true, ''), /已从磁盘拉取：数据/)
+  })
+
+  it('toolCalledInSession detects a tool call in either session shape', () => {
+    assert.equal(toolCalledInSession({ toolCalls: [{ tool: 'iterate_quality_gate' }] }, 'iterate_quality_gate'), true)
+    assert.equal(toolCalledInSession({ toolCalls: [{ tool: 'other' }] }, 'iterate_quality_gate'), false)
+    assert.equal(
+      toolCalledInSession({ messages: [{ tool_calls: [{ function: { name: 'iterate_experience' } }] }] }, 'iterate_experience'),
+      true,
+    )
+    assert.equal(
+      toolCalledInSession({ messages: [{ tool_calls: [{ name: 'iterate_defense_events' }] }] }, 'iterate_defense_events'),
+      true,
+    )
+    assert.equal(toolCalledInSession(null, 'iterate_status'), false)
+    assert.equal(toolCalledInSession({}, ''), false)
+    assert.equal(toolCalledInSession('junk', 'iterate_status'), false)
+  })
+})
+
+// ─── prototype-pollution guards ─────────────────────────────────────────────
+
+describe('dimension maps are prototype-pollution safe', () => {
+  it('groupByDimension uses a null-prototype map', () => {
+    const groups = groupByDimension({ findings: [{ dimension: 'constructor', severity: 'high' }] })
+    assert.equal(Object.getPrototypeOf(groups), null)
+    // A dimension literally named `constructor` is an OWN bucket, not
+    // Object.prototype.constructor — `.constructor` returns the findings list.
+    assert.deepEqual((groups as unknown as Record<string, unknown>).constructor, [
+      { dimension: 'constructor', severity: 'high' },
+    ])
+    // A `__proto__` dimension becomes an own key, not a setter call.
+    const proto = groupByDimension({ findings: [{ dimension: '__proto__', severity: 'low' }] })
+    assert.deepEqual({ ...proto }, { ['__proto__']: [{ dimension: '__proto__', severity: 'low' }] })
+  })
+
+  it('computeSummaryFromFindings ignores inherited severity keys', () => {
+    const sum = computeSummaryFromFindings([{ severity: 'constructor' }] as never)
+    assert.equal(sum.critical, 0)
+    assert.equal(sum.high, 0)
+    assert.equal(Object.getPrototypeOf(sum.byDimension), null)
   })
 })

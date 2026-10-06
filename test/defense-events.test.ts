@@ -3,17 +3,19 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { registerDefenseEventsTool } from '../src/tools/defense-events.ts'
+import { registerDefenseEventsTool, clampLimit } from '../src/tools/defense-events.ts'
 
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
   isConcurrencySafe: (args: unknown) => boolean
+  presentResult: (args: unknown, result: { content?: unknown; isError?: boolean }) => { card?: string; title?: string } | undefined
 } {
   let def: {
     execute: (a: unknown, e: unknown) => Promise<unknown>
     output: { render: (a: unknown, v: unknown) => unknown }
     isConcurrencySafe?: (a: unknown) => boolean
+    presentResult?: (a: unknown, r: { content?: unknown; isError?: boolean }) => unknown
   } | null = null
   registerDefenseEventsTool({
     tools: { register: (d: never) => { def = d as typeof def } },
@@ -24,6 +26,7 @@ function captureTool(): {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
     isConcurrencySafe: (args) => (def!.isConcurrencySafe?.(args) ?? false),
+    presentResult: (args, result) => def!.presentResult?.(args, result) as { card?: string; title?: string } | undefined,
   }
 }
 
@@ -138,19 +141,36 @@ describe('iterate_defense_events record', () => {
     }
   })
 
-  it('accepts a valid line (0 = whole-file) on record', async () => {
+  it('rejects line 0 (not a usable position) and records a 1-based line', async () => {
     const tool = captureTool()
     const { dir, cleanup } = tempProject()
     try {
-      const ok = (await tool.execute({
+      // Positions are 1-based. `line: 0` passes the integer argument schema,
+      // but the renderer prints the position only for a truthy line, so a
+      // persisted 0 would come back as a bare file path — reject it and write
+      // nothing.
+      const zero = (await tool.execute({
         operation: 'record',
         path: dir,
         ...recordArgs,
         file: 'src/a.ts',
         line: 0,
       })) as Record<string, unknown>
+      assert.equal(zero.ok, false)
+      assert.ok((zero.errors as string[]).some((e) => e.includes('line')))
+      assert.equal(existsSync(join(dir, '.iterate')), false)
+
+      const ok = (await tool.execute({
+        operation: 'record',
+        path: dir,
+        ...recordArgs,
+        file: 'src/a.ts',
+        line: 1,
+      })) as Record<string, unknown>
       assert.equal(ok.ok, true)
-      assert.equal((ok.event as { file: string }).file, 'src/a.ts')
+      assert.equal((ok.event as { line?: number }).line, 1)
+      const text = tool.render({ operation: 'record' }, ok)[0]!.text
+      assert.match(text, /File: src\/a\.ts:1/)
     } finally {
       cleanup()
     }
@@ -292,5 +312,273 @@ describe('iterate_defense_events concurrency safety', () => {
     assert.equal(tool.isConcurrencySafe({}), true) // default = list
     assert.equal(tool.isConcurrencySafe({ operation: 'record' }), false)
     assert.equal(tool.isConcurrencySafe({ operation: 'clear' }), false)
+  })
+})
+
+// ─── list limit semantics, filters, and the record lock ─────────────────────
+
+/** Seed a hand-edited stream directly (cheaper than N record round-trips). */
+function seedEvents(dir: string, events: Array<Record<string, unknown>>): void {
+  mkdirSync(join(dir, '.iterate'), { recursive: true })
+  writeFileSync(
+    join(dir, '.iterate', 'defense-events.json'),
+    JSON.stringify({ lastUpdated: '2026-01-01T00:00:00.000Z', events }),
+    'utf-8',
+  )
+}
+
+const seeded = (i: number, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: `def-seed-${i}`,
+  timestamp: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+  round: 1,
+  type: 'rollback',
+  description: `seeded event ${i}`,
+  defense: 'defense',
+  outcome: 'outcome',
+  severity: 'medium',
+  ...over,
+})
+
+describe('iterate_defense_events list limits and total', () => {
+  it('clampLimit defaults for undefined, non-integer, zero, and negative limits', () => {
+    assert.equal(clampLimit(undefined), 50)
+    assert.equal(clampLimit(2.5), 50)
+    assert.equal(clampLimit(NaN), 50)
+    assert.equal(clampLimit(0), 50)
+    assert.equal(clampLimit(-3), 50)
+    // Hand-built args can smuggle a string past the schema into the body.
+    assert.equal(clampLimit('10' as unknown as number), 50)
+  })
+
+  it('clampLimit caps at MAX_LIMIT (100) and keeps in-range values', () => {
+    assert.equal(clampLimit(10_000), 100)
+    assert.equal(clampLimit(100), 100)
+    assert.equal(clampLimit(1), 1)
+    assert.equal(clampLimit(7), 7)
+  })
+
+  it('a non-integer limit is rejected by argument validation before the body runs', async () => {
+    const tool = captureTool()
+    await assert.rejects(() => tool.execute({ operation: 'list', limit: 2.5 }), /must be an integer/)
+  })
+
+  it('returns the untruncated total next to the limit-truncated count', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      seedEvents(dir, [seeded(1), seeded(2), seeded(3)])
+      const listed = (await tool.execute({ operation: 'list', path: dir, limit: 1 })) as Record<string, unknown>
+      assert.equal(listed.ok, true)
+      assert.equal((listed.events as unknown[]).length, 1)
+      assert.equal(listed.count, 1) // what was returned
+      assert.equal(listed.total, 3) // what matched BEFORE truncation
+
+      const blocks = tool.render({ operation: 'list' }, listed)
+      assert.match(blocks[0]!.text, /showing 1 of 3/)
+      assert.doesNotMatch(blocks[0]!.text, /\(1 total\)/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('renders the full untruncated list when nothing is cut', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      seedEvents(dir, [seeded(1), seeded(2)])
+      const listed = (await tool.execute({ operation: 'list', path: dir })) as Record<string, unknown>
+      assert.equal(listed.count, 2)
+      assert.equal(listed.total, 2)
+      const blocks = tool.render({ operation: 'list' }, listed)
+      assert.match(blocks[0]!.text, /showing 2 of 2/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clamps limit 10_000 down to the cap instead of returning the whole stream', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      seedEvents(dir, Array.from({ length: 105 }, (_, i) => seeded(i)))
+      const listed = (await tool.execute({ operation: 'list', path: dir, limit: 10_000 })) as Record<string, unknown>
+      assert.equal(listed.ok, true)
+      // MAX_LIMIT = 100: an absurd limit must clamp, but `total` still tells
+      // the caller how many matches really exist.
+      assert.equal((listed.events as unknown[]).length, 100)
+      assert.equal(listed.count, 100)
+      assert.equal(listed.total, 105)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falls back to the default limit for a non-integer limit', () => {
+    // The `limit` parameter is declared `integer`, so the schema rejects 2.5
+    // before the body runs (pinned above); the body-level clamp still defaults
+    // for hand-constructed args — see clampLimit tests at the top of this file.
+    assert.equal(clampLimit(2.5), 50)
+  })
+
+  it('sorts a timestamp-less event as the OLDEST (last in a newest-first list)', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // The missing-timestamp event is normalized to the epoch sentinel, so it
+      // must never jump ahead of a genuinely newer event in the list.
+      seedEvents(dir, [
+        { id: 'no-ts', round: 1, type: 'rollback', description: 'd', defense: 'f', outcome: 'o', severity: 'low' },
+        seeded(2, { timestamp: '2026-06-01T00:00:00.000Z' }),
+      ])
+      const listed = (await tool.execute({ operation: 'list', path: dir })) as Record<string, unknown>
+      const ids = (listed.events as Array<{ id: string }>).map((e) => e.id)
+      assert.deepEqual(ids, ['def-seed-2', 'no-ts'])
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_defense_events list filters', () => {
+  const mixed = [
+    seeded(1, { type: 'rollback', round: 1, severity: 'high' }),
+    seeded(2, { type: 'rollback', round: 2, severity: 'low' }),
+    seeded(3, { type: 'precondition_failed', round: 1, severity: 'high' }),
+  ]
+
+  it('filters by type, round, severity, and their combination', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      seedEvents(dir, mixed)
+      const byType = (await tool.execute({ operation: 'list', path: dir, type: 'rollback' })) as Record<string, unknown>
+      assert.equal(byType.total, 2)
+      const byRound = (await tool.execute({ operation: 'list', path: dir, round: 1 })) as Record<string, unknown>
+      assert.equal(byRound.total, 2)
+      const bySeverity = (await tool.execute({ operation: 'list', path: dir, severity: 'high' })) as Record<string, unknown>
+      assert.equal(bySeverity.total, 2)
+      const combined = (await tool.execute({
+        operation: 'list', path: dir, type: 'rollback', round: 2, severity: 'low',
+      })) as Record<string, unknown>
+      assert.equal(combined.total, 1)
+      assert.equal((combined.events as Array<{ id: string }>)[0]!.id, 'def-seed-2')
+      assert.equal(combined.count, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('an invalid type filter matches nothing instead of crashing', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      seedEvents(dir, mixed)
+      const listed = (await tool.execute({ operation: 'list', path: dir, type: 'not-a-real-type' })) as Record<string, unknown>
+      assert.equal(listed.ok, true)
+      assert.equal((listed.events as unknown[]).length, 0)
+      assert.equal(listed.total, 0)
+      assert.equal(listed.count, 0)
+      const blocks = tool.render({ operation: 'list' }, listed)
+      assert.equal(blocks[0]!.text, 'No defense events recorded.')
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_defense_events record locking', () => {
+  it('serializes sequential records under the shared lock and leaves no residue', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const lockPath = join(dir, '.iterate', '.defense-events.lock')
+      const first = (await tool.execute({ operation: 'record', path: dir, ...recordArgs })) as Record<string, unknown>
+      assert.equal(first.ok, true)
+      // The advisory lock is released as soon as the critical section ends —
+      // no stale lock file may survive a successful record.
+      assert.equal(existsSync(lockPath), false)
+
+      const second = (await tool.execute({
+        operation: 'record', path: dir, ...recordArgs, round: 3, type: 'invariant_violated',
+      })) as Record<string, unknown>
+      assert.equal(second.ok, true)
+      assert.equal(existsSync(lockPath), false)
+
+      const persisted = JSON.parse(readFileSync(join(dir, '.iterate', 'defense-events.json'), 'utf-8'))
+      assert.equal(persisted.events.length, 2)
+      assert.equal(persisted.counts.rollback, 1)
+      assert.equal(persisted.counts.invariant_violated, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('still surfaces a persistence failure while holding the lock', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      // `.iterate` exists as a plain FILE → nothing can be written under it.
+      writeFileSync(join(dir, '.iterate'), '', 'utf-8')
+      const result = (await tool.execute({ operation: 'record', path: dir, ...recordArgs })) as Record<string, unknown>
+      assert.equal(result.ok, false)
+      assert.match(result.error as string, /defense-events\.json/)
+      // Fail-open lock: an unwritable lock directory must not wedge the call,
+      // and no lock file can exist under the file-turned directory anyway.
+      assert.equal(existsSync(join(dir, '.iterate', '.defense-events.lock')), false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clear runs under the same lock (a stale lock is stolen, none left behind)', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      const recorded = (await tool.execute({ operation: 'record', path: dir, ...recordArgs })) as Record<string, unknown>
+      assert.equal(recorded.ok, true)
+      const lockPath = join(dir, '.iterate', '.defense-events.lock')
+      // A crashed holder's lock: pid 99999999 is dead, so it is stale. Only a
+      // clear that ACQUIRES the shared `defense-events` lock can steal it — an
+      // unlocked clear (the old code) left the file behind AND raced a
+      // concurrent record's read-modify-write.
+      writeFileSync(lockPath, '99999999', 'utf-8')
+
+      const cleared = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(cleared.ok, true)
+      assert.equal(cleared.counted, true)
+      assert.equal(existsSync(lockPath), false, 'the stale lock must be stolen and released by clear')
+      assert.equal(existsSync(join(dir, '.iterate', 'defense-events.json')), false)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('iterate_defense_events presentResult (#12)', () => {
+  it('folds the counts summary into one headline; other operations decline', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject()
+    try {
+      await tool.execute({ operation: 'record', path: dir, round: 1, type: 'rollback', description: 'd', defense: 'def', outcome: 'o', severity: 'high' })
+      await tool.execute({ operation: 'record', path: dir, round: 1, type: 'precondition_failed', description: 'd', defense: 'def', outcome: 'o', severity: 'medium' })
+      const args = { operation: 'counts', path: dir }
+      const counts = await tool.execute(args)
+      const content = tool.render(args, counts)
+      const card = tool.presentResult(args, { content, isError: false })
+      assert.equal(card?.card, 'generic')
+      assert.match(card!.title!, /^Defense events: 2 recorded \(/, `headline: ${card!.title}`)
+      // Only the types that fired are named (zero rows are dropped), labels
+      // follow the configured language (default: en).
+      assert.ok(card!.title!.includes('rollback: 1'), `headline: ${card!.title}`)
+      assert.ok(card!.title!.includes('precondition failed: 1'), `headline: ${card!.title}`)
+      assert.ok(!card!.title!.includes('invariant violated'), `zero types must not appear: ${card!.title}`)
+      // `list`/`record` keep the default presentation; failures decline.
+      assert.equal(tool.presentResult({ operation: 'list', path: dir }, { content, isError: false }), undefined)
+      assert.equal(tool.presentResult(args, { content, isError: true }), undefined)
+      // Unreadable content → decline rather than guess a total.
+      assert.equal(tool.presentResult(args, { content: [{ type: 'text', text: 'garbage' }], isError: false }), undefined)
+    } finally {
+      cleanup()
+    }
   })
 })

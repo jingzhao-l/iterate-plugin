@@ -68,7 +68,11 @@ const SIGNATURE_PATTERNS = [
  * Returns a sorted array of `{ name, line }` (1-based line numbers).
  */
 export function collectMethodSignatures(text) {
-    const lines = text.split('\n');
+    // Defensive: callers hand in file content read from disk / tool args, which
+    // may be missing or wrong-typed when a fix record is malformed. A non-string
+    // would throw on `.split` inside the atomic-fix gate.
+    const source = typeof text === 'string' ? text : '';
+    const lines = source.split('\n');
     const out = [];
     // Set lookup instead of scanning the growing array (O(S²) → O(S)).
     const seen = new Set();
@@ -95,7 +99,7 @@ export function collectMethodSignatures(text) {
 }
 /** Number of physical lines in `text` (a trailing newline does not add a line). */
 export function countTextLines(text) {
-    if (text === '')
+    if (typeof text !== 'string' || text === '')
         return 0;
     const parts = text.split('\n');
     return parts[parts.length - 1] === '' ? parts.length - 1 : parts.length;
@@ -107,11 +111,14 @@ export function countTextLines(text) {
  * span runs to the final non-blank line of the file.
  */
 export function collectMethodSpans(text) {
-    const signatures = collectMethodSignatures(text);
+    // Same non-string guard as collectMethodSignatures: this runs inside the
+    // atomic-fix gate on content that may be missing.
+    const source = typeof text === 'string' ? text : '';
+    const signatures = collectMethodSignatures(source);
     if (signatures.length === 0)
         return [];
-    const lines = text.split('\n');
-    const lineCount = countTextLines(text);
+    const lines = source.split('\n');
+    const lineCount = countTextLines(source);
     /** Last non-blank line at or before `candidate`. */
     function trimBlank(endCandidate, floor) {
         let end = endCandidate;
@@ -138,6 +145,18 @@ function intersects(spanStart, spanEnd, regionStart, regionEnd) {
     return spanStart <= regionEnd && spanEnd >= regionStart;
 }
 /**
+ * True when a hunk's coordinates are usable for span intersection.
+ *
+ * `hunks` is a `ChangedRegion[]` that reaches this gate from a diff computed
+ * on tool-arg content; a malformed entry (`NaN`, `Infinity`, a negative or
+ * fractional line number) would build a `NaN`/negative region that either
+ * matches every method or none, silently wrong-sizing the adjacent-method
+ * verdict. Non-finite and negative starts/counts are simply skipped.
+ */
+function isValidRegion(start, count) {
+    return Number.isInteger(start) && start >= 0 && Number.isInteger(count) && count >= 1;
+}
+/**
  * Count the distinct methods a set of diff hunks touches.
  *
  * Semantics:
@@ -150,13 +169,17 @@ function intersects(spanStart, spanEnd, regionStart, regionEnd) {
  *  - Methods touched by both sides are counted once (keyed name@startLine).
  */
 export function countTouchedMethods(before, after, hunks) {
-    if (hunks.length === 0)
+    // A non-array `hunks` (malformed fix record / tool arg) is "nothing
+    // changed", matching the empty-hunk case — never a throw in the fix gate.
+    if (!Array.isArray(hunks) || hunks.length === 0)
         return 0;
     const beforeSpans = collectMethodSpans(before);
     const afterSpans = collectMethodSpans(after);
     const touched = new Set();
     for (const h of hunks) {
-        if (h.oldLines > 0) {
+        if (!h || typeof h !== 'object')
+            continue;
+        if (h.oldLines > 0 && isValidRegion(h.oldStart, h.oldLines)) {
             const oldEnd = h.oldStart + h.oldLines - 1;
             for (const s of beforeSpans) {
                 if (intersects(s.startLine, s.endLine, h.oldStart, oldEnd)) {
@@ -164,7 +187,7 @@ export function countTouchedMethods(before, after, hunks) {
                 }
             }
         }
-        if (h.newLines > 0) {
+        if (h.newLines > 0 && isValidRegion(h.newStart, h.newLines)) {
             const newEnd = h.newStart + h.newLines - 1;
             for (const s of afterSpans) {
                 if (intersects(s.startLine, s.endLine, h.newStart, newEnd)) {

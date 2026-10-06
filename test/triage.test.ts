@@ -15,8 +15,10 @@ import {
   registerTriageTool,
   pruneOldConfigBackups,
   MAX_TRIAGE_BACKUPS,
+  MAX_TOTAL_KNOWN_INTENTIONAL,
 } from '../src/tools/triage.ts'
 import type { KnownIntentional } from '../src/types.ts'
+import * as evidence from '../src/evidence.ts'
 
 // ─── Test harness ────────────────────────────────────────────────────────────
 
@@ -24,8 +26,13 @@ import type { KnownIntentional } from '../src/types.ts'
 function captureTool(): {
   execute: (args: unknown) => Promise<unknown>
   render: (args: unknown, value: unknown) => Array<{ type: string; text: string }>
+  presentCall: (args: unknown) => { card?: string; title?: string; kind?: string } | undefined
 } {
-  let def: { execute: (a: unknown, e: unknown) => Promise<unknown>; output: { render: (a: unknown, v: unknown) => unknown } } | null = null
+  let def: {
+    execute: (a: unknown, e: unknown) => Promise<unknown>
+    output: { render: (a: unknown, v: unknown) => unknown }
+    presentCall?: (a: unknown) => unknown
+  } | null = null
   registerTriageTool({
     tools: { register: (d: never) => { def = d as typeof def } },
   } as never)
@@ -34,6 +41,7 @@ function captureTool(): {
   return {
     execute: (args) => def!.execute(args, exec as never) as Promise<unknown>,
     render: (args, value) => def!.output.render(args, value) as Array<{ type: string; text: string }>,
+    presentCall: (args) => def!.presentCall?.(args) as { card?: string; title?: string; kind?: string } | undefined,
   }
 }
 
@@ -128,6 +136,55 @@ describe('mergeKnownIntentional', () => {
     mergeKnownIntentional(existing, [entry({ file: 'src/new.ts' })])
     assert.equal(JSON.stringify(existing), snapshot)
   })
+
+  it('reports dropped: 0 while the merged list is under the total cap', () => {
+    const existing = Array.from({ length: 10 }, (_, i) => entry({ file: `src/f${i}.ts` }))
+    const { merged, added, skipped, dropped } = mergeKnownIntentional(
+      existing,
+      [entry({ file: 'src/new.ts' })],
+    )
+    assert.equal(added, 1)
+    assert.equal(skipped, 0)
+    assert.equal(dropped, 0)
+    assert.equal(merged.length, 11)
+  })
+
+  it('caps the TOTAL list at MAX_TOTAL_KNOWN_INTENTIONAL, evicting the oldest', () => {
+    // Regression: MAX_ENTRIES only bounded ONE apply payload, so the list grew
+    // without limit across sessions — filterKnownIntentional then ran
+    // O(findings × entries) over an ever-longer list and the config file grew
+    // with it. The merge result is now bounded, oldest-first.
+    const existing = Array.from({ length: MAX_TOTAL_KNOWN_INTENTIONAL }, (_, i) =>
+      entry({ file: `src/f${i}.ts` }),
+    )
+    const { merged, added, skipped, dropped } = mergeKnownIntentional(existing, [
+      entry({ file: 'src/new1.ts' }),
+      entry({ file: 'src/new2.ts' }),
+    ])
+    assert.equal(added, 2)
+    assert.equal(skipped, 0)
+    assert.equal(dropped, 2, 'the overflow count must be reported, not silent')
+    assert.equal(merged.length, MAX_TOTAL_KNOWN_INTENTIONAL)
+    // The two OLDEST entries were evicted…
+    assert.equal(merged[0]?.file, 'src/f2.ts')
+    // …while the freshly merged entries (appended at the END) survive.
+    assert.equal(merged[merged.length - 1]?.file, 'src/new2.ts')
+    assert.equal(merged[merged.length - 2]?.file, 'src/new1.ts')
+  })
+
+  it('duplicate incoming entries at the cap are skipped, not evicted', () => {
+    const existing = Array.from({ length: MAX_TOTAL_KNOWN_INTENTIONAL }, (_, i) =>
+      entry({ file: `src/f${i}.ts` }),
+    )
+    const { merged, added, skipped, dropped } = mergeKnownIntentional(existing, [
+      entry({ file: 'src/f0.ts' }), // already known → skipped
+    ])
+    assert.equal(added, 0)
+    assert.equal(skipped, 1)
+    assert.equal(dropped, 0, 'nothing new → nothing evicted')
+    assert.equal(merged.length, MAX_TOTAL_KNOWN_INTENTIONAL)
+    assert.equal(merged[0]?.file, 'src/f0.ts')
+  })
 })
 
 // ─── buildConfigWithKnownIntentional / readKnownIntentional ──────────────────
@@ -165,6 +222,21 @@ describe('backupSuffix', () => {
     assert.ok(!suffix.includes(':'))
     assert.ok(!suffix.includes('.'))
     assert.ok(/^[0-9TZ-]+$/.test(suffix))
+  })
+
+  it('never collides for backups taken in the SAME millisecond', () => {
+    // The triage writer used to carry its OWN copy of the suffix helper —
+    // two backups in the same ms built the identical `config.bak-<iso>` path
+    // and the second silently overwrote the first. It now shares
+    // config-write's monotonic-guarded implementation.
+    const t = new Date('2026-08-17T00:00:00.000Z')
+    const first = backupSuffix(t)
+    const second = backupSuffix(t)
+    const third = backupSuffix(t)
+    assert.equal(new Set([first, second, third]).size, 3, `got: ${first}, ${second}, ${third}`)
+    assert.match(second, /^2026-08-17T00-00-00-000Z-1$/)
+    assert.match(third, /^2026-08-17T00-00-00-000Z-2$/)
+    for (const s of [first, second, third]) assert.ok(/^[0-9TZ-]+$/.test(s), s)
   })
 })
 
@@ -219,6 +291,46 @@ describe('iterate_triage execute', () => {
       assert.equal(second.added, 0)
       assert.equal(second.skipped, 1)
       assert.equal(second.count, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('apply reports `dropped` when the total known_intentional cap is hit', async () => {
+    // MAX_TOTAL_KNOWN_INTENTIONAL bounds the LIST (not just one payload):
+    // merging past it evicts the OLDEST entries and the tool result must
+    // report how many were dropped instead of silently losing verdicts.
+    const tool = captureTool()
+    const existing = Array.from({ length: MAX_TOTAL_KNOWN_INTENTIONAL }, (_, i) => ({
+      file: `src/f${i}.ts`,
+      dimension: 'security',
+      reason: 'intentional',
+    }))
+    const { dir, cleanup } = tempProject(
+      yaml.dump({ goal: 'g', personalization: { known_intentional: existing } }),
+    )
+    try {
+      const result = (await tool.execute({
+        operation: 'apply',
+        path: dir,
+        entries: [entry({ file: 'src/new.ts', dimension: 'security', reason: 'fresh' })],
+      })) as Record<string, unknown>
+      assert.equal(result.added, 1)
+      assert.equal(result.skipped, 0)
+      assert.equal(result.dropped, 1, `expected dropped=1, got ${JSON.stringify(result)}`)
+      assert.equal(result.count, MAX_TOTAL_KNOWN_INTENTIONAL)
+
+      const parsed = yaml.load(readFileSync(join(dir, 'iterate.config.yaml'), 'utf-8')) as Record<string, unknown>
+      const known = readKnownIntentional(parsed)
+      assert.equal(known.length, MAX_TOTAL_KNOWN_INTENTIONAL)
+      // The oldest entry (src/f0.ts) was evicted; the fresh one is last.
+      assert.equal(known[0]?.file, 'src/f1.ts')
+      assert.equal(known[known.length - 1]?.file, 'src/new.ts')
+      // The backup still holds the pre-merge snapshot (1000 entries, f0 first).
+      const backups = readdirSync(dir).filter((f) => f.includes('.bak-'))
+      assert.equal(backups.length, 1)
+      const backupParsed = yaml.load(readFileSync(join(dir, backups[0] as string), 'utf-8')) as Record<string, unknown>
+      assert.equal(readKnownIntentional(backupParsed)[0]?.file, 'src/f0.ts')
     } finally {
       cleanup()
     }
@@ -371,5 +483,51 @@ describe('pruneOldConfigBackups', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('iterate_triage presentCall (#12)', () => {
+  it('cards the apply write with its entry count; list keeps the default view', () => {
+    const tool = captureTool()
+    // `list` is a pure read → no custom card.
+    assert.equal(tool.presentCall({ operation: 'list' }), undefined)
+
+    const bare = tool.presentCall({ operation: 'apply' })
+    assert.equal(bare?.card, 'generic')
+    assert.equal(bare?.kind, 'edit')
+    assert.equal(bare?.title, 'Apply known_intentional entries to iterate.config.yaml')
+
+    const one = tool.presentCall({
+      operation: 'apply',
+      entries: [{ file: 'src/a.ts', dimension: 'correctness', reason: 'intended' }],
+    })
+    assert.equal(one?.title, 'Apply 1 known_intentional entry to iterate.config.yaml')
+
+    const many = tool.presentCall({ operation: 'apply', entries: [{}, {}] })
+    assert.match(many!.title!, /^Apply 2 known_intentional entries to iterate\.config\.yaml$/)
+
+    // A non-array `entries` (shape the executor will reject) still gets a
+    // truthful card without a fabricated count.
+    const malformed = tool.presentCall({ operation: 'apply', entries: 'nope' })
+    assert.equal(malformed?.title, 'Apply known_intentional entries to iterate.config.yaml')
+    // Unknown/absent operation → default presentation, never a wrong card.
+    assert.equal(tool.presentCall({}), undefined)
+  })
+})
+
+describe('shared WHOLE_FILE_LINE constant (minor 9)', () => {
+  it('entryKey uses evidence.ts WHOLE_FILE_LINE instead of a local copy that could drift', () => {
+    // triage.ts used to keep `const WHOLE_FILE_LINE = 0` as a THIRD private
+    // copy; it now imports the shared constant (evidence.ts pulls in only
+    // node builtins + a type import, so there is no cycle).
+    assert.equal(evidence.WHOLE_FILE_LINE, 0)
+    const key = entryKey({ file: 'src/a.ts', dimension: 'correctness' } as KnownIntentional)
+    assert.equal(key, `src/a.ts|correctness|${evidence.WHOLE_FILE_LINE}`)
+    // Whole-file semantics agree with evidence.ts: an absent line and an
+    // explicit 0 key to the same entry.
+    assert.equal(
+      entryKey({ file: 'src/a.ts', dimension: 'correctness', line: 0 } as KnownIntentional),
+      key,
+    )
   })
 })

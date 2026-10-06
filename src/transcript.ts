@@ -11,6 +11,8 @@
  *   - F5  — checkpoint summary (resume).
  *   - F6  — nudge channel (steer the next round).
  *   - F7  — append-only decision timeline.
+ *   - validations — per-round validation outcomes (command / exitCode /
+ *     allowed) for the run console; see {@link TranscriptValidation}.
  *
  * It performs NO I/O and NEVER touches the filesystem — persistence lives in
  * the `iterate_transcript` tool. Inputs are defensively normalized so a
@@ -29,6 +31,8 @@ import type {
   TranscriptManifest,
   TranscriptNudge,
   TranscriptRound,
+  TranscriptThread,
+  TranscriptValidation,
 } from './types.ts'
 
 /** Manifest schema version (bump on incompatible shape change). */
@@ -47,16 +51,26 @@ const MAX_FINDINGS_PER_THREAD = 100
 const MAX_FINDINGS_TOTAL = 2000
 
 /** Max timeline entries kept (newest wins). */
-const MAX_TIMELINE = 500
+export const MAX_TIMELINE = 500
 
 /** Max applied-fix records kept (newest wins; bounded so a long run cannot
  *  grow the manifest payload without limit). */
 const MAX_FIXES = 200
 
+/** Max validation rows kept (newest wins; bounds a very long run's payload). */
+const MAX_VALIDATIONS = 500
+
 /** Max round number accepted by the builder. A model-authored/manifest-backed
  *  round value is attacker-influenced JSON: `roundStart(1e9)` / `snapshotConvergence`
- *  would otherwise preallocate arrays of that size and OOM the host. */
-const MAX_ROUNDS = 1000
+ *  would otherwise preallocate arrays of that size and OOM the host.
+ *  Exported so the capture/rehydrate FEED side can truncate before feeding
+ *  (a value above the cap would otherwise be folded into the last slot). */
+export const MAX_ROUNDS = 1000
+
+/** Max threads restored per round from a persisted manifest (the live cap plus
+ *  headroom for the single overflow thread). Shared by {@link ReviewTranscriptBuilder.restoreThread}
+ *  and the read-side normalizer so both bound hostile manifests identically. */
+export const MAX_THREADS_RESTORED = MAX_THREADS_PER_ROUND * 2 + 1
 
 /** Thresholds applied when reducing a string list under a cap. */
 function clampStringList(source: string[], cap: number): string[] {
@@ -112,6 +126,40 @@ function normalizeFinding(input: unknown): TranscriptFinding | null {
     suggested_fix: typeof f.suggested_fix === 'string' ? f.suggested_fix : undefined,
     is_atomic: typeof f.is_atomic === 'boolean' ? f.is_atomic : undefined,
     acknowledged: typeof f.acknowledged === 'boolean' ? f.acknowledged : undefined,
+  }
+}
+
+/**
+ * Normalize one validation row (`capture` `validations` contract), dropping
+ * rows that cannot identify WHAT was run and clamping the rest — the same
+ * defensive style as the round/fix normalizers, because these values arrive
+ * from a `type:'json'` argument a model authored.
+ *
+ *   - a non-object row, a missing/non-finite round (≤ 0 after flooring), or
+ *     a missing/blank command → dropped (there is nothing to attribute);
+ *   - `round` above the builder cap → clamped (never dropped: the row is real);
+ *   - `exitCode` → integer, or `null` when absent/unknown/not a number;
+ *   - `allowed` → strict boolean; an ABSENT flag degrades to `false` (fail
+ *     closed: a row that cannot prove it was allow-listed reads as rejected);
+ *   - `rejectReason` → trimmed string, omitted when blank.
+ */
+function normalizeValidation(input: unknown): TranscriptValidation | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const v = input as Record<string, unknown>
+  const rawRound = typeof v.round === 'number' && Number.isFinite(v.round) ? Math.floor(v.round) : 0
+  if (rawRound <= 0) return null
+  const command = typeof v.command === 'string' ? v.command.trim() : ''
+  if (!command) return null
+  const exitCode =
+    typeof v.exitCode === 'number' && Number.isFinite(v.exitCode) ? Math.floor(v.exitCode) : null
+  const rejectReason =
+    typeof v.rejectReason === 'string' && v.rejectReason.trim() ? v.rejectReason.trim() : undefined
+  return {
+    round: Math.min(rawRound, MAX_ROUNDS),
+    command,
+    exitCode,
+    allowed: v.allowed === true,
+    ...(rejectReason ? { rejectReason } : {}),
   }
 }
 
@@ -177,6 +225,7 @@ export class ReviewTranscriptBuilder {
   private readonly globalFindings: TranscriptFinding[] = []
   private readonly globalSeenKeys = new Set<string>()
   private readonly fixes: TranscriptFix[] = []
+  private readonly validations: TranscriptValidation[] = []
   private checkpoint: TranscriptCheckpoint | null = null
   private readonly timeline: TranscriptEntry[] = []
   private nudge: TranscriptNudge | null = null
@@ -262,6 +311,30 @@ export class ReviewTranscriptBuilder {
     this.touch()
   }
 
+  /**
+   * Advance the CURRENT-round marker to `round` WITHOUT creating round rows.
+   *
+   * `roundStart` pre-allocates empty rows up to `round` (legitimate while a
+   * round is opening — reviewers write into those rows). At capture time,
+   * though, `roundsExecuted` may legitimately exceed the rounds we actually
+   * captured data for: calling `roundStart(roundsExecuted)` there fabricated
+   * phantom EMPTY round rows the reviewers never produced. This setter only
+   * moves the marker — and only FORWARD (never rewinds past a row capture
+   * already recorded) — so `manifest.round` still reports how far the run got
+   * while `manifest.rounds` keeps only rounds with captured content.
+   */
+  advanceRound(round: number, maxRounds?: number): void {
+    const r =
+      typeof round === 'number' && Number.isFinite(round) && round > 0
+        ? Math.min(Math.floor(round), MAX_ROUNDS)
+        : 0
+    if (r > this.round) this.round = r
+    if (typeof maxRounds === 'number' && Number.isFinite(maxRounds) && maxRounds >= 0) {
+      this.maxRounds = Math.min(Math.floor(maxRounds), MAX_ROUNDS)
+    }
+    this.touch()
+  }
+
   // ─── Reviewer threads (F1) ──────────────────────────────────────────────
 
   /** Start a reviewer sub-agent's thread for the current round. */
@@ -330,7 +403,7 @@ export class ReviewTranscriptBuilder {
     if (!thread || typeof thread !== 'object') return
     // Hostile-manifest guard: keep the live hard bound (with headroom for the
     // single overflow thread) and newest-first truncate beyond it.
-    if (live.threads.length >= MAX_THREADS_PER_ROUND * 2 + 1) return
+    if (live.threads.length >= MAX_THREADS_RESTORED) return
     const dim =
       typeof thread.dimension === 'string' && thread.dimension.trim()
         ? thread.dimension.trim()
@@ -464,6 +537,24 @@ export class ReviewTranscriptBuilder {
     this.touch()
   }
 
+  // ─── Validations (F6/F8 console) ────────────────────────────────────────
+
+  /**
+   * Record one validation command outcome. Normalizes defensively (bad rows
+   * are dropped, out-of-cap rounds clamped) and keeps the NEWEST rows under
+   * MAX_VALIDATIONS, mirroring {@link fix}. A malformed row can never crash
+   * the capture nor leak non-JSON state into the manifest.
+   */
+  validation(input: unknown): void {
+    const record = normalizeValidation(input)
+    if (!record) return
+    this.validations.push(record)
+    if (this.validations.length > MAX_VALIDATIONS) {
+      this.validations.splice(0, this.validations.length - MAX_VALIDATIONS)
+    }
+    this.touch()
+  }
+
   // ─── Checkpoint (F5) ────────────────────────────────────────────────────
 
   /** Record the current checkpoint summary (null clears it). */
@@ -557,6 +648,7 @@ export class ReviewTranscriptBuilder {
       // already ≤ MAX_FINDINGS_TOTAL — no post-hoc slice needed.
       findings: this.globalFindings,
       fixes: this.fixes,
+      validations: this.validations,
       checkpoint: this.checkpoint,
       timeline: this.timeline,
       nudge: this.nudge,
@@ -628,4 +720,187 @@ function dedupePaths(paths: string[]): string[] {
 /** ISO timestamp helper (kept injectable in tests via the builder's now). */
 function isoNow(): string {
   return new Date().toISOString()
+}
+
+// ─── Read-side normalization ────────────────────────────────────────────────
+
+/** Clamp an unknown round marker into [0, MAX_ROUNDS] (0 = never recorded). */
+function clampRoundValue(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(Math.max(Math.floor(v), 0), MAX_ROUNDS)
+    : 0
+}
+
+/** Clamp an unknown non-negative counter (0 when absent/garbage). */
+function clampCountValue(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0
+}
+
+/** Re-run one persisted thread row through the builder's per-row bounds. */
+function normalizeThreadRow(input: unknown): TranscriptThread {
+  const t = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const dim = typeof t.dimension === 'string' && t.dimension.trim() ? t.dimension.trim() : 'review'
+  const att = typeof t.attempt === 'number' && Number.isFinite(t.attempt) ? Math.floor(t.attempt) : 1
+  const messages = Array.isArray(t.messages) ? (t.messages as unknown[]) : []
+  const readFiles = Array.isArray(t.readFiles) ? (t.readFiles as unknown[]) : []
+  const rawFindings = Array.isArray(t.findings) ? (t.findings as unknown[]) : []
+  const findings = rawFindings
+    .map((f) => normalizeFinding(f))
+    .filter((f): f is TranscriptFinding => f !== null)
+  return {
+    dimension: dim,
+    attempt: att > 0 ? att : 1,
+    // Same reductions serialize() applies: messages newest-capped + trimmed,
+    // readFiles deduped, per-thread findings newest-capped.
+    messages: clampStringList(messages as string[], MAX_MESSAGES_PER_THREAD),
+    readFiles: dedupePaths(readFiles as string[]),
+    findings:
+      findings.length > MAX_FINDINGS_PER_THREAD
+        ? findings.slice(-MAX_FINDINGS_PER_THREAD)
+        : findings,
+  }
+}
+
+/** Re-run one persisted fix row through the builder's fix() requirements. */
+function normalizeFixRow(input: unknown): TranscriptFix | null {
+  if (!input || typeof input !== 'object') return null
+  const f = input as Record<string, unknown>
+  const id = typeof f.id === 'string' ? f.id : ''
+  const file = typeof f.file === 'string' ? f.file : ''
+  if (!id || !file) return null
+  return {
+    id,
+    file,
+    // No fabricated "now" on read: a corrupt/absent timestamp stays blank
+    // instead of masquerading as a fix that just happened.
+    timestamp: typeof f.timestamp === 'string' ? f.timestamp : '',
+    round: clampRoundValue(f.round),
+    summary: typeof f.summary === 'string' ? f.summary : '',
+    linesAdded: clampCountValue(f.linesAdded),
+    linesRemoved: clampCountValue(f.linesRemoved),
+    success: f.success !== false,
+  }
+}
+
+/** Re-run one persisted timeline row through the builder's decision() shape. */
+function normalizeTimelineRow(input: unknown): TranscriptEntry | null {
+  if (!input || typeof input !== 'object') return null
+  const e = input as Record<string, unknown>
+  return {
+    timestamp: typeof e.timestamp === 'string' ? e.timestamp : '',
+    round: clampRoundValue(e.round),
+    type: typeof e.type === 'string' && e.type ? e.type : 'decision',
+    data:
+      e.data && typeof e.data === 'object' && !Array.isArray(e.data)
+        ? (e.data as Record<string, unknown>)
+        : {},
+  }
+}
+
+/** Re-run a persisted checkpoint through the builder's recordCheckpoint rules. */
+function normalizeCheckpointRow(input: unknown): TranscriptCheckpoint | null {
+  if (!input || typeof input !== 'object') return null
+  const c = input as Record<string, unknown>
+  const round = typeof c.round === 'number' && Number.isFinite(c.round) ? c.round : 0
+  if (round <= 0) return null
+  return {
+    mode: c.mode === 'dry-run' || c.mode === 'normal' ? c.mode : 'normal',
+    round: clampRoundValue(c.round),
+    maxRounds: clampCountValue(c.maxRounds),
+    fixedCount: clampCountValue(c.fixedCount),
+    resumeCount: clampCountValue(c.resumeCount),
+    updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : '',
+  }
+}
+
+/** Re-run a persisted nudge through the builder's setNudge rules. */
+function normalizeNudgeRow(input: unknown): TranscriptNudge | null {
+  if (!input || typeof input !== 'object') return null
+  const n = input as Record<string, unknown>
+  const text = typeof n.text === 'string' ? n.text.trim() : ''
+  if (!text) return null
+  return { timestamp: typeof n.timestamp === 'string' ? n.timestamp : '', text }
+}
+
+/**
+ * Defensive read-side normalization of a persisted manifest.
+ *
+ * `.iterate/transcript.json` is hand-editable JSON handed straight to the
+ * client/model by `iterate_transcript.read`: the tool gates the ROOT shape,
+ * but row-level bounds (threads, messages, findings, timeline, fixes …) used
+ * to pass through untouched, so a hostile or corrupted file could leak an
+ * unbounded payload or junk field values (fractional lines, non-string
+ * phases, negative counters) that a capture could never have written.
+ *
+ * Every field is re-run through the SAME normalizers and caps the builder
+ * uses at capture time. Deliberately NOT implemented as
+ * `rehydrateBuilder(...).serialize()`: that drops fields the builder cannot
+ * rebuild (phases, the run identity, the round marker), so a plain read would
+ * silently rewrite history. Unknown inputs degrade instead of throwing — this
+ * runs after the tool's structural gate but must stay safe on its own.
+ */
+export function normalizeManifestBounds(value: TranscriptManifest): TranscriptManifest {
+  const m = (value && typeof value === 'object' ? value : {}) as Partial<TranscriptManifest>
+
+  const rounds: TranscriptRound[] = (Array.isArray(m.rounds) ? m.rounds : [])
+    .slice(0, MAX_ROUNDS)
+    .map((r) => {
+      const row = (r && typeof r === 'object' ? r : {}) as Partial<TranscriptRound>
+      const threads = (Array.isArray(row.threads) ? row.threads : [])
+        .slice(0, MAX_THREADS_RESTORED)
+        .map((t) => normalizeThreadRow(t))
+      return { round: Math.max(clampRoundValue(row.round), 1), threads }
+    })
+
+  const fixes = (Array.isArray(m.fixes) ? m.fixes : [])
+    .map((f) => normalizeFixRow(f))
+    .filter((f): f is TranscriptFix => f !== null)
+  const timeline = (Array.isArray(m.timeline) ? m.timeline : [])
+    .map((e) => normalizeTimelineRow(e))
+    .filter((e): e is TranscriptEntry => e !== null)
+  const globalFindings = (Array.isArray(m.findings) ? m.findings : [])
+    .map((f) => normalizeFinding(f))
+    .filter((f): f is TranscriptFinding => f !== null)
+  const convergence = (Array.isArray(m.convergence) ? m.convergence : [])
+    .slice(0, MAX_ROUNDS)
+    .map((n) => (typeof n === 'number' && Number.isFinite(n) ? n : -1))
+  const validations = Array.isArray(m.validations)
+    ? m.validations
+        .map((v) => normalizeValidation(v))
+        .filter((v): v is TranscriptValidation => v !== null)
+        .slice(-MAX_VALIDATIONS)
+    : undefined
+
+  const policy =
+    m.approval?.policy === 'deny' || m.approval?.policy === 'allow' ? m.approval.policy : 'ask'
+  const out: TranscriptManifest = {
+    version: typeof m.version === 'number' && Number.isFinite(m.version) ? m.version : TRANSCRIPT_VERSION,
+    project: typeof m.project === 'string' ? m.project : '',
+    updatedAt: typeof m.updatedAt === 'string' ? m.updatedAt : '',
+    active: m.active === true,
+    mode: m.mode === 'dry-run' || m.mode === 'normal' ? m.mode : null,
+    goal: typeof m.goal === 'string' ? m.goal : '',
+    // A phase list is free-form narration names — strings only, bounded.
+    phases: clampStringList(Array.isArray(m.phases) ? (m.phases as string[]) : [], 100),
+    round: clampRoundValue(m.round),
+    maxRounds: clampCountValue(m.maxRounds),
+    rounds,
+    convergence,
+    findings:
+      globalFindings.length > MAX_FINDINGS_TOTAL
+        ? globalFindings.slice(-MAX_FINDINGS_TOTAL)
+        : globalFindings,
+    fixes: fixes.slice(-MAX_FIXES),
+    checkpoint: normalizeCheckpointRow(m.checkpoint),
+    timeline: timeline.slice(-MAX_TIMELINE),
+    nudge: normalizeNudgeRow(m.nudge),
+    approval: {
+      active: typeof m.approval?.active === 'boolean' ? m.approval.active : policy !== 'allow',
+      policy,
+    },
+  }
+  if (validations !== undefined) out.validations = validations
+  if (m.taskMode === 'code' || m.taskMode === 'iterate' || m.taskMode === null) out.taskMode = m.taskMode
+  if (typeof m.stoppedReason === 'string' || m.stoppedReason === null) out.stoppedReason = m.stoppedReason
+  return out
 }

@@ -20,6 +20,7 @@ import { readDecisionEntries } from './decision-log.ts'
 import { readQualityGate } from './quality-store.ts'
 import { readExperienceBank } from './experience-store.ts'
 import { readDefenseEvents } from './defense-store.ts'
+import { asNumber, asRecord, parseRenderedJson } from './present.ts'
 import type { DefenseEventType, IterationCheckpoint, IterationStatus, QualityGateSnapshot } from '../types.ts'
 
 // ─── Pure helpers (exported for unit tests) ─────────────────────────────────
@@ -27,6 +28,23 @@ import type { DefenseEventType, IterationCheckpoint, IterationStatus, QualityGat
 /** Max findings persisted in a checkpoint (a model-authored findings payload is
  *  bounded, mirroring MAX_FIX_CONTENT_CHARS for fix content). */
 export const MAX_CHECKPOINT_FINDINGS = 1000
+
+/**
+ * Sanity cap for round/counter fields. Status output fields are declared
+ * `type: 'integer'` in the tool schema; flooring + capping here guarantees a
+ * hand-edited value can never reach dsh's post-execute output validation as a
+ * float (INVALID_TOOL_OUTPUT on iterate_status).
+ */
+const MAX_COUNTER = 1_000_000_000
+
+/**
+ * Coerce a numeric field to a non-negative, in-cap INTEGER.
+ * Non-numeric (string/NaN/undefined) → `fallback`.
+ */
+function toInteger(v: unknown, fallback: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback
+  return Math.min(Math.max(Math.floor(v), 0), MAX_COUNTER)
+}
 
 /** Read the current checkpoint from disk (missing/corrupt → null). */
 export function readCheckpoint(projectRoot: string): IterationCheckpoint | null {
@@ -38,23 +56,27 @@ export function readCheckpoint(projectRoot: string): IterationCheckpoint | null 
     if (parsed.mode !== 'dry-run' && parsed.mode !== 'normal') return null
     // Strict round gate: non-numeric (incl. NaN — `NaN <= 0` is false and
     // `NaN < 0` also false) round values must not survive into the status.
+    // The floor also kills `round: 2.5` — validateCheckpoint only ever SAVES
+    // integers, so a non-integer on disk is hand-edited/corrupt.
     const round =
       typeof parsed.round === 'number' && Number.isFinite(parsed.round)
         ? Math.floor(parsed.round)
         : null
-    if (round === null || round < 0) return null
-    const num = (v: unknown, fallback: number): number =>
-      typeof v === 'number' && Number.isFinite(v) ? v : fallback
+    if (round === null || round < 0 || round > MAX_COUNTER) return null
     // Normalize every field so a hand-edited/corrupt checkpoint (string
-    // maxRounds, missing fixedCount, …) can never leak a non-numeric value
-    // into the status output or crash a consumer.
+    // maxRounds, float fixedCount, missing architecturalCount, …) can never
+    // leak a non-integer value into the status output or crash a consumer.
+    const maxRounds = toInteger(parsed.maxRounds, round)
+    // Consistent with validateCheckpoint's save gate: a checkpoint claiming a
+    // round past its cap is corrupt — otherwise status renders "Round 99 / 5".
+    if (round > maxRounds) return null
     return {
       mode: parsed.mode,
       round,
-      maxRounds: num(parsed.maxRounds, round),
-      fixedCount: num(parsed.fixedCount, 0),
-      architecturalCount: num(parsed.architecturalCount, 0),
-      resumeCount: num(parsed.resumeCount, 0),
+      maxRounds,
+      fixedCount: toInteger(parsed.fixedCount, 0),
+      architecturalCount: toInteger(parsed.architecturalCount, 0),
+      resumeCount: toInteger(parsed.resumeCount, 0),
       findings: Array.isArray(parsed.findings) ? (parsed.findings as IterationCheckpoint['findings']) : [],
       startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
@@ -146,24 +168,30 @@ export function computeStatus(input: {
   const lastUpdated = lastEntry?.timestamp ?? checkpoint?.updatedAt ?? null
 
   // Round = checkpoint.round (explicit) or max round seen in the decision log.
-  let currentRound = checkpoint?.round ?? 0
-  if (!checkpoint) {
+  // Everything is funneled through toInteger: a hand-edited `round: 2.5` entry
+  // or an injected float checkpoint must never surface as a non-integer in the
+  // status output (schema `type: 'integer'`).
+  let currentRound = 0
+  if (checkpoint) {
+    currentRound = toInteger(checkpoint.round, 0)
+  } else {
     for (const e of entries) {
-      if (typeof e.round === 'number' && e.round > currentRound) currentRound = e.round
+      const r = toInteger(e.round, 0)
+      if (r > currentRound) currentRound = r
     }
   }
 
-  const totalRounds = checkpoint?.maxRounds ?? currentRound
+  const totalRounds = checkpoint ? toInteger(checkpoint.maxRounds, currentRound) : currentRound
   // Coerce the registry's per-round counts defensively: a hand-edited registry
   // round missing fixedCount/failedCount would otherwise feed NaN into the
-  // status integer fields.
-  const registryFixed = registry.rounds.reduce((sum, r) => sum + (Number(r.fixedCount) || 0), 0)
-  const failedCount = registry.rounds.reduce((sum, r) => sum + (Number(r.failedCount) || 0), 0)
+  // status integer fields — and fractional counts (1.5) must be floored too.
+  const registryFixed = registry.rounds.reduce((sum, r) => sum + toInteger(r.fixedCount, 0), 0)
+  const failedCount = registry.rounds.reduce((sum, r) => sum + toInteger(r.failedCount, 0), 0)
   // When a checkpoint exists, its snapshot fields are authoritative for resume
   // (fixedCount / architecturalCount / findings); otherwise derive from the
   // live fix registry and decision log.
-  const fixedCount = checkpoint ? checkpoint.fixedCount : registryFixed
-  const architecturalCount = checkpoint?.architecturalCount ?? 0
+  const fixedCount = checkpoint ? toInteger(checkpoint.fixedCount, 0) : registryFixed
+  const architecturalCount = toInteger(checkpoint?.architecturalCount, 0)
 
   return {
     mode: checkpoint?.mode ?? null,
@@ -188,7 +216,7 @@ export function computeStatus(input: {
       !(lastEntry != null &&
         checkpoint.updatedAt &&
         (Date.parse(checkpoint.updatedAt) || 0) >= (Date.parse(lastEntry.timestamp) || 0)),
-    resumeCount: checkpoint?.resumeCount ?? 0,
+    resumeCount: toInteger(checkpoint?.resumeCount, 0),
     checkpoint,
     lastUpdated,
     // v3.0: quality command-center snapshots (present only when the caller
@@ -210,6 +238,40 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
   ctx.tools.register(
     defineTool({
       name: 'iterate_checkpoint',
+      // Result card (#12): the render is a raw JSON blob — turn it into a
+      // progress headline ("Checkpoint saved — round 2/5 (3 fixed)"). This
+      // tool has no `status` operation (progress lives on iterate_status), so
+      // save/load/resume/clear each get their headline. Pure: parsed from the
+      // rendered result only; an unreadable shape declines the card and the UI
+      // falls back to the raw JSON.
+      presentResult: (args, result) => {
+        const a = args as { operation?: unknown }
+        const op = typeof a.operation === 'string' && a.operation ? a.operation : undefined
+        if (!op) return undefined
+        const value = parseRenderedJson(result)
+        if (!value) return undefined
+        if (value.ok !== true) {
+          const err = typeof value.error === 'string' && value.error ? value.error : 'unknown error'
+          return { card: 'generic', title: `Checkpoint ${op} failed: ${err}` }
+        }
+        if (op === 'clear') {
+          return { card: 'generic', title: value.existed === true ? 'Checkpoint cleared' : 'No checkpoint to clear' }
+        }
+        const checkpoint = asRecord(value.checkpoint)
+        if (!checkpoint) {
+          // `load` with nothing on disk is a valid, useful outcome.
+          return op === 'load' ? { card: 'generic', title: 'No checkpoint on disk' } : undefined
+        }
+        const round = asNumber(checkpoint.round)
+        const maxRounds = asNumber(checkpoint.maxRounds)
+        const fixed = asNumber(checkpoint.fixedCount)
+        const resumeCount = asNumber(checkpoint.resumeCount)
+        const base = op === 'save' ? 'Checkpoint saved' : op === 'resume' ? 'Checkpoint resumed' : 'Checkpoint loaded'
+        const resume = op === 'resume' && resumeCount !== undefined ? ` (resume #${resumeCount})` : ''
+        const progress = round !== undefined ? ` — round ${round}${maxRounds !== undefined ? `/${maxRounds}` : ''}` : ''
+        const fixedPart = fixed !== undefined ? ` (${fixed} fixed)` : ''
+        return { card: 'generic', title: base + resume + progress + fixedPart }
+      },
       description:
         'Save / load / resume / clear the iteration checkpoint. The workflow saves a checkpoint at the start of ' +
         'each round (so a long run can resume) and clears it when the iteration completes. ' +

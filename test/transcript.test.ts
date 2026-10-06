@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -37,6 +37,18 @@ function finding(over: Record<string, unknown> = {}): Record<string, unknown> {
     summary: 'Guard the input',
     ...over,
   }
+}
+
+/** Write a `.iterate/decision-log.jsonl` from raw entry objects (no lock file). */
+function writeDecisionLog(root: string, entries: Record<string, unknown>[]): void {
+  mkdirSync(join(root, '.iterate'), { recursive: true })
+  const body = entries.map((e) => JSON.stringify(e) + '\n').join('')
+  writeFileSync(join(root, '.iterate', 'decision-log.jsonl'), body, 'utf-8')
+}
+
+/** Write the project config file (used by the observatory.capture tests). */
+function writeConfig(root: string, yaml: string): void {
+  writeFileSync(join(root, 'iterate.config.yaml'), yaml, 'utf-8')
 }
 
 describe('ReviewTranscriptBuilder', () => {
@@ -565,6 +577,819 @@ describe('iterate_transcript nudge execute', () => {
       })) as { transcript: { active: boolean; stoppedReason: string | null } }
       assert.equal(fresh.transcript.active, true)
       assert.equal(fresh.transcript.stoppedReason, null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('iterate_transcript nudge text argument', () => {
+  it('accepts the advertised text:null clear (the schema used to reject it)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      // Set a nudge first…
+      const set = (await tool({ operation: 'nudge', path: root, text: 'steer left' })) as Record<string, unknown>
+      assert.equal((set.transcript as { nudge: { text: string } | null }).nudge?.text, 'steer left')
+      // …then clear with the exact payload the docs and the client advertise.
+      // Before the fix, dsh's pre-execute argument validation rejected
+      // `text: null` against `type: 'string'`, so this call never reached
+      // the handler at all.
+      const cleared = (await tool({
+        operation: 'nudge',
+        path: root,
+        text: null,
+      })) as Record<string, unknown>
+      assert.equal(cleared.updated, true)
+      assert.equal(cleared.error, undefined)
+      assert.equal((cleared.transcript as { nudge: unknown }).nudge, null)
+      // The clear must PERSIST, not just appear in the returned snapshot.
+      const onDisk = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      ) as { nudge: unknown }
+      assert.equal(onDisk.nudge, null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('treats an empty or whitespace-only string as a clear (handler + docs aligned)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      await tool({ operation: 'nudge', path: root, text: 'steer right' })
+      const blank = (await tool({ operation: 'nudge', path: root, text: '   ' })) as Record<string, unknown>
+      assert.equal(blank.updated, true)
+      assert.equal((blank.transcript as { nudge: unknown }).nudge, null)
+      // The persisted nudge is gone too.
+      const onDisk = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      ) as { nudge: unknown }
+      assert.equal(onDisk.nudge, null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('still sets a normal steering string', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      const res = (await tool({ operation: 'nudge', path: root, text: 'focus on auth' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.equal((res.transcript as { nudge: { text: string } | null }).nudge?.text, 'focus on auth')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a non-string text at the schema boundary (before execute)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      await assert.rejects(
+        tool({ operation: 'nudge', path: root, text: 42 }),
+        /invalid arguments/,
+      )
+      // Nothing was persisted by the rejected call.
+      assert.equal(existsSync(join(root, '.iterate', 'transcript.json')), false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('iterate_transcript read execute', () => {
+  /** Assert the structured not-found empty view every failure path promises. */
+  function assertEmptyView(res: Record<string, unknown>): void {
+    assert.equal(res.found, false)
+    assert.ok(Array.isArray(res.live), 'live activity must still be returned')
+    const t = res.transcript as {
+      version: number
+      rounds: unknown[]
+      convergence: unknown[]
+      timeline: unknown[]
+      nudge: unknown
+    }
+    assert.equal(t.version, TRANSCRIPT_VERSION)
+    assert.deepEqual(t.rounds, [])
+    assert.deepEqual(t.convergence, [])
+    assert.deepEqual(t.timeline, [])
+    assert.equal(t.nudge, null)
+  }
+
+  it('returns the persisted manifest when the file is well-formed', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-read-'))
+    try {
+      const b = new ReviewTranscriptBuilder({ project: root, mode: 'dry-run', goal: 'audit', now: fixedClock() })
+      b.roundStart(1, 3)
+      b.reviewerSnapshot('correctness', [finding()], ['src/a.ts'])
+      b.snapshotConvergence(1, 1)
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify(b.serialize()), 'utf-8')
+
+      const res = (await tool({ operation: 'read', path: root })) as Record<string, unknown>
+      assert.equal(res.found, true)
+      assert.equal(res.error, undefined)
+      const t = res.transcript as { goal: string; rounds: unknown[]; convergence: number[] }
+      assert.equal(t.goal, 'audit')
+      assert.equal(t.rounds.length, 1)
+      assert.deepEqual(t.convergence, [1])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('returns the structured empty view when no transcript exists', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-read-'))
+    try {
+      const res = (await tool({ operation: 'read', path: root })) as Record<string, unknown>
+      assertEmptyView(res)
+      assert.equal(res.error, undefined)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('returns the structured empty view for corrupt JSON instead of a bare error', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-read-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(join(root, '.iterate', 'transcript.json'), '{not json', 'utf-8')
+      const res = (await tool({ operation: 'read', path: root })) as Record<string, unknown>
+      assertEmptyView(res)
+      // The diagnostic survives alongside the view.
+      assert.match(String(res.error), /Failed to read transcript/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('treats parseable-but-wrong-shape payloads as not found', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-read-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      // Each of these parses cleanly but carries no manifest — the old code
+      // returned them as `found: true` and the panel rendered junk.
+      const payloads: unknown[] = [
+        null,
+        [],
+        {},
+        { version: TRANSCRIPT_VERSION },
+        { version: TRANSCRIPT_VERSION, project: root, active: true, rounds: [null], convergence: [], findings: [], fixes: [], timeline: [] },
+        { version: TRANSCRIPT_VERSION, project: root, active: true, rounds: [], convergence: ['x'], findings: [], fixes: [], timeline: [] },
+      ]
+      for (const payload of payloads) {
+        writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify(payload), 'utf-8')
+        const res = (await tool({ operation: 'read', path: root })) as Record<string, unknown>
+        assert.equal(res.found, false, `payload ${JSON.stringify(payload)} must not be found`)
+        assertEmptyView(res)
+        assert.match(String(res.error), /not a valid manifest/)
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('iterate_transcript capture hardening', () => {
+  it('skips persistence entirely when observatory.capture is false', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-cfg-'))
+    try {
+      writeConfig(root, 'observatory:\n  capture: false\n')
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 1,
+        rounds: [{ round: 1, findings: [finding()] }],
+        findingsByRound: [1],
+      })) as Record<string, unknown>
+      assert.equal(res.skipped, true)
+      assert.equal(res.reason, 'observatory.capture is disabled')
+      assert.equal(res.updated, false)
+      assert.equal(res.error, undefined)
+      assert.equal(existsSync(join(root, '.iterate', 'transcript.json')), false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persists when observatory.capture is explicitly true', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-cfg-'))
+    try {
+      writeConfig(root, 'observatory:\n  capture: true\n')
+      const res = (await tool({ operation: 'capture', path: root, roundsExecuted: 0, rounds: [] })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.equal(res.skipped, undefined)
+      assert.equal(existsSync(join(root, '.iterate', 'transcript.json')), true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persists when the config file is unreadable (fail-safe defaults)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-cfg-'))
+    try {
+      // Broken YAML → loadConfig returns null → defaults (capture on) apply,
+      // so a corrupt config can never silently blind the observatory.
+      writeConfig(root, 'observatory: [unterminated\n')
+      const res = (await tool({ operation: 'capture', path: root, roundsExecuted: 0, rounds: [] })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.equal(existsSync(join(root, '.iterate', 'transcript.json')), true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('drops negative/non-finite findingsByRound entries instead of persisting them', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-capture-'))
+    try {
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 3,
+        findingsByRound: [-3, 'x', 2],
+        rounds: [{ round: 1, findings: [] }, { round: 2, findings: [] }, { round: 3, findings: [] }],
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const convergence = (res.transcript as { convergence: number[] }).convergence
+      // A hostile `-3` must not survive the round trip (rehydrate already
+      // refuses it — capture must not be the asymmetric back door).
+      assert.equal(convergence.includes(-3), false)
+      // Only -1 placeholders (unknown) or non-negative counts may appear.
+      assert.ok(
+        convergence.every((n) => n === -1 || n >= 0),
+        `unexpected convergence values: ${JSON.stringify(convergence)}`,
+      )
+      // The valid entry still lands at its position (round 3 → index 2).
+      assert.equal(convergence[2], 2)
+      const onDisk = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      ) as { convergence: number[] }
+      assert.equal(onDisk.convergence.includes(-3), false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('folds the decision log into manifest.timeline on capture', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-timeline-'))
+    try {
+      writeDecisionLog(root, [
+        { timestamp: '2026-01-01T00:00:00.000Z', round: 1, type: 'round_start', data: { round: 1 } },
+        { timestamp: '2026-01-01T00:00:01.000Z', round: 2, type: 'decision', data: { note: 'keep going' } },
+      ])
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 2,
+        rounds: [{ round: 1, findings: [] }, { round: 2, findings: [] }],
+        findingsByRound: [1, 0],
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const timeline = (res.transcript as { timeline: Array<{ type: string; round: number; data: Record<string, unknown> }> }).timeline
+      assert.equal(timeline.length, 2)
+      assert.equal(timeline[0]!.type, 'round_start')
+      assert.equal(timeline[0]!.round, 1)
+      assert.equal(timeline[1]!.type, 'decision')
+      assert.deepEqual(timeline[1]!.data, { note: 'keep going' })
+      // The timeline is PERSISTED, not just returned in the snapshot.
+      const onDisk = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      ) as { timeline: unknown[] }
+      assert.equal(onDisk.timeline.length, 2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('captures an empty timeline when no decision log exists', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-timeline-'))
+    try {
+      const res = (await tool({ operation: 'capture', path: root, roundsExecuted: 0, rounds: [] })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.deepEqual((res.transcript as { timeline: unknown[] }).timeline, [])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('tolerates a corrupt decision log without failing the capture', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-timeline-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      // One garbage line + one good line: the reader skips the bad line, the
+      // capture itself must never throw.
+      writeFileSync(
+        join(root, '.iterate', 'decision-log.jsonl'),
+        '{not json\n' + JSON.stringify({ timestamp: '2026-01-01T00:00:00.000Z', round: 1, type: 'validation', data: { ok: true } }) + '\n',
+        'utf-8',
+      )
+      const res = (await tool({ operation: 'capture', path: root, roundsExecuted: 1, rounds: [{ round: 1, findings: [] }] })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.equal(res.error, undefined)
+      const timeline = (res.transcript as { timeline: Array<{ type: string }> }).timeline
+      assert.equal(timeline.length, 1)
+      assert.equal(timeline[0]!.type, 'validation')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the captured timeline bounded by the builder cap (newest win)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-timeline-'))
+    try {
+      // 505 entries > MAX_TIMELINE (500): the head must be dropped, the tail kept.
+      const entries = Array.from({ length: 505 }, (_, i) => ({
+        timestamp: '2026-01-01T00:00:00.000Z',
+        round: 1,
+        type: 'decision',
+        data: { idx: i },
+      }))
+      writeDecisionLog(root, entries)
+      const res = (await tool({ operation: 'capture', path: root, roundsExecuted: 1, rounds: [{ round: 1, findings: [] }] })) as Record<string, unknown>
+      const timeline = (res.transcript as { timeline: Array<{ data: { idx: number } }> }).timeline
+      assert.equal(timeline.length, 500)
+      assert.equal(timeline[0]!.data.idx, 5) // oldest five evicted
+      assert.equal(timeline[timeline.length - 1]!.data.idx, 504) // newest retained
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('validations capture contract (#6)', () => {
+  /** A well-formed row of the agreed client/server shape. */
+  function validRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return { round: 1, command: 'npm test', exitCode: 0, allowed: true, ...over }
+  }
+
+  it('validation() keeps well-formed rows of the agreed shape', () => {
+    const b = new ReviewTranscriptBuilder({
+      project: '/proj',
+      mode: 'normal',
+      approval: 'ask',
+      goal: 'g',
+      maxRounds: 3,
+      now: fixedClock(),
+    })
+    b.validation(validRow())
+    b.validation(validRow({ round: 2, exitCode: 1, allowed: false, rejectReason: '  not in allow-list  ' }))
+    b.validation(validRow({ round: 3, exitCode: null }))
+    const m = b.serialize()
+    assert.equal(m.validations?.length, 3)
+    assert.deepEqual(m.validations![0], { round: 1, command: 'npm test', exitCode: 0, allowed: true })
+    // rejectReason is trimmed and only attached when present.
+    assert.deepEqual(m.validations![1], {
+      round: 2,
+      command: 'npm test',
+      exitCode: 1,
+      allowed: false,
+      rejectReason: 'not in allow-list',
+    })
+    // exitCode null survives (the contract's "never produced a code" case).
+    assert.equal(m.validations![2]!.exitCode, null)
+  })
+
+  it('validation() drops rows that cannot identify what was run', () => {
+    const b = new ReviewTranscriptBuilder({
+      project: '/proj',
+      mode: 'normal',
+      approval: 'ask',
+      goal: 'g',
+      maxRounds: 3,
+      now: fixedClock(),
+    })
+    // Non-object / missing round / round 0 / negative round / blank command.
+    b.validation('npm test')
+    b.validation(null)
+    b.validation({ command: 'npm test', exitCode: 0, allowed: true })
+    b.validation(validRow({ round: 0 }))
+    b.validation(validRow({ round: -2 }))
+    b.validation(validRow({ round: NaN }))
+    b.validation(validRow({ command: '   ' }))
+    b.validation(validRow({ command: 42 }))
+    const m = b.serialize()
+    assert.equal(m.validations?.length, 0)
+  })
+
+  it('validation() clamps absurd rounds and normalizes the loose fields', () => {
+    const b = new ReviewTranscriptBuilder({
+      project: '/proj',
+      mode: 'normal',
+      approval: 'ask',
+      goal: 'g',
+      maxRounds: 3,
+      now: fixedClock(),
+    })
+    // Round far above the cap is clamped (the row is real — never dropped).
+    b.validation(validRow({ round: 10_000_000 }))
+    // exitCode that is not a finite number degrades to null.
+    b.validation(validRow({ round: 2, exitCode: 'abort' }))
+    b.validation(validRow({ round: 3, exitCode: NaN }))
+    // `allowed` is strict boolean: anything that is not `true` reads false
+    // (fail closed — a row that cannot prove allow-listing is rejected).
+    b.validation(validRow({ round: 4, allowed: 'yes' }))
+    b.validation(validRow({ round: 5, allowed: undefined }))
+    // Blank rejectReason is omitted, not persisted as ''.
+    b.validation(validRow({ round: 6, allowed: false, rejectReason: '   ' }))
+    const m = b.serialize()
+    const rows = m.validations!
+    assert.equal(rows.length, 6)
+    assert.equal(rows[0]!.round, 1000) // MAX_ROUNDS clamp
+    assert.equal(rows[1]!.exitCode, null)
+    assert.equal(rows[2]!.exitCode, null)
+    assert.equal(rows[3]!.allowed, false)
+    assert.equal(rows[4]!.allowed, false)
+    assert.equal('rejectReason' in rows[5]!, false)
+  })
+
+  it('validation() bounds the list at 500 rows (newest win)', () => {
+    const b = new ReviewTranscriptBuilder({
+      project: '/proj',
+      mode: 'normal',
+      approval: 'ask',
+      goal: 'g',
+      maxRounds: 3,
+      now: fixedClock(),
+    })
+    for (let i = 0; i < 505; i++) b.validation(validRow({ round: 1, command: `cmd-${i}` }))
+    const rows = b.serialize().validations!
+    assert.equal(rows.length, 500)
+    assert.equal(rows[0]!.command, 'cmd-5') // oldest five evicted
+    assert.equal(rows[rows.length - 1]!.command, 'cmd-504') // newest retained
+  })
+
+  it('capture persists validations and drops malformed rows on the way', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-validations-'))
+    try {
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 2,
+        rounds: [{ round: 1, findings: [] }, { round: 2, findings: [] }],
+        validations: [
+          validRow({ round: 1, command: 'npm test', exitCode: 0, allowed: true }),
+          validRow({ round: 2, command: 'npm run lint', exitCode: 2, allowed: false, rejectReason: 'not allow-listed' }),
+          { garbage: true }, // dropped: no round/command
+          'nope', // dropped: not an object
+        ],
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.equal(res.error, undefined)
+      const captured = (res.transcript as { validations?: Array<Record<string, unknown>> }).validations
+      assert.equal(captured?.length, 2)
+      assert.equal(captured![0]!.command, 'npm test')
+      assert.equal(captured![1]!.rejectReason, 'not allow-listed')
+      // Persisted, not just echoed in the response.
+      const onDisk = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      ) as { validations: unknown[] }
+      assert.equal(onDisk.validations.length, 2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('capture tolerates a non-array validations argument', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-validations-'))
+    try {
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 1,
+        rounds: [{ round: 1, findings: [] }],
+        validations: 'not-an-array',
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      assert.equal(res.error, undefined)
+      const captured = (res.transcript as { validations?: unknown[] }).validations
+      assert.deepEqual(Array.from(captured ?? []), [])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rehydrate round-trips validations back through the builder (nudge path)', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-validations-'))
+    try {
+      await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 1,
+        rounds: [{ round: 1, findings: [] }],
+        validations: [validRow({ round: 1, command: 'npm test', exitCode: 0, allowed: true })],
+      })
+      // `nudge` rehydrates the persisted manifest before re-persisting —
+      // validations must survive that round trip instead of being silently
+      // reset (capture itself rebuilds from scratch by design).
+      const res = (await tool({
+        operation: 'nudge',
+        path: root,
+        text: 'keep going',
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const rows = (res.transcript as { validations?: unknown[] }).validations
+      assert.equal(rows?.length, 1)
+      assert.deepEqual(Array.from(rows!), [
+        { round: 1, command: 'npm test', exitCode: 0, allowed: true },
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+// ─── Audit hardening: rehydration fidelity, thread overflow, feed bounds ─────
+
+describe('rehydrate fidelity (M5)', () => {
+  it('keeps every over-cap thread with its OWN dimension and message ARRAY through a nudge', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-rehydrate-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      // 14 threads in one round — above MAX_THREADS_PER_ROUND (12). The old
+      // replay path went through `reviewerStart` (silently dropped past the
+      // live cap and mis-merged the tail into the previous dimension's
+      // thread) plus `reviewerMessage((messages ?? []).join('\n'))` (collapsed
+      // the message array, degrading every nudge round trip).
+      const threads = Array.from({ length: 14 }, (_, i) => ({
+        dimension: `dim-${i}`,
+        attempt: 1,
+        messages: [`first ${i}`, `second ${i}`],
+        readFiles: [`src/${i}.ts`],
+        findings: [finding({ dimension: `dim-${i}`, file: `src/${i}.ts`, summary: `f${i}` })],
+      }))
+      writeFileSync(
+        join(root, '.iterate', 'transcript.json'),
+        JSON.stringify({
+          version: 1,
+          project: root,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          active: true,
+          mode: 'normal',
+          goal: 'g',
+          phases: [],
+          round: 1,
+          maxRounds: 3,
+          rounds: [{ round: 1, threads }],
+          convergence: [1],
+          findings: [],
+          fixes: [],
+          checkpoint: null,
+          timeline: [],
+          nudge: null,
+          approval: { active: true, policy: 'ask' },
+        }),
+        'utf-8',
+      )
+
+      const res = (await tool({ operation: 'nudge', path: root, text: 'steer' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const out = res.transcript as {
+        rounds: Array<{ threads: Array<{ dimension: string; messages: string[]; findings: Array<{ file: string }> }> }>
+      }
+      const restored = out.rounds[0]!.threads
+      // Restored 1:1 (bounded only by the hostile-manifest cap 2*12+1), never
+      // by the live per-round cap of 12.
+      assert.equal(restored.length, 14)
+      assert.deepEqual(
+        restored.map((t) => t.dimension),
+        threads.map((t) => t.dimension),
+        'each thread keeps its own dimension — no merge into the previous one',
+      )
+      for (let i = 0; i < threads.length; i += 1) {
+        assert.deepEqual(restored[i]!.messages, [`first ${i}`, `second ${i}`], `thread ${i} message boundaries`)
+        assert.equal(restored[i]!.findings[0]!.file, `src/${i}.ts`, `thread ${i} findings stay attributed`)
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('thread cap overflow (minor 5)', () => {
+  it('routes over-cap reviewer threads into ONE shared "other" thread (never mis-attributed)', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b.roundStart(1, 3)
+    for (let i = 0; i < 13; i += 1) b.reviewerStart(`dim-${i}`)
+    // The 13th distinct dimension exceeds MAX_THREADS_PER_ROUND (12).
+    b.reviewerFindings([finding({ dimension: 'dim-12', file: 'src/x.ts', summary: 'overflow finding' })])
+
+    let threads = b.serialize().rounds[0]!.threads
+    assert.equal(threads.length, 13, '12 live threads + at most ONE overflow thread')
+    assert.equal(threads[12]!.dimension, 'other')
+    assert.equal(threads[12]!.findings.length, 1, 'over-cap findings land in the overflow thread')
+    assert.equal(threads[11]!.findings.length, 0, 'never merged into the previous dimension thread')
+
+    // Further over-cap starts reuse the SAME overflow thread (still 13).
+    b.reviewerStart('dim-99')
+    b.reviewerSnapshot('dim-99', [finding({ file: 'src/y.ts', summary: 'second overflow' })])
+    threads = b.serialize().rounds[0]!.threads
+    assert.equal(threads.length, 13)
+    assert.equal(threads[12]!.findings.length, 2)
+    assert.equal(threads[11]!.findings.length, 0)
+  })
+})
+
+describe('convergence feed bounds (minor 6)', () => {
+  it('capture truncates findingsByRound at MAX_ROUNDS instead of folding the tail into slot 1000', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-convergence-'))
+    try {
+      const series = Array.from({ length: 1002 }, (_, i) => i)
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 1,
+        rounds: [],
+        findingsByRound: series,
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const conv = (res.transcript as { convergence: number[] }).convergence
+      assert.equal(conv.length, 1000)
+      // Without feed-side truncation rounds 1001/1002 would OVERWRITE slot
+      // 1000 (the clamp), so conv[999] would be 1001 instead of 999.
+      assert.equal(conv[999], 999)
+      const onDisk = JSON.parse(
+        readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'),
+      ) as { convergence: number[] }
+      assert.equal(onDisk.convergence.length, 1000)
+      assert.equal(onDisk.convergence[999], 999)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rehydrate applies the same truncation on the nudge path', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-convergence-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(
+        join(root, '.iterate', 'transcript.json'),
+        JSON.stringify({
+          version: 1,
+          project: root,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          active: true,
+          mode: 'normal',
+          goal: 'g',
+          phases: [],
+          round: 1,
+          maxRounds: 0,
+          rounds: [],
+          convergence: Array.from({ length: 1005 }, (_, i) => i),
+          findings: [],
+          fixes: [],
+          checkpoint: null,
+          timeline: [],
+          nudge: null,
+          approval: { active: true, policy: 'ask' },
+        }),
+        'utf-8',
+      )
+      const res = (await tool({ operation: 'nudge', path: root, text: 'steer' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const conv = (res.transcript as { convergence: number[] }).convergence
+      assert.equal(conv.length, 1000)
+      assert.equal(conv[999], 999, 'extra rounds must be dropped, not folded into the last slot')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('read-side defensive normalization (minor 7)', () => {
+  it('bounds and sanitizes a hostile manifest instead of passing it through raw', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-normalize-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(
+        join(root, '.iterate', 'transcript.json'),
+        JSON.stringify({
+          version: 1,
+          project: root,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          active: true,
+          mode: 'normal',
+          goal: 'g',
+          phases: ['plan', 5, '   ', 'report'],
+          round: 1e9,
+          maxRounds: -4,
+          rounds: [
+            {
+              round: 1,
+              threads: Array.from({ length: 30 }, (_, i) => ({
+                dimension: `d${i}`,
+                attempt: 1,
+                messages: Array.from({ length: 60 }, (_, j) => `m${j}`),
+                readFiles: ['a.ts', 'a.ts'],
+                findings: [{ dimension: 'x', file: 'f.ts', line: 0.5, summary: 'frac' }, 'junk'],
+              })),
+            },
+          ],
+          convergence: Array.from({ length: 1500 }, () => 3),
+          findings: Array.from({ length: 2500 }, (_, i) => ({
+            dimension: 'correctness',
+            file: 'f.ts',
+            line: i,
+            severity: 'high',
+            summary: `s${i}`,
+          })),
+          fixes: Array.from({ length: 400 }, (_, i) => ({ id: `f${i}` })),
+          checkpoint: { mode: 'weird', round: 'x' },
+          timeline: Array.from({ length: 900 }, (_, i) => ({ round: i, type: 'decision' })),
+          nudge: { text: '   ' },
+          validations: Array.from({ length: 900 }, (_, i) => ({
+            round: i + 1,
+            command: 'npm test',
+            exitCode: 0,
+            allowed: true,
+          })),
+          approval: { active: 'yes', policy: 'root' },
+        }),
+        'utf-8',
+      )
+
+      const res = (await tool({ operation: 'read', path: root })) as Record<string, unknown>
+      assert.equal(res.found, true, 'root shape is valid, so the row-level bounds decide the payload')
+      const t = res.transcript as Record<string, any>
+
+      assert.equal(t.rounds.length, 1)
+      assert.equal(t.rounds[0].threads.length, 25, 'threads capped at MAX_THREADS_RESTORED (2*12+1)')
+      assert.equal(t.rounds[0].threads[0].messages.length, 40, 'messages capped at MAX_MESSAGES_PER_THREAD')
+      assert.deepEqual(t.rounds[0].threads[0].readFiles, ['a.ts'])
+      assert.equal(t.rounds[0].threads[0].findings.length, 1)
+      assert.equal(t.rounds[0].threads[0].findings[0].line, 0, 'a fractional line is not a real anchor')
+      assert.equal(t.convergence.length, 1000)
+      assert.equal(t.findings.length, 2000)
+      assert.equal(t.fixes.length, 0, 'fix rows without id+file are dropped')
+      assert.equal(t.checkpoint, null, 'a checkpoint with a non-numeric round is not a checkpoint')
+      assert.equal(t.timeline.length, 500)
+      assert.equal(t.timeline[0].type, 'decision')
+      assert.deepEqual(t.timeline[0].data, {})
+      assert.equal(t.nudge, null, 'a whitespace-only nudge is cleared')
+      assert.equal(t.validations.length, 500)
+      assert.deepEqual(t.phases, ['plan', 'report'], 'non-string/blank phases dropped')
+      assert.ok(t.round <= 1000, 'round marker clamped to MAX_ROUNDS')
+      assert.equal(t.maxRounds, 0, 'negative counters degrade to 0')
+      assert.deepEqual(t.approval, { active: true, policy: 'ask' }, 'invalid policy falls back to ask')
+      assert.equal(t.round, 1000)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('capture round marker (minor 8)', () => {
+  it('advances the marker past captured rounds WITHOUT fabricating phantom empty rounds', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-marker-'))
+    try {
+      // Resumed-style capture: 3 rounds executed, findings captured for round 1
+      // only. The marker must still report 3, but rounds 2/3 must NOT appear as
+      // empty rows nobody produced.
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 3,
+        findingsByRound: [1],
+        rounds: [{ round: 1, findings: [finding()] }],
+      })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const m = res.transcript as { round: number; rounds: unknown[]; active: boolean; stoppedReason: string | null }
+      assert.equal(m.round, 3, 'the marker still reports how far the run got')
+      assert.equal(m.rounds.length, 1, 'no phantom empty rows for the uncaptured rounds')
+      assert.equal(m.active, false)
+      assert.equal(m.stoppedReason, 'max_rounds_reached')
+
+      // A stale/smaller roundsExecuted must never REWIND past captured rows.
+      const rew = (await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 1,
+        findingsByRound: [1, 1],
+        rounds: [{ round: 1, findings: [] }, { round: 2, findings: [] }],
+      })) as Record<string, unknown>
+      const m2 = rew.transcript as { round: number; rounds: unknown[] }
+      assert.equal(m2.round, 2)
+      assert.equal(m2.rounds.length, 2)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -82,6 +82,28 @@ import {
   SEVERITY_LABEL,
   SEVERITY_COLOR,
   stoppedReasonLabel,
+  // ── gap fixes ──
+  START_INSTRUCTIONS, // #1: registered instruction set (test-locked)
+  dashboardRunState, // #5: running vs onboarding empty state
+  buildRoundComparison, // #13: cross-round comparison table
+  buildDiskSnapshotInstruction, // #4: pull `.iterate/` artifacts into the stream
+  diskEmptyStateText, // #4: "not pulled" vs "pulled and empty"
+  toolCalledInSession, // #4: which read-side tools ran this session
+  buildFixInstruction, // #10: single-finding fix payload w/ content + round
+  buildAssignFixesInstruction, // #10: "one call per finding" batch wording
+  buildArchitecturalFixInstruction, // #10: force:true still needs 4 required fields
+  buildCheckpointResumeInstruction, // #10: resume takes {operation} only
+  buildCheckpointClearInstruction, // #10: clear takes {operation} only
+  buildRollbackInstruction, // #10: shared rollback payload
+  buildQualityGateQueryInstruction, // #10: JSON-carrying query instruction
+  buildQualityGateClearInstruction, // #10: JSON-carrying clear instruction
+  buildTriageReadbackInstruction, // #7: close the write-back loop
+  buildExperienceListInstruction, // #3/#10: JSON list payload for F9
+  buildDefenseEventsListInstruction, // #3/#10: JSON list payload for F10
+  buildConfigFieldInstruction, // #8: field → iterate_config write instruction
+  configFieldByKey, // #8: field lookup for the settings picker
+  CONFIG_EDIT_FIELDS, // #8: field list incl. validation.commands
+  DISK_SNAPSHOT_SOURCES, // #4/#3: read-side tools listed by the pull instruction
 } from '../../lib/parse.js'
 
 // ─── Module contract ─────────────────────────────────────────────────────────
@@ -247,6 +269,17 @@ interface ObsManifest {
   approval?: ObsApproval
   /** Why the run ended: converged / max_rounds_reached / aborted_by_validation. */
   stoppedReason?: string | null
+  /** Gap #6: per-round validation rows persisted by `iterate_transcript capture`. */
+  validations?: ObsValidation[]
+}
+
+/** One `iterate_validate` outcome for a round (gap #6 contract). */
+interface ObsValidation {
+  round?: number
+  command?: string
+  exitCode?: number | null
+  allowed?: boolean
+  rejectReason?: string
 }
 
 // ─── Quality command center data types (v3.1+; mirrors src/types.ts) ────────
@@ -426,6 +459,7 @@ const ITERATE_CSS = `
 }
 .iterate-btn[data-primary] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 .iterate-btn[data-copied] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
+.iterate-btn[data-failed], .iterate-cmd[data-failed] { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
 .iterate-payload { width: 100%; margin-top: 8px; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px; white-space: pre-wrap; }
 
 .iterate-stats { margin: 10px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); padding: 12px 14px; }
@@ -610,6 +644,16 @@ const ITERATE_CSS = `
 .iterate-obs-block-head[data-click] { cursor: pointer; }
 .iterate-obs-block-body { padding: 8px 10px; }
 .iterate-obs-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+/* Gap #6: validation / gate status colors (pass=green, fail=red). */
+.iterate-obs-chip[data-status="pass"], .iterate-obs-badge[data-status="pass"] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
+.iterate-obs-chip[data-status="fail"], .iterate-obs-badge[data-status="fail"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 28%, transparent); }
+.iterate-obs-row[data-status="fail"] { color: var(--dsw-alias-state-error-primary); }
+.iterate-obs-row[data-highlight] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent); border-radius: 6px; padding-left: 6px; padding-right: 6px; border-bottom-color: transparent; font-weight: 600; }
+/* Gap #13: cross-round comparison table. */
+.iterate-obs-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.iterate-obs-table th, .iterate-obs-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--dsw-alias-border-l1); white-space: nowrap; }
+.iterate-obs-table th { color: var(--dsw-alias-label-secondary); font-weight: 600; }
+.iterate-obs-table td { color: var(--dsw-alias-label-primary); }
 .iterate-obs-msg { padding: 2px 0; color: var(--dsw-alias-label-secondary); line-height: 1.5; font-size: 11px; word-break: break-word; }
 .iterate-obs-file { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--dsw-alias-label-secondary); word-break: break-all; }
 .iterate-obs-bar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
@@ -873,15 +917,37 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
 }
 
 /** Start-iteration launcher shown on the empty dashboard: copies a runnable
- *  command (the browser cannot invoke harness tools directly, so every action
- *  follows the panel's copy-to-command pattern). */
+ *  instruction (the browser cannot invoke harness tools directly, so every
+ *  action follows the panel's copy-to-command pattern).
+ *
+ *  Gap #1: the plugin registers NO dsh command (`src/index.ts` only registers
+ *  17 tools + a system prompt), so `/iterate` never existed — the copied text
+ *  is now a natural-language instruction from `START_INSTRUCTIONS`, which the
+ *  model resolves through the `workflow` tool exactly as the skill prompt
+ *  teaches. Label/tooltip say "指令", never "命令". */
 function StartIterationButton() {
   const [copied, setCopied] = React.useState<string | null>(null)
+  const [failed, setFailed] = React.useState<string | null>(null)
+  const timers = React.useRef<number[]>([])
+  React.useEffect(
+    () => () => {
+      for (const t of timers.current) clearTimeout(t)
+      timers.current = []
+    },
+    [],
+  )
   const copy = (key: string, text: string) => {
     copyText(text).then((ok) => {
       if (ok) {
+        setFailed(null)
         setCopied(key)
-        setTimeout(() => setCopied((cur) => (cur === key ? null : cur)), 1600)
+        const t = window.setTimeout(() => setCopied((cur) => (cur === key ? null : cur)), 1600)
+        timers.current.push(t)
+      } else {
+        // Copy failure must be visible, not silent — otherwise the button
+        // looks like a no-op and the user never learns the instruction text.
+        setCopied(null)
+        setFailed(key)
       }
     })
   }
@@ -891,14 +957,15 @@ function StartIterationButton() {
       className: 'iterate-cmd',
       'data-primary': primary ? '' : undefined,
       'data-copied': copied === key ? '' : undefined,
+      'data-failed': failed === key ? '' : undefined,
       onClick: () => copy(key, command),
       title,
-    }, copied === key ? '已复制' : label)
+    }, copied === key ? '已复制' : failed === key ? '复制失败' : label)
   return React.createElement(
     'span',
     { className: 'iterate-dashboard-launch' },
-    btn('start-full', '完整迭代', '/iterate', true, '复制启动命令：完整「审查 → 修复 → 验证」闭环'),
-    btn('start-review', '仅评审', '/iterate review-only', false, '复制启动命令：只审查不修改（dry-run）'),
+    btn('start-full', '完整迭代', START_INSTRUCTIONS.full, true, '复制启动指令：完整「审查 → 修复 → 验证 → 复盘」闭环（粘贴给模型即可）'),
+    btn('start-review', '仅评审', START_INSTRUCTIONS.reviewOnly, false, '复制启动指令：只审查不修改（dry-run）（粘贴给模型即可）'),
   )
 }
 
@@ -926,13 +993,45 @@ function ConvergenceDashboard(props: SlotProps) {
   }, [report && hashReport(report) + ':' + getCurrentRound(report)])
 
   if (!report) {
+    // Gap #5: split the old single empty state in two. A run that is already
+    // in flight has no aggregated report yet (round 1 is still in
+    // review → fix → validate), but showing "运行一次评审后…" + a start button
+    // mid-run tells the user nothing is happening — and invites a second
+    // concurrent start. The transcript alone carries round + phase.
+    const runState = dashboardRunState(latestTranscript(session))
+    if (runState.state === 'running') {
+      return React.createElement(
+        'div',
+        { 'data-iterate-root': '', 'data-iterate': 'dashboard', 'data-run-state': 'running', className: 'iterate-dashboard iterate-dashboard-empty' },
+        React.createElement('span', { className: 'iterate-round-badge', 'data-live': '' }, '运行中'),
+        React.createElement(
+          'span',
+          { className: 'iterate-empty-hint' },
+          `第 ${String(runState.round)} 轮进行中${runState.phase ? ` · 阶段「${runState.phase}」` : ''}——首轮汇总报告落地后，这里会显示收敛进度与发现统计。`,
+        ),
+        // No start button while a run is active.
+      )
+    }
+    if (runState.state === 'done') {
+      return React.createElement(
+        'div',
+        { 'data-iterate-root': '', 'data-iterate': 'dashboard', 'data-run-state': 'done', className: 'iterate-dashboard iterate-dashboard-empty' },
+        React.createElement('span', { className: 'iterate-round-badge' }, '已结束'),
+        React.createElement(
+          'span',
+          { className: 'iterate-empty-hint' },
+          `上次迭代在第 ${String(runState.round)} 轮后停止${runState.stoppedReason ? `（${stoppedReasonLabel(runState.stoppedReason)}）` : ''}，但没有可展示的汇总报告。`,
+        ),
+        React.createElement(StartIterationButton, null),
+      )
+    }
     // Empty/onboarding state: first-time users otherwise see nothing and have
-    // no idea the plugin exists or how to start. Provide a one-click command
-    // that launches the loop (copied for paste — the browser cannot call
-    // harness tools directly).
+    // no idea the plugin exists or how to start. Provide a one-click copy of
+    // the startup instruction (the browser cannot call harness tools
+    // directly, and dsh exposes no command API to plugins).
     return React.createElement(
       'div',
-      { 'data-iterate-root': '', 'data-iterate': 'dashboard', className: 'iterate-dashboard iterate-dashboard-empty' },
+      { 'data-iterate-root': '', 'data-iterate': 'dashboard', 'data-run-state': 'empty', className: 'iterate-dashboard iterate-dashboard-empty' },
       React.createElement('span', { className: 'iterate-round-badge' }, 'iterate'),
       React.createElement('span', { className: 'iterate-empty-hint' }, '运行一次评审后，这里会显示收敛进度与发现统计。'),
       React.createElement(StartIterationButton, null),
@@ -1176,6 +1275,31 @@ function TriagePanel(props: SlotProps) {
   const [selectAll, setSelectAll] = React.useState(false)
   // v3.0: Command mode for native action buttons
   const [cmdCopied, setCmdCopied] = React.useState<string | null>(null)
+  const [cmdFailed, setCmdFailed] = React.useState<string | null>(null)
+  // Audit: pending copy-reset timers must not outlive the panel (a unmounted
+  // setState is a React warning / leaked timer).
+  const cmdTimers = React.useRef<number[]>([])
+  React.useEffect(() => () => {
+    for (const t of cmdTimers.current) clearTimeout(t)
+    cmdTimers.current = []
+  }, [])
+
+  /** Copy + flip `cmdCopied` for 1.6s, or surface `cmdFailed` on clipboard
+   *  denial so the button never looks like a dead control. */
+  const copyWithFeedback = (text: string, key: string) => {
+    copyText(text).then((ok) => {
+      if (ok) {
+        setCmdFailed(null)
+        setCmdCopied(key)
+        cmdTimers.current.push(window.setTimeout(() => setCmdCopied((cur) => (cur === key ? null : cur)), 1600))
+      } else {
+        setCmdCopied(null)
+        setCmdFailed(key)
+        // Fall back to the inline payload box so the text stays copyable by hand.
+        setPayload(text)
+      }
+    })
+  }
 
   /** Persist the verdicts to localStorage whenever they change. Kept OUT of
    *  the state updater (updaters must stay pure — React may double-invoke them
@@ -1263,26 +1387,18 @@ function TriagePanel(props: SlotProps) {
 
   // v3.0: Command handlers for native action buttons
   const doApproveArchitecturalFix = () => {
-    // Architectural findings exceed the atomic threshold, so "approving" one
-    // means telling the model to apply it as a deliberate forced change via
-    // iterate_fix with force:true (is_architectural is not a real parameter).
-    const cmd = '请调用 `iterate_fix`，对本项目剩余架构型 finding 生成修复内容并设置 force: true 应用（架构修复允许超过 atomic 阈值）'
-    copyText(cmd).then((ok) => {
-      if (ok) {
-        setCmdCopied('approve-arch')
-        setTimeout(() => setCmdCopied(null), 1600)
-      }
-    })
+    // Gap #10: `force: true` exists on `iterate_fix`, but the tool still
+    // requires file / content / finding / round — the old copy text implied a
+    // lone force flag was enough. The builder names all four and marks the two
+    // the model must fill in.
+    const cmd = buildArchitecturalFixInstruction(findings as IterateFinding[])
+    if (!cmd) return
+    copyWithFeedback(cmd, 'approve-arch')
   }
 
   const doTriggerNewRound = () => {
     const cmd = '请继续执行下一轮迭代审查'
-    copyText(cmd).then((ok) => {
-      if (ok) {
-        setCmdCopied('new-round')
-        setTimeout(() => setCmdCopied(null), 1600)
-      }
-    })
+    copyWithFeedback(cmd, 'new-round')
   }
 
   const doRollbackToCheckpoint = () => {
@@ -1290,39 +1406,22 @@ function TriagePanel(props: SlotProps) {
     // only); reverting applied fixes is done via iterate_rollback by fix id,
     // so the paste-able instruction must point there instead.
     const cmd = '请回滚上一轮迭代的修复：调用 `iterate_history` 查看本轮 fix id，再用 `iterate_rollback` 逐个撤销这些修复'
-    copyText(cmd).then((ok) => {
-      if (ok) {
-        setCmdCopied('rollback')
-        setTimeout(() => setCmdCopied(null), 1600)
-      }
-    })
+    copyWithFeedback(cmd, 'rollback')
   }
 
   // v3.1+ §8: assign the currently scoped findings to the model for fixing.
-  // Scoping mirrors the batch buttons (visible when selectAll is off, all
-  // otherwise); produces one paste-able iterate_fix instruction carrying each
-  // finding's file/line/dimension/severity/summary.
+  // Gap #10: `iterate_fix` takes ONE finding + required `content` (full new
+  // file) + required `round` — never an array — so the payload now says so
+  // explicitly instead of handing the model a raw array to translate.
   const doAssignFindings = () => {
     const targetAll = selectAll
     const scopeIndices = targetAll ? allIndices : indices
     const scopeFindings = (findings as IterateFinding[])
       .filter((f, i) => scopeIndices.includes(i))
-      .map((f) => ({
-        file: String(f.file || ''),
-        ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
-        dimension: String(f.dimension || ''),
-        severity: String(f.severity || ''),
-        summary: String(f.summary || ''),
-        ...(f.suggested_fix ? { suggested_fix: String(f.suggested_fix) } : {}),
-      }))
     if (scopeFindings.length === 0) return
-    const cmd = `请调用 \`iterate_fix\` 指派并修复以下 findings：\n\n\`\`\`json\n${JSON.stringify(scopeFindings, null, 2)}\n\`\`\``
-    copyText(cmd).then((ok) => {
-      if (ok) {
-        setCmdCopied('assign')
-        setTimeout(() => setCmdCopied(null), 1600)
-      }
-    })
+    const cmd = buildAssignFixesInstruction(scopeFindings)
+    if (!cmd) return
+    copyWithFeedback(cmd, 'assign')
   }
 
   const doCopyYaml = () => {
@@ -1331,23 +1430,45 @@ function TriagePanel(props: SlotProps) {
     copyText(yaml).then((ok) => {
       if (ok) {
         setCopied(true)
-        setTimeout(() => setCopied(false), 1600)
+        cmdTimers.current.push(window.setTimeout(() => setCopied(false), 1600))
       } else {
         // Copy failed (permissions/unsupported) — reveal the payload as a
         // manual-copy fallback instead of claiming success.
         setPayload(yaml)
+        setCmdFailed('yaml')
       }
     })
   }
 
+  // Gap #7: the SAFE path is `iterate_triage apply` (validation, dedupe,
+  // backup, automatic rollback) — so it is now the primary action, and it
+  // tells the user what happens after they paste.
   const doBuildInstruction = () => {
     const text = buildApplyInstruction(ignored)
+    if (!text) return
     setPayload(text)
-    if (text) copyText(text)
+    copyWithFeedback(text, 'apply')
   }
 
-  const rows = (filtered as IterateFinding[]).map((finding, i) => {
-    const index = indices[i] as number
+  // Gap #7: closing the write-back loop — copying is not writing, so offer a
+  // readback instruction (`iterate_triage list`) to verify what landed.
+  const doReadback = () => {
+    const text = buildTriageReadbackInstruction()
+    setPayload(text)
+    copyWithFeedback(text, 'readback')
+  }
+
+  // Audit: `filtered` and `indices` are produced together, but an
+  // out-of-range slot would otherwise render a row keyed `undefined` whose
+  // verdict writes to `verdicts["undefined"]`. Pair them up-front so the
+  // mapping index can never drift from the original findings index.
+  const rowPairs: Array<{ index: number; finding: IterateFinding }> = []
+  for (let i = 0; i < filtered.length; i++) {
+    const idx = indices[i]
+    const f = filtered[i]
+    if (typeof idx === 'number' && f) rowPairs.push({ index: idx, finding: f as IterateFinding })
+  }
+  const rows = rowPairs.map(({ index, finding }) => {
     const severity = finding.severity || 'low'
     const verdict = verdicts[String(index)] || 'keep'
     const isSelected = selected === index
@@ -1445,43 +1566,74 @@ function TriagePanel(props: SlotProps) {
     ...rows,
     React.createElement('div', { className: 'iterate-triage-foot' },
       React.createElement('span', {}, `y ${counts.keep} · n ${counts.skip} · a ${counts.ignore} · 待写回 known_intentional：${ignoredCount} 条`),
-      React.createElement('span', { style: { display: 'flex', gap: 6 } },
+      React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+        // Gap #7: the apply instruction (safe path) is PRIMARY; the raw YAML
+        // is demoted to an explicit "just the snippet" escape hatch.
         React.createElement('button', {
-          className: 'iterate-btn', 'data-primary': '', 'data-copied': copied ? '' : undefined,
+          className: 'iterate-btn', 'data-primary': '',
+          'data-copied': cmdCopied === 'apply' ? '' : undefined,
+          'data-failed': cmdFailed === 'apply' ? '' : undefined,
+          onClick: doBuildInstruction, disabled: ignoredCount === 0,
+          title: ignoredCount === 0
+            ? '当前没有标记为「已知有意」的 finding'
+            : '复制应用指令：粘贴后模型会调用 iterate_triage apply（校验、去重、写入前备份、失败自动回滚）',
+        }, cmdCopied === 'apply' ? '已复制' : cmdFailed === 'apply' ? '复制失败' : `生成应用指令${ignoredCount > 0 ? `（${ignoredCount}）` : ''}`),
+        React.createElement('button', {
+          className: 'iterate-btn',
+          'data-copied': copied ? '' : undefined,
+          'data-failed': cmdFailed === 'yaml' ? '' : undefined,
           onClick: doCopyYaml, disabled: ignoredCount === 0,
-          title: ignoredCount === 0 ? '当前没有标记为「已知有意」的 finding' : '复制 known_intentional YAML',
-        }, copied ? '已复制' : `复制 known_intentional${ignoredCount > 0 ? `（${ignoredCount}）` : ''}`),
+          title: ignoredCount === 0
+            ? '当前没有标记为「已知有意」的 finding'
+            : '只复制 known_intentional YAML 片段（需自行粘到 iterate.config.yaml 的 personalization.known_intentional 下）',
+        }, copied ? '已复制' : cmdFailed === 'yaml' ? '复制失败' : '仅复制 YAML 片段'),
         React.createElement('button', {
-          className: 'iterate-btn', onClick: doBuildInstruction, disabled: ignoredCount === 0,
-          title: ignoredCount === 0 ? '当前没有标记为「已知有意」的 finding' : '生成 iterate_triage 应用指令',
-        }, '生成应用指令'),
+          className: 'iterate-btn',
+          'data-copied': cmdCopied === 'readback' ? '' : undefined,
+          'data-failed': cmdFailed === 'readback' ? '' : undefined,
+          onClick: doReadback,
+          title: '复制 iterate_triage list 指令，核对已经写入的 known_intentional 条目（写回闭环确认）',
+        }, cmdCopied === 'readback' ? '已复制' : cmdFailed === 'readback' ? '复制失败' : '回读已写入条目'),
       ),
+      cmdCopied === 'apply'
+        ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, '已复制应用指令——粘贴回会话，模型将调用 iterate_triage apply 并回报写入条数。')
+        : cmdCopied === 'readback'
+          ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, '已复制回读指令——粘贴回会话可列出当前已写入的 known_intentional。')
+          : null,
     ),
     // v3.0: Command buttons for native actions (§8)
     React.createElement('div', { className: 'iterate-triage-foot', style: { borderTop: '1px solid var(--dsw-alias-border-l1)' } },
       React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' } }, '指挥操作'),
-      React.createElement('span', { style: { display: 'flex', gap: 6 } },
+      React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
         React.createElement('button', {
-          className: 'iterate-cmd', 'data-primary': '', 'data-copied': cmdCopied === 'approve-arch' ? '' : undefined,
+          className: 'iterate-cmd', 'data-primary': '',
+          'data-copied': cmdCopied === 'approve-arch' ? '' : undefined,
+          'data-failed': cmdFailed === 'approve-arch' ? '' : undefined,
           onClick: doApproveArchitecturalFix,
-          title: '批准架构修复（复制指令文本）',
-        }, cmdCopied === 'approve-arch' ? '已复制' : '批准架构修复'),
+          title: '批准架构修复（复制指令文本：iterate_fix force:true，含全部必填参数）',
+        }, cmdCopied === 'approve-arch' ? '已复制' : cmdFailed === 'approve-arch' ? '复制失败' : '批准架构修复'),
         React.createElement('button', {
-          className: 'iterate-cmd', 'data-copied': cmdCopied === 'new-round' ? '' : undefined,
+          className: 'iterate-cmd',
+          'data-copied': cmdCopied === 'new-round' ? '' : undefined,
+          'data-failed': cmdFailed === 'new-round' ? '' : undefined,
           onClick: doTriggerNewRound,
           title: '触发新一轮迭代审查',
-        }, cmdCopied === 'new-round' ? '已复制' : '触发新一轮'),
+        }, cmdCopied === 'new-round' ? '已复制' : cmdFailed === 'new-round' ? '复制失败' : '触发新一轮'),
         React.createElement('button', {
-          className: 'iterate-cmd', 'data-primary': '', 'data-copied': cmdCopied === 'assign' ? '' : undefined,
+          className: 'iterate-cmd', 'data-primary': '',
+          'data-copied': cmdCopied === 'assign' ? '' : undefined,
+          'data-failed': cmdFailed === 'assign' ? '' : undefined,
           onClick: doAssignFindings,
           disabled: (selectAll ? allIndices : indices).length === 0,
-          title: selectAll ? `指派全部 ${allIndices.length} 个 findings 修复` : `指派当前可见 ${indices.length} 个 findings 修复`,
-        }, cmdCopied === 'assign' ? '已复制' : '指派修复'),
+          title: selectAll ? `指派全部 ${allIndices.length} 个 findings 修复（逐个 iterate_fix）` : `指派当前可见 ${indices.length} 个 findings 修复（逐个 iterate_fix）`,
+        }, cmdCopied === 'assign' ? '已复制' : cmdFailed === 'assign' ? '复制失败' : '指派修复'),
         React.createElement('button', {
-          className: 'iterate-cmd', 'data-danger': '', 'data-copied': cmdCopied === 'rollback' ? '' : undefined,
+          className: 'iterate-cmd', 'data-danger': '',
+          'data-copied': cmdCopied === 'rollback' ? '' : undefined,
+          'data-failed': cmdFailed === 'rollback' ? '' : undefined,
           onClick: doRollbackToCheckpoint,
           title: '回滚到上一个检查点',
-        }, cmdCopied === 'rollback' ? '已复制' : '回滚检查点'),
+        }, cmdCopied === 'rollback' ? '已复制' : cmdFailed === 'rollback' ? '复制失败' : '回滚检查点'),
       ),
     ),
     payload
@@ -1592,8 +1744,26 @@ function SettingsPanel(_props: SlotProps) {
   const [showStatus, setShowStatus] = React.useState(false)
   const [confirming, setConfirming] = React.useState(false)
   const [clearedInfo, setClearedInfo] = React.useState<number | null>(null)
+  // Gap #8: "pick a field → generate an iterate_config write instruction".
+  // Defaults to validation.commands, the field the old guide omitted entirely
+  // (and the root cause of the zero-verification P0).
+  const [cfgField, setCfgField] = React.useState<string>(
+    () => (CONFIG_EDIT_FIELDS.some((f) => f.key === 'validation.commands') ? 'validation.commands' : (CONFIG_EDIT_FIELDS[0]?.key ?? 'goal')),
+  )
+  const [cfgCopied, setCfgCopied] = React.useState(false)
+  const [cfgFailed, setCfgFailed] = React.useState(false)
+  const [cfgText, setCfgText] = React.useState<string | null>(null)
+  const [pullCopied, setPullCopied] = React.useState(false)
+  const [copyError, setCopyError] = React.useState<'guide' | 'status' | 'pull' | null>(null)
   const guide = buildConfigEditGuide()
   const statusGuide = buildRuntimeStatusGuide()
+
+  // Audit: don't leak flash timers across settings unmounts.
+  const cfgTimers = React.useRef<number[]>([])
+  React.useEffect(() => () => {
+    for (const t of cfgTimers.current) clearTimeout(t)
+    cfgTimers.current = []
+  }, [])
 
   const toggleTheme = () => {
     const next = !enabled
@@ -1602,16 +1772,32 @@ function SettingsPanel(_props: SlotProps) {
   }
 
   /** Flash a per-slot "已复制" state for the given duration. */
-  const flashCopied = (slot: 'guide' | 'status') => {
-    const setter = slot === 'guide' ? setGuideCopied : setStatusCopied
+  const flashCopied = (slot: 'guide' | 'status' | 'pull') => {
+    const setter = slot === 'guide' ? setGuideCopied : slot === 'status' ? setStatusCopied : setPullCopied
     setter(true)
-    setTimeout(() => setter(false), 1600)
+    cfgTimers.current.push(window.setTimeout(() => setter(false), 1600))
   }
 
-  /** Copy a guide/status block; flash success only when it actually copied. */
-  const doCopy = (text: string, slot: 'guide' | 'status') => {
+  /** Copy a guide/status block; flash success only when it actually copied,
+   *  and surface a visible error when the clipboard write is refused (the old
+   *  behaviour was a silent no-op, which reads as a broken button). */
+  const doCopy = (text: string, slot: 'guide' | 'status' | 'pull') => {
     copyText(text).then((ok) => {
+      setCopyError(ok ? null : slot)
       if (ok) flashCopied(slot)
+    })
+  }
+
+  /** Gap #8: build + copy the write instruction for the selected field. */
+  const doBuildConfigInstruction = () => {
+    const text = buildConfigFieldInstruction(cfgField)
+    setCfgText(text)
+    copyText(text).then((ok) => {
+      setCfgFailed(!ok)
+      setCfgCopied(ok)
+      cfgTimers.current.push(window.setTimeout(() => setCfgCopied(false), 1600))
+      // On failure the raw text stays on screen for a manual copy.
+      if (!ok) return
     })
   }
 
@@ -1621,11 +1807,11 @@ function SettingsPanel(_props: SlotProps) {
       const count = removeStorageByPrefix(TRIAGE_STORAGE_PREFIX)
       setClearedInfo(count)
       setConfirming(false)
-      setTimeout(() => setClearedInfo(null), 3000)
+      cfgTimers.current.push(window.setTimeout(() => setClearedInfo(null), 3000))
       return
     }
     setConfirming(true)
-    setTimeout(() => setConfirming(false), 3000)
+    cfgTimers.current.push(window.setTimeout(() => setConfirming(false), 3000))
   }
 
   const clearButton = clearedInfo !== null
@@ -1675,13 +1861,50 @@ function SettingsPanel(_props: SlotProps) {
     React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
         React.createElement('div', { className: 'iterate-settings-title' }, '配置管理'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '目标 / 维度 / 最大轮数写在项目的 iterate.config.yaml，复制指引可让模型按需调整。'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, '目标 / 维度 / 最大轮数 / validation.commands 写在项目的 iterate.config.yaml，复制指引可让模型按需调整。'),
       ),
       React.createElement('div', { className: 'iterate-scard-actions' },
         React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': guideCopied ? '' : undefined, onClick: () => doCopy(guide, 'guide') }, guideCopied ? '已复制' : '复制指引'),
         React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowGuide((v) => !v) }, showGuide ? '收起' : '展开'),
       ),
     ),
+    // Gap #8: wire up the previously-dead `buildConfigFieldInstruction` — pick
+    // a field, generate the `iterate_config` write payload for it, paste it to
+    // the model. `validation.commands` is the default selection.
+    React.createElement('div', { className: 'iterate-guide-bar', style: { marginTop: 8, flexWrap: 'wrap' } },
+      React.createElement('select', {
+        className: 'iterate-filter-select',
+        value: cfgField,
+        'aria-label': '选择要修改的配置字段',
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setCfgField(e.target.value),
+      },
+        ...CONFIG_EDIT_FIELDS.map((f) =>
+          React.createElement('option', { key: f.key, value: f.key }, `${f.label}（${f.key}）`),
+        ),
+      ),
+      React.createElement('span', { className: 'iterate-settings-desc' },
+        configFieldByKey(cfgField)?.hint ?? '',
+      ),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-primary': '',
+        'data-copied': cfgCopied ? '' : undefined,
+        'data-failed': cfgFailed ? '' : undefined,
+        onClick: doBuildConfigInstruction,
+        title: '生成并复制该字段的 iterate_config 写入指令（写入前自动备份、失败自动回滚）',
+      }, cfgCopied ? '已复制' : cfgFailed ? '复制失败' : '生成写入指令'),
+      cfgFailed
+        ? React.createElement('span', { className: 'iterate-settings-desc' }, '剪贴板被拒绝——指令已展示在下方，请手动复制。')
+        : null,
+    ),
+    cfgText
+      ? React.createElement('div', { className: 'iterate-guide' },
+          React.createElement('div', { className: 'iterate-guide-bar' },
+            React.createElement('span', {}, '写入指令（粘贴给模型）'),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(cfgText, 'guide') }, '复制'),
+          ),
+          React.createElement('div', { className: 'iterate-guide-body' }, cfgText),
+        )
+      : null,
     showGuide
       ? React.createElement('div', { className: 'iterate-guide' },
           React.createElement('div', { className: 'iterate-guide-bar' },
@@ -1701,6 +1924,13 @@ function SettingsPanel(_props: SlotProps) {
       ),
       React.createElement('div', { className: 'iterate-scard-actions' },
         React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': statusCopied ? '' : undefined, onClick: () => doCopy(statusGuide, 'status') }, statusCopied ? '已复制' : '复制指引'),
+        // Gap #4: RUNTIME_ARTIFACTS stops being documentation-only — this
+        // copies the instruction that makes the model echo those artifacts
+        // into the session so the observatory panels can read them.
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-copied': pullCopied ? '' : undefined,
+          onClick: () => doCopy(buildDiskSnapshotInstruction(), 'pull'),
+        }, pullCopied ? '已复制' : '拉取磁盘快照'),
         React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowStatus((v) => !v) }, showStatus ? '收起' : '展开'),
       ),
     ),
@@ -1731,6 +1961,13 @@ function SettingsPanel(_props: SlotProps) {
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'settings', className: 'iterate-settings' },
     React.createElement('div', { className: 'iterate-settings-title', style: { fontSize: 15, fontWeight: 700 } }, 'iterate 设置'),
     banner,
+    copyError
+      ? React.createElement('div', { key: 'copy-err', className: 'iterate-scard', role: 'alert' },
+          React.createElement('div', { className: 'iterate-settings-desc' },
+            '剪贴板写入被拒绝，复制未生效——请展开对应区块手动选中文本复制。',
+          ),
+        )
+      : null,
     themeCard,
     dataCard,
     guideCard,
@@ -1740,22 +1977,42 @@ function SettingsPanel(_props: SlotProps) {
 
 // ─── Runtime observatory panel (F1–F7) ──────────────────────────────────────
 
-/** Tab id → label for the observatory's eight panels. Live (real-time activity
- * stream) is first so it is the default view; F-panels follow. */
+/** Tab id → label for the observatory's eleven panels. Live (real-time
+ *  activity stream) is first so it is the default view; F-panels follow.
+ *  Gap #14: labels carry the "Fn" number used everywhere else (README,
+ *  code comments, the copy instructions), so the docs and the UI line up. */
 const OBS_TABS = [
-  { key: 'live', label: '实时活动流' },
-  { key: 'f1', label: '审查线程' },
-  { key: 'f2', label: '收敛趋势' },
-  { key: 'f3', label: '发现定位' },
-  { key: 'f4', label: '修复与回滚' },
-  { key: 'f5', label: '断点恢复' },
-  { key: 'f6', label: '运行控制台' },
-  { key: 'f7', label: '决策时间线' },
+  { key: 'live', label: '实时活动流', hotkey: '' },
+  { key: 'f1', label: '审查线程', hotkey: '1' },
+  { key: 'f2', label: '收敛趋势', hotkey: '2' },
+  { key: 'f3', label: '发现定位', hotkey: '3' },
+  { key: 'f4', label: '修复与回滚', hotkey: '4' },
+  { key: 'f5', label: '断点恢复', hotkey: '5' },
+  { key: 'f6', label: '运行控制台', hotkey: '6' },
+  { key: 'f7', label: '决策时间线', hotkey: '7' },
   // v3.0: Quality Command Center tabs
-  { key: 'f8', label: '质量门禁' },
-  { key: 'f9', label: '经验银行' },
-  { key: 'f10', label: '防御事件' },
+  { key: 'f8', label: '质量门禁', hotkey: '8' },
+  { key: 'f9', label: '经验银行', hotkey: '9' },
+  { key: 'f10', label: '防御事件', hotkey: '0' },
 ] as const
+
+/** Digit → tab id. `1-9` map to F1–F9, `0` to F10, `-` back to the live feed
+ *  (the default view). Digits are used instead of F1–F10 to avoid clashing
+ *  with browser/system F-key bindings. */
+const OBS_HOTKEY_TABS: Record<string, (typeof OBS_TABS)[number]['key']> = {
+  1: 'f1', 2: 'f2', 3: 'f3', 4: 'f4', 5: 'f5',
+  6: 'f6', 7: 'f7', 8: 'f8', 9: 'f9', 0: 'f10',
+  '-': 'live',
+}
+
+/** Visible label for a tab (keeps the number prefix in sync with `OBS_TABS`). */
+function obsTabLabel(t: (typeof OBS_TABS)[number]): string {
+  if (t.key === 'live') return t.label
+  return `${t.key.toUpperCase()} ${t.label}`
+}
+
+/** Hotkey hint shown in the collapsed header, e.g. "11 页 · 1-9/0/- 切换". */
+const OBS_HOTKEY_HINT = `${String(OBS_TABS.length)} 页 · 按 1-9/0 切 Fn、- 回实时流`
 
 /** Live subagent activity badges: type → Chinese label + dsw token color accent. */
 const OBS_LIVE_META: Record<string, { label: string; color: string }> = {
@@ -1820,16 +2077,13 @@ function latestDefenseEvents(session: unknown): ObsDefenseResult | null {
   return scanSessionForDefenseEvents(session) as ObsDefenseResult | null
 }
 
-/** Build a human-pasteable `iterate_fix` instruction for one finding. */
+/** Build a human-pasteable `iterate_fix` instruction for one finding.
+ *  Gap #10: delegates to the shared builder so the payload always names the
+ *  four required `iterate_fix` params (file / content / finding / round) and
+ *  marks `content` + `round` as model-supplied instead of shipping a partial
+ *  call the model has to guess at. */
 function buildObsFixInstruction(f: ObsFinding): string {
-  const payload = JSON.stringify({
-    file: String(f.file || ''),
-    ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
-    dimension: String(f.dimension || ''),
-    summary: String(f.summary || ''),
-    ...(f.suggested_fix ? { suggested_fix: String(f.suggested_fix) } : {}),
-  }, null, 2)
-  return `请调用 \`iterate_fix\` 修复以下 finding：\n\n\`\`\`json\n${payload}\n\`\`\``
+  return buildFixInstruction(f as unknown as Record<string, unknown>)
 }
 
 /**
@@ -1880,6 +2134,40 @@ function ObservatoryPanel(props: SlotProps) {
   const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   React.useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current) }, [])
 
+  // Gap #14: digit shortcuts for tab switching. Digit keys (1-9 / 0 / -) are
+  // used instead of F1–F10 so we never fight the browser's own F-key handling.
+  // Guards mirror the triage panel: no modifier keys, no editable focus, and
+  // only while the observatory is expanded AND focus is inside it — so the
+  // keys never steal input from the composer or another panel.
+  React.useEffect(() => {
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!doc || !open) return
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return
+      const t = ev.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
+      if (t && typeof t.isContentEditable === 'boolean' && t.isContentEditable) return
+      const rootEl = doc.querySelector('[data-iterate="obs"]')
+      if (!rootEl) return
+      const activeEl = doc.activeElement as HTMLElement | null
+      // Act when focus is INSIDE the observatory, or nowhere in particular
+      // (body/null — some browsers never focus a <button> on click). Focus
+      // parked on a non-editable element outside the panel keeps standard
+      // behavior; focus in the composer was already excluded above.
+      const inPanel = activeEl === rootEl ||
+        (activeEl !== null && typeof rootEl.contains === 'function' && rootEl.contains(activeEl))
+      const idle = activeEl === null || activeEl === doc.body
+      if (!inPanel && !idle) return
+      const next = OBS_HOTKEY_TABS[ev.key]
+      if (!next) return
+      ev.preventDefault()
+      setTab(next)
+    }
+    doc.addEventListener('keydown', onKeyDown)
+    return () => doc.removeEventListener('keydown', onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
   /** Copy an instruction, flashing "已复制" on the originating button only when the copy actually succeeded. */
   const copyInstruction = (key: string, text: string) => {
     if (!text) return
@@ -1891,6 +2179,12 @@ function ObservatoryPanel(props: SlotProps) {
     })
   }
 
+  // Gap #4: `.iterate/` artifacts are unreachable from the browser — this is
+  // the one instruction that makes the model echo them into the session
+  // stream, which is what every panel scans.
+  const pullInstruction = buildDiskSnapshotInstruction()
+  const pullTitle = `复制拉取磁盘快照指令：让模型逐个调用 ${DISK_SNAPSHOT_SOURCES.map((s) => s.tool).join(' / ')} 并回显完整结果`
+
   /** Toggle one thread; a manual toggle exits any forced all/none mode. */
   const toggleThread = (key: string) => {
     setThreadMode('auto')
@@ -1901,10 +2195,19 @@ function ObservatoryPanel(props: SlotProps) {
     })
   }
 
-  /** Export the full observatory snapshot as JSON (download, then copy fallback). */
+  /** Export the full observatory snapshot as JSON (download, then copy fallback).
+   *  Gap #11: the payload also carries the four on-disk artifacts the panels
+   *  render (quality gate, experience bank, defense events, final report) —
+   *  previously only `manifest` + `live` were exported, so a review could not
+   *  be reconstructed from the file. */
   const exportObservatory = () => {
     if (!manifest) return
-    const json = serializeObservatoryExport(manifest, manifest.live || [])
+    const json = serializeObservatoryExport(manifest, manifest.live || [], {
+      qualityGate,
+      experienceBank,
+      defenseEvents,
+      report: latestReport(session),
+    })
     const filename = `iterate-observatory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
     const flash = () => {
       setCopiedKey('export')
@@ -1938,7 +2241,15 @@ function ObservatoryPanel(props: SlotProps) {
     return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'obs', className: 'iterate-obs' },
       React.createElement('div', { className: 'iterate-obs-head', 'data-closed': '' },
         React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
-        React.createElement('span', { className: 'iterate-obs-head-meta' }, '暂无运行时观测数据'),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, `暂无运行时观测数据 · ${OBS_HOTKEY_HINT}`),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-copied': copiedKey === 'pull-snapshot' ? '' : undefined,
+          onClick: (e: React.MouseEvent<HTMLButtonElement>) => {
+            e.stopPropagation()
+            copyInstruction('pull-snapshot', pullInstruction)
+          },
+          title: '复制拉取磁盘快照指令：磁盘上可能已有历史产物，回显进会话后观测台即可填充',
+        }, copiedKey === 'pull-snapshot' ? '已复制' : '拉取磁盘快照'),
       ),
     )
   }
@@ -2041,11 +2352,66 @@ function ObservatoryPanel(props: SlotProps) {
       return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无收敛数据')
     }
     const points = conv.map((n, i) => ({ round: i + 1, count: n }))
+    // Gap #13 (step ①): single-session cross-round comparison. One row per
+    // round — findings raised / fixed / severity mix / validation outcome.
+    // Cross-SESSION comparison rides on the #4 pull instruction instead (the
+    // client has no filesystem access, so `iterate_history` aggregates have to
+    // be echoed back into the session first).
+    const report = latestReport(session)
+    const comparison = buildRoundComparison(report, manifest.validations || [])
+    const comparisonTable = comparison.length === 0
+      ? null
+      : React.createElement('table', { className: 'iterate-obs-table' },
+          React.createElement('thead', {},
+            React.createElement('tr', {},
+              React.createElement('th', {}, '轮次'),
+              React.createElement('th', {}, '发现'),
+              React.createElement('th', {}, '已修复'),
+              React.createElement('th', {}, '严重度分布'),
+              React.createElement('th', {}, '验证'),
+            ),
+          ),
+          React.createElement('tbody', {},
+            ...comparison.map((row) => {
+              const sevText = Object.entries(row.severities)
+                .map(([k, v]) => `${k}:${v}`)
+                .join(' · ')
+              const anyFailed = row.validations.some((v) => v.allowed !== true)
+              const valText = row.validations.length === 0
+                ? '—'
+                : `${row.validations.filter((v) => v.allowed === true).length}/${row.validations.length} 通过${anyFailed ? '（含失败）' : ''}`
+              return React.createElement('tr', { key: `cmp-${row.round}` },
+                React.createElement('td', {}, `Round ${row.round}`),
+                React.createElement('td', {}, String(row.findings)),
+                React.createElement('td', {}, String(row.fixed)),
+                React.createElement('td', {}, sevText || '—'),
+                React.createElement('td', {
+                  style: anyFailed
+                    ? { color: 'var(--dsw-alias-state-error-primary)', fontWeight: 600 }
+                    : row.validations.length > 0
+                      ? { color: 'var(--dsw-alias-state-success-primary)' }
+                      : undefined,
+                }, valText),
+              )
+            }),
+          ),
+        )
     return React.createElement('div', {},
       React.createElement(TrendChart, { points }),
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
         `各轮发现数量：${conv.join(' → ')}${typeof manifest.round === 'number' ? ` · 当前 Round ${manifest.round}` : ''}`,
       ),
+      comparisonTable
+        ? React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
+            React.createElement('div', { className: 'iterate-obs-block-head' },
+              React.createElement('span', {}, '跨轮对比（本会话）'),
+              React.createElement('span', { className: 'iterate-obs-head-meta' },
+                '跨会话对比：本表只覆盖当前会话；点「拉取磁盘快照」让模型回显 iterate_history，再用「导出 JSON」并排比较两次运行',
+              ),
+            ),
+            React.createElement('div', { className: 'iterate-obs-block-body' }, comparisonTable),
+          )
+        : null,
     )
   }
 
@@ -2171,7 +2537,7 @@ function ObservatoryPanel(props: SlotProps) {
     return React.createElement('div', {}, ...fixes.map((f, i) => {
       const k = `f4-${i}`
       const id = String(f.id || `fix#${i + 1}`)
-      const rollbackText = `请调用 \`iterate_rollback\` 回滚以下修复：\n\n\`\`\`json\n${JSON.stringify({ id }, null, 2)}\n\`\`\``
+      const rollbackText = buildRollbackInstruction(id)
       const added = typeof f.linesAdded === 'number' ? f.linesAdded : 0
       const removed = typeof f.linesRemoved === 'number' ? f.linesRemoved : 0
       return React.createElement('div', { key: k, className: 'iterate-obs-block' },
@@ -2203,18 +2569,19 @@ function ObservatoryPanel(props: SlotProps) {
   const renderCheckpoint = () => {
     const cp = manifest.checkpoint
     if (!cp) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无断点')
+      return React.createElement('div', { className: 'iterate-obs-empty' },
+        diskEmptyStateText(toolCalledInSession(session, 'iterate_transcript'), '断点'),
+      )
     }
-    const resumeText = `请调用 \`iterate_checkpoint\` 从断点恢复迭代：\n\n\`\`\`json\n${JSON.stringify({
-      operation: 'resume',
-      mode: String(cp.mode || 'normal'),
-      maxRounds: typeof cp.maxRounds === 'number' ? cp.maxRounds : null,
-    }, null, 2)}\n\`\`\``
+    // Gap #10: `resume` accepts ONLY `operation` — `mode` / `round` /
+    // `maxRounds` are save-side inputs and `maxRounds: null` was an
+    // invalid-integer field on a positive-integer schema.
+    const resumeText = buildCheckpointResumeInstruction()
     // Clearing a stale checkpoint after an interrupted run — iterate_checkpoint
     // exposes `clear`, but before this button it was only reachable by typing
     // the command manually (an interrupted run otherwise shows a permanent
     // "可恢复" chip with no companion reset action).
-    const clearText = `请调用 \`iterate_checkpoint\` 清除当前断点：\n\n\`\`\`json\n${JSON.stringify({ operation: 'clear' }, null, 2)}\n\`\`\``
+    const clearText = buildCheckpointClearInstruction()
     const item = (label: string, value: unknown) =>
       React.createElement('span', { className: 'iterate-obs-chip' }, `${label} ${String(value ?? '?')}`)
     return React.createElement('div', { className: 'iterate-obs-block' },
@@ -2259,6 +2626,50 @@ function ObservatoryPanel(props: SlotProps) {
     // text:null. Copied as a paste-able instruction, mirroring the panel's
     // copy-to-command pattern — it cannot be cleared from the client directly.
     const activeClearInstruction = `请调用 \`iterate_transcript\` 清除当前 nudge：\n\n\`\`\`json\n${JSON.stringify({ operation: 'nudge', text: null }, null, 2)}\n\`\`\``
+    // Gap #6: per-round validation rows (command / exitCode / allowed) live on
+    // the manifest; when the run stopped on a validation failure the failing
+    // command is called out explicitly instead of being buried in a list.
+    const validations = Array.isArray(manifest.validations) ? manifest.validations : []
+    const abortedByValidation = String(manifest.stoppedReason || '') === 'aborted_by_validation'
+    const validationRows = validations.map((v, i) => {
+      const allowed = v.allowed === true
+      const failed = !allowed
+      const highlight = failed && abortedByValidation
+      const exit = typeof v.exitCode === 'number' ? `exit ${v.exitCode}` : 'exit —'
+      return React.createElement('div', {
+        key: `val-${i}`,
+        className: 'iterate-obs-row',
+        'data-status': allowed ? 'pass' : 'fail',
+        'data-highlight': highlight ? '' : undefined,
+        title: v.rejectReason ? String(v.rejectReason) : undefined,
+      },
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${typeof v.round === 'number' ? v.round : '?'}`),
+        React.createElement('code', { className: 'iterate-obs-mono' }, String(v.command || '')),
+        React.createElement('span', { className: 'iterate-obs-chip', 'data-status': allowed ? 'pass' : 'fail' },
+          allowed ? '通过' : '失败',
+        ),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, exit),
+        highlight ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, '导致中止') : null,
+      )
+    })
+    const validationsBlock = React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
+      React.createElement('div', { className: 'iterate-obs-block-head' },
+        React.createElement('span', {}, '验证结果'),
+        validations.length === 0
+          ? React.createElement('span', { className: 'iterate-obs-head-meta' }, '本轮尚无验证记录')
+          : React.createElement('span', { className: 'iterate-obs-head-meta' }, `${validations.length} 条命令`),
+        abortedByValidation
+          ? React.createElement('span', { className: 'iterate-obs-badge', 'data-status': 'fail' }, '因验证失败中止')
+          : null,
+      ),
+      React.createElement('div', { className: 'iterate-obs-block-body' },
+        validations.length === 0
+          ? React.createElement('div', { className: 'iterate-obs-empty' },
+              '尚未拉取验证结果：数据在磁盘 transcript 里，点「拉取磁盘快照」复制指令发回会话即可回填。',
+            )
+          : React.createElement(React.Fragment, null, ...validationRows),
+      ),
+    )
     return React.createElement('div', { className: 'iterate-obs-block' },
       React.createElement('div', { className: 'iterate-obs-block-head' },
         React.createElement('span', {}, '运行控制台'),
@@ -2293,6 +2704,7 @@ function ObservatoryPanel(props: SlotProps) {
             title: '复制 iterate_transcript nudge 指令文本',
           }, copiedKey === 'nudge' ? '已复制' : '复制 nudge 指令'),
         ),
+        validationsBlock,
       ),
     )
   }
@@ -2387,29 +2799,40 @@ function ObservatoryPanel(props: SlotProps) {
   // session (dimension convergence, verification pass rate, overall PASS/FAIL);
   // falls back to copy-able query instructions when no snapshot exists yet.
   const renderQualityGate = () => {
-    const gateInstruction = '请调用 `iterate_quality_gate` 查询当前质量门禁状态'
+    // Gap #10: the query instruction now carries explicit JSON args, matching
+    // the rest of the panel's copy-to-command payloads (the model no longer
+    // has to infer `operation`).
+    const gateInstruction = buildQualityGateQueryInstruction()
     // Reset a stale FAIL certificate before a fresh iteration — the tool's
     // `clear` operation existed since v3.5.1 but had no client entry point.
-    const gateClearInstruction = `请调用 \`iterate_quality_gate\` 清除当前质量门禁证书：\n\n\`\`\`json\n${JSON.stringify({ operation: 'clear' }, null, 2)}\n\`\`\``
+    const gateClearInstruction = buildQualityGateClearInstruction()
     const gate = qualityGate
     const dims = gate && gate.dimensions ? gate.dimensions : []
     const hasGate = gate !== null && Boolean(gate.overallStatus || gate.overallScore != null || dims.length > 0)
     const status = gate && gate.overallStatus ? String(gate.overallStatus) : 'pending'
     const statusLabel = status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'PENDING'
     const num = (v: number | undefined) => Number(v != null ? v : 0)
+    const pulled = toolCalledInSession(session, 'iterate_quality_gate')
 
     const headerBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
       React.createElement('b', {}, '质量门禁'),
       React.createElement('button', {
         className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'qgate' ? '' : undefined,
         onClick: () => copyInstruction('qgate', gateInstruction),
-        title: '复制 iterate_quality_gate 查询指令',
+        title: '复制 iterate_quality_gate 查询指令（含 JSON 参数）',
       }, copiedKey === 'qgate' ? '已复制' : '查询门禁'),
       React.createElement('button', {
         className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'qgate-clear' ? '' : undefined,
         onClick: () => copyInstruction('qgate-clear', gateClearInstruction),
         title: '复制 iterate_quality_gate clear 指令文本（重置陈旧的 FAIL 证书）',
       }, copiedKey === 'qgate-clear' ? '已复制' : '清除门禁'),
+      // Gap #4: the browser cannot read `.iterate/` directly — one click
+      // copies the pull instruction that makes the model echo it into the stream.
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-copied': copiedKey === 'disk-snapshot' ? '' : undefined,
+        onClick: () => copyInstruction('disk-snapshot', pullInstruction),
+        title: '复制拉取磁盘快照指令：让模型回显 .iterate/ 下的门禁、经验、防御事件与 transcript',
+      }, copiedKey === 'disk-snapshot' ? '已复制' : '拉取磁盘快照'),
     )
 
     if (!hasGate) {
@@ -2421,13 +2844,25 @@ function ObservatoryPanel(props: SlotProps) {
             React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
           ),
           React.createElement('div', { className: 'iterate-obs-block-body' },
-            React.createElement('div', { className: 'iterate-obs-msg' }, '质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。'),
+            React.createElement('div', { className: 'iterate-obs-msg' },
+              // Gap #4: distinguish "we pulled it and it is empty" from "we
+              // never asked the model to read the disk".
+              diskEmptyStateText(pulled, '质量门禁证书'),
+            ),
+            React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } },
+              '质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。',
+            ),
             React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
               React.createElement('button', {
                 className: 'iterate-btn', 'data-copied': copiedKey === 'qgate-instr' ? '' : undefined,
                 onClick: () => copyInstruction('qgate-instr', gateInstruction),
                 title: '复制查询指令',
               }, copiedKey === 'qgate-instr' ? '已复制' : '复制查询指令'),
+              React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': copiedKey === 'disk-snapshot-2' ? '' : undefined,
+                onClick: () => copyInstruction('disk-snapshot-2', pullInstruction),
+                title: '复制拉取磁盘快照指令',
+              }, copiedKey === 'disk-snapshot-2' ? '已复制' : '拉取磁盘快照'),
             ),
           ),
         ),
@@ -2484,7 +2919,7 @@ function ObservatoryPanel(props: SlotProps) {
   const renderExperienceBank = () => {
     const expInstruction = expSearch
       ? `请调用 \`iterate_experience\` 搜索经验：\n\n\`\`\`json\n${JSON.stringify({ operation: 'search', query: expSearch }, null, 2)}\n\`\`\``
-      : '请调用 `iterate_experience` 列出所有经验'
+      : buildExperienceListInstruction()
 
     const expEntries = experienceBank && experienceBank.entries ? experienceBank.entries : []
     const query = expSearch.trim().toLowerCase()
@@ -2495,6 +2930,7 @@ function ObservatoryPanel(props: SlotProps) {
             .some((t) => String(t).toLowerCase().includes(query)),
         )
       : expEntries
+    const pulled = toolCalledInSession(session, 'iterate_experience')
 
     const resultRows = visible.map((e, i) => {
       const adoptInstruction = `请调用 \`iterate_experience\` 采纳经验并应用已验证修法：\n\n\`\`\`json\n${JSON.stringify({ operation: 'get', id: e.id }, null, 2)}\n\`\`\``
@@ -2525,9 +2961,14 @@ function ObservatoryPanel(props: SlotProps) {
         React.createElement('span', { className: 'iterate-obs-head-meta' }, `会话内 ${expEntries.length} 条`),
         React.createElement('button', {
           className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'exp-list' ? '' : undefined,
-          onClick: () => copyInstruction('exp-list', '请调用 `iterate_experience` 列出所有经验'),
-          title: '复制列出经验指令',
+          onClick: () => copyInstruction('exp-list', buildExperienceListInstruction()),
+          title: '复制列出经验指令（含 JSON 参数）',
         }, copiedKey === 'exp-list' ? '已复制' : '列出经验'),
+        React.createElement('button', {
+          className: 'iterate-btn', 'data-copied': copiedKey === 'exp-snapshot' ? '' : undefined,
+          onClick: () => copyInstruction('exp-snapshot', pullInstruction),
+          title: '复制拉取磁盘快照指令：把 .iterate/ 下的经验银行等产物回显进会话',
+        }, copiedKey === 'exp-snapshot' ? '已复制' : '拉取磁盘快照'),
       ),
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
         React.createElement('input', {
@@ -2549,7 +2990,11 @@ function ObservatoryPanel(props: SlotProps) {
         ? React.createElement('div', {}, ...resultRows)
         : expEntries.length > 0
           ? React.createElement('div', { className: 'iterate-obs-empty' }, '没有匹配「' + expSearch + '」的经验')
-          : React.createElement('div', { className: 'iterate-obs-empty' }, '本次会话暂无经验记录，可点击「列出经验」查询历史经验'),
+          : React.createElement('div', {},
+              // Gap #4: separate "pulled and empty" from "never pulled".
+              React.createElement('div', { className: 'iterate-obs-empty' }, diskEmptyStateText(pulled, '经验银行')),
+              React.createElement('div', { className: 'iterate-obs-empty' }, '也可点「列出经验」查询磁盘上的全部历史经验。'),
+            ),
     )
   }
 
@@ -2560,7 +3005,7 @@ function ObservatoryPanel(props: SlotProps) {
   const renderDefenseEvents = () => {
     const defenseInstruction = defenseFilter
       ? `请调用 \`iterate_defense_events\` 查询防御事件：\n\n\`\`\`json\n${JSON.stringify({ operation: 'list', type: defenseFilter || undefined }, null, 2)}\n\`\`\``
-      : '请调用 `iterate_defense_events` 列出所有防御事件'
+      : buildDefenseEventsListInstruction()
 
     const typeOptions = [
       { value: '', label: '全部类型' },
@@ -2588,13 +3033,18 @@ function ObservatoryPanel(props: SlotProps) {
       React.createElement('span', { className: 'iterate-obs-head-meta' }, `会话内 ${allEvents.length} 条 / 累计 ${totalCount}`),
       React.createElement('button', {
         className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'defense-list' ? '' : undefined,
-        onClick: () => copyInstruction('defense-list', '请调用 `iterate_defense_events` 列出所有防御事件'),
-        title: '复制列出防御事件指令',
+        onClick: () => copyInstruction('defense-list', buildDefenseEventsListInstruction()),
+        title: '复制列出防御事件指令（含 JSON 参数）',
       }, copiedKey === 'defense-list' ? '已复制' : '列出事件'),
       React.createElement('button', {
+        className: 'iterate-btn', 'data-copied': copiedKey === 'defense-snapshot' ? '' : undefined,
+        onClick: () => copyInstruction('defense-snapshot', pullInstruction),
+        title: '复制拉取磁盘快照指令：把 .iterate/ 下的防御事件流回显进会话',
+      }, copiedKey === 'defense-snapshot' ? '已复制' : '拉取磁盘快照'),
+      React.createElement('button', {
         className: 'iterate-btn', 'data-copied': copiedKey === 'defense-counts' ? '' : undefined,
-        onClick: () => copyInstruction('defense-counts', '请调用 `iterate_defense_events` 查询事件统计'),
-        title: '复制统计指令',
+        onClick: () => copyInstruction('defense-counts', `请调用 \`iterate_defense_events\` 查询事件统计：\n\n\`\`\`json\n${JSON.stringify({ operation: 'counts' }, null, 2)}\n\`\`\``),
+        title: '复制统计指令（含 JSON 参数）',
       }, copiedKey === 'defense-counts' ? '已复制' : '统计'),
       React.createElement('button', {
         className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'defense-clear' ? '' : undefined,
@@ -2612,7 +3062,12 @@ function ObservatoryPanel(props: SlotProps) {
             React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
           ),
           React.createElement('div', { className: 'iterate-obs-block-body' },
-            React.createElement('div', { className: 'iterate-obs-msg' }, '防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。'),
+            React.createElement('div', { className: 'iterate-obs-msg' },
+              diskEmptyStateText(toolCalledInSession(session, 'iterate_defense_events'), '防御事件流'),
+            ),
+            React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } },
+              '防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。',
+            ),
             React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
               React.createElement('button', {
                 className: 'iterate-btn', 'data-copied': copiedKey === 'defense-instr' ? '' : undefined,
@@ -2771,6 +3226,11 @@ function ObservatoryPanel(props: SlotProps) {
       React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
       React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, runStatusText(live, manifest)),
       React.createElement('span', { className: 'iterate-obs-head-meta' }, headMeta || 'runtime'),
+      // Gap #14: make the tab system discoverable without expanding it.
+      React.createElement('span', {
+        className: 'iterate-obs-head-meta',
+        title: OBS_HOTKEY_HINT,
+      }, OBS_HOTKEY_HINT),
       React.createElement('button', {
         className: 'iterate-btn', 'data-ghost': '',
         onClick: (e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); setOpen((v) => !v) },
@@ -2800,15 +3260,26 @@ function ObservatoryPanel(props: SlotProps) {
               onClick: exportObservatory,
               title: '将观测台全部数据导出为 JSON（优先下载，失败则复制）',
             }, copiedKey === 'export' ? '已导出' : '导出 JSON'),
+            // Gap #4: `.iterate/` artifacts are unreachable from the browser;
+            // this copies the one instruction that makes the model echo them
+            // into the session stream (which is what every panel scans).
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'pull-snapshot' ? '' : undefined,
+              onClick: () => copyInstruction('pull-snapshot', pullInstruction),
+              title: pullTitle,
+            }, copiedKey === 'pull-snapshot' ? '已复制' : '拉取磁盘快照'),
           ),
-          React.createElement('div', { className: 'iterate-obs-tabs' },
+          React.createElement('div', { className: 'iterate-obs-tabs', role: 'tablist', 'aria-label': '观测台页签（快捷键 1-9 / 0 / -）' },
             ...OBS_TABS.map((t) =>
               React.createElement('button', {
                 key: t.key,
                 className: 'iterate-obs-tab',
+                role: 'tab',
+                'aria-selected': tab === t.key,
                 'data-active': tab === t.key ? '' : undefined,
                 onClick: () => setTab(t.key),
-              }, t.label),
+                title: t.hotkey ? `${obsTabLabel(t)}（按 ${t.hotkey} 切换）` : `${obsTabLabel(t)}（按 - 切换）`,
+              }, obsTabLabel(t)),
             ),
           ),
           React.createElement('div', { className: 'iterate-obs-body' }, renderBody()),
