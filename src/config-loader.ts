@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import yaml from 'js-yaml'
 import type { IterateConfig } from './types.ts'
+import { sessionCwdOf } from './working-directory.ts'
 
 /**
  * Load and parse iterate.config.yaml from the project root.
@@ -748,12 +749,17 @@ export function resolveProjectRoot(input?: string, sessionCwd?: string): Project
 /**
  * Thin adapter for tool `execute(args, exec)` bodies: pull the session cwd
  * from the DSH run context and hand it to {@link resolveProjectRoot}.
+ *
+ * The cwd source is the EFFECTIVE session directory (dsh 0.2.1-alpha.2's
+ * `workingDirectory` service when the host provides one, else the immutable
+ * `header.cwd` — see `./working-directory.ts`), so a session whose directory
+ * was switched mid-run still resolves the project it is actually editing.
  */
 export function resolveProjectRootForExec(
   exec: { agent?: { session?: { header?: { cwd?: string } } } } | undefined,
   input?: string,
 ): ProjectRootResult {
-  return resolveProjectRoot(input, exec?.agent?.session?.header?.cwd)
+  return resolveProjectRoot(input, sessionCwdOf(exec))
 }
 
 /**

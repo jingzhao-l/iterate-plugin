@@ -103,7 +103,7 @@ dsh plugin --profile web add iterate-plugin
 - 每轮修复后验证
 - 修复失败自动回滚
 
-### UI 层（客户端免构建槽位，v3.6：11 个页签）
+### UI 层（客户端免构建槽位，v3.7：11 个页签，双语）
 
 - **收敛看板 `ConvergenceDashboard`**（`conversation.input.dock`）— 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图；normal 模式另显示修复计数徽章；还有运行阶段芯片（当前工作流阶段 + 运行中/已结束）与 **task_mode 指示器（code / iterate）**。运行期间看板切换为"运行中"状态（显示轮次与阶段），并隐藏启动按钮。
 - **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十一个页签**运行时观测台：**实时活动流**（默认页，支持按活动类型筛选）+ **F1** 审查线程（全部展开/全部收起）、**F2** 收敛趋势（含跨轮对比表：每轮 findings / fixed / 严重度分布 / 验证结果）、**F3** 发现定位（按严重度/维度/关键词筛选）、**F4** 修复与回滚、**F5** 断点恢复、**F6** 运行控制台、**F7** 决策时间线（按类型/轮次筛选与关键词搜索）、**F8** 质量门禁、**F9** 经验银行、**F10** 防御事件。数字键快捷键：`1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。**F8/F9/F10 为实时数据**——扫描会话流中最近一次 `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` 结果并渲染真实数据（PASS/FAIL 徽章 + 分维度评分条、经验条目（含采纳按钮 + 客户端搜索）、防御类型计数芯片 + 筛选后的事件流）；会话流中没有数据时区分"磁盘无数据"与"尚未拉取"，并提供**拉取磁盘快照**指令（让模型调用只读工具、把 `.iterate/` 产物回显进会话流）。一键导出全部观测数据为 JSON——manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report`（优先下载，失败回退复制）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
@@ -111,7 +111,8 @@ dsh plugin --profile web add iterate-plugin
 - **收敛统计卡片 `StatsCard`**（`conversation.chat.turnTail`）— 无 findings 时显示收敛统计、历史轮次、趋势图、完成摘要。
 - **iterate 主题皮肤**（`theme.overrideTokens`）— 暖琥珀配色的 13 个 `--dsw-*` token 覆盖，明暗双模式，可在设置页开关。
 - **进度胶囊 `ProgressCapsule`**（`shell.overlay`）— 每轮完成 / 收敛时右下角弹出通知（含收敛确认）。
-- **iterate 设置区 `SettingsPanel`**（`settings.section`）— 主题开关、分诊持久化说明、配置管理指引（覆盖 `validation.commands` / `language` / `personalization.known_intentional`，并显式警告"validation.commands 为空 = 本轮不受任何测试保护"；字段选择器可生成对应的 `iterate_config write` 指令）、运行时状态概览（产物布局 + 查看/清理工具指引 + 磁盘快照拉取）、一键清空分诊数据。
+- **iterate 设置区 `SettingsPanel`**（`settings.section`）— 主题开关、分诊持久化说明、配置管理指引（覆盖 `validation.commands` / `language` / `personalization.known_intentional`，并显式警告"validation.commands 为空 = 本轮不受任何测试保护"；字段选择器可生成对应的 `iterate_config write` 指令），**v3.7：新增「回读当前配置」补齐写入 → 回读闭环**——复制 `iterate_config read` 指令，模型把结果回显进会话后，卡片就地展示所选字段的当前值；运行时状态概览（产物布局 + 查看/清理工具指引 + 磁盘快照拉取）、一键清空分诊数据。
+- **双语 UI（v3.7）**——所有界面文案（面板、空态、页签、徽标、设置、停止原因与完成汇总）均提供简体中文与 English。在**设置 → 界面语言 / Interface language**切换；选择持久化在 `localStorage`（`iterate-ui-lang`），否则按 `navigator.language` 自动探测（已保存的选择始终优先，且自动探测不会写入偏好）。**面向模型的文案有意保持中文**——`build*Instruction` 指令与可粘贴指引是与 `SKILL.md` 对齐的契约文本，因此两处展开的指引带「中文（粘贴给模型的契约文案）」标签，避免被误当成漏翻。
 
 UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自动降级，不会崩溃客户端。
 
@@ -124,7 +125,8 @@ UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自
 - **断点续跑** — 长迭代在每轮开头保存 checkpoint，中断后可恢复进度
 - **历史审计** — `iterate_history` 读取决策日志（可按 `type` / `since` / `round` / 修复文件 `file` / `limit` 过滤，默认取最新 50 条，上限 200 条）与修复注册表汇总（各轮 fixed/failed 计数，按同一 round/file 过滤收窄），审查运行过程与修复明细
 - **运行时清理** — `iterate_prune` 清理过期的决策日志条目、陈旧断点、孤儿修复备份、空轮次与原子写入崩溃残留的临时文件；默认 dry-run 只报告不删除，显式 `dryRun:false` 才真正清理，每次清理写入决策日志
-- **配置读写** — `iterate_config` 支持带校验、备份、回滚的局部写入
+- **配置读写** — `iterate_config` 支持带校验、备份、回滚的局部写入；v3.7 起设置页还能**回读生效配置**（指令 + 就地展示当前值）
+- **跟随会话的工作目录（v3.7）** — 在 dsh ≥ `0.2.1-alpha.2` 上，插件通过宿主的 `WorkingDirectoryService` 解析项目根，而不是不可变的 `Session.header.cwd`：会话中途切换目录后，`.iterate/` 下的一切（配置、决策日志、断点、修复备份、审批策略）都会跟着当前工作区走。该服务按特性探测，任何失败路径（服务缺失/抛错/敌意 getter/非字符串结果）都回退到 `header.cwd`，旧宿主行为完全不变。
 - **v3.2 经验银行** — `iterate_experience` 以检索 / 过滤 / 采纳查阅历史修复与模式，并可 `add` 持久化新的已验证修复——重复添加同一 pattern + dimension 时累加命中次数而非重复写入
 - **v3.2 质量门禁** — `iterate_quality_gate` 读取质量门禁状态（各维度收敛率 + PASS/FAIL），并可基于本轮 findings / 验证结果 `compute` 重新计算并持久化一份新的质量凭证（收敛率来自 `findingsByRound` 的真实收敛序列）
 - **v3.2 防御事件流** — `iterate_defense_events` 查询防御事件（前置条件失败、回滚、不变量违反、假设证伪），并可 `record` 记录新事件；可读标签跟随项目语言（en / zh）
@@ -207,6 +209,8 @@ pnpm add /path/to/iterate-skill/harness/iterate-plugin
 ### 从设置页管理配置
 
 设置区复制一份配置编辑指引，列出支持的 `iterate.config.yaml` 字段——包括 `validation.commands`（并显式警告：留空意味着每一轮迭代都不受任何测试保护）——并提供**字段选择器**：选中字段后，按钮会生成对应的 `iterate_config write` 指令（schema 校验、自动备份、失败自动回滚）供你粘贴回会话。
+
+**回读实际写入的结果**——配套的**「回读当前配置」**按钮复制 `iterate_config` 的 `{ operation: "read" }` 指令；模型把结果回显进会话后，卡片会在选择器下方展示所选字段的当前值（数组内联展示，如 `["npm test","npm run lint"]`）。三种状态被诚实区分：*尚未回读*、*当前值*、*已回读但没有该字段*（说明走的是内置默认值）。若剪贴板被拒绝，回读指令会在面板中展开供手动复制——按钮不会成为死路。
 
 ---
 
@@ -330,7 +334,7 @@ validation:
 ### Node.js / DSH 兼容范围
 
 - **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
-- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`（共 18 个版本，`0.1.1-rc.1` … `0.2.1-alpha.1`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.1-alpha.1` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。
+- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`（共 19 个版本，`0.1.1-rc.1` … `0.2.1-alpha.2`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.1-alpha.2` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。
 - **一次性 Profile 证据（真实，`dsh` CLI `0.1.1-rc.1`）**：在临时 `$DSH_HOME` 下
   `dsh plugin --profile <p> add <本仓库>` 约 449ms 完成安装；`dsh --profile <p>
   --dump-config` 正确合成 `iterate-plugin` bundle patch；`dsh plugin --profile <p>
@@ -361,7 +365,27 @@ validation:
 ### 依赖
 
 运行时依赖：`@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、
-`@deepseek-ai/dsh-util-values`、`js-yaml`——全部精确锁版。无安装期生命周期脚本
+`@deepseek-ai/dsh-util-values`、`js-yaml`——全部精确锁版。
+
+#### 上游采纳记录（v3.7.0 → dsh `0.2.1-alpha.2`）
+
+- **已采纳——可变的会话工作目录。** `src/working-directory.ts` 通过
+  `ctx.get('workingDirectory').get(session)` 解析项目根（特性探测；服务缺失、
+  抛错、敌意 getter 或非字符串结果一律回退 `header.cwd`）。必须采纳的原因：
+  自 `0.2.1-alpha.2` 起，不可变的 header 按设计保留*原始*项目，切换目录后再读它
+  会把评审锚定到错误的检出。
+- **已评估、未采纳：**
+  - *Session 状态记录接口*（实验插件读写自己的会话记录）——依赖 shell 内部记录结构，
+    跨 alpha 版本极脆弱；iterate 的跨会话状态本就存放在 `.iterate/`。
+  - *共享 agents 目录的 `AGENTS.md`（`DSH_AGENTS_HOME`）*——属于宿主的全局指令机制，
+    插件注入的是自己的工作流提示词。
+  - *实验性 Git Worktrees 插件*——上游的 agent 工作流特性；插件自己的
+    `git.use_worktree` 配置早于它，且是另一回事（iterate 循环的逐轮 git 卫生）。
+  - *移除 `both` 混合展示模式*——插件从未设置展示模式（用的是 `presentCall` 卡片），
+    无需迁移。
+  - *从插件全局安装 dsh CLI*——运行时从不 shell 调用，纯占磁盘。
+- 五个 `@deepseek-ai/*` 包全部精确锁到 `0.2.1-alpha.2`
+  （`@deepseek-ai/cordis` 保持 `4.0.5-alpha.1`）。无安装期生命周期脚本
 （`preinstall`/`install`/`postinstall`/`prepare`）；仅 `prepublishOnly`（构建）在发布时运行。
 
 ### 失败边界

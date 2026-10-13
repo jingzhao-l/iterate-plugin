@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { acquireProjectLock, withProjectLock } from '../src/file-lock.ts'
+import { acquireLogLockChecked } from '../src/tools/decision-log.ts'
 
 function tempDir(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'iterate-file-lock-'))
@@ -173,6 +174,90 @@ describe('file-lock', () => {
         const stamped = readFileSync(lockPathFor(dir, 'pid-stamp'), 'utf-8')
         assert.equal(stamped, String(process.pid))
       })
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('ownership-checked release', () => {
+  it('removes its own lock on a normal release', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = lockPathFor(dir, 'normal-release')
+      const release = acquireProjectLock(dir, 'normal-release')
+      assert.ok(existsSync(path))
+      release()
+      assert.ok(!existsSync(path), 'an unstolen lock is removed by its holder')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('never unlinks a lock stolen and re-stamped by a live holder', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = lockPathFor(dir, 'stolen-lock')
+      const release = acquireProjectLock(dir, 'stolen-lock')
+      assert.ok(existsSync(path))
+      // Simulate a stale-steal by a second process: the stealer replaces our
+      // file with one stamped by ITS pid. The test process's parent is a live
+      // stand-in for that other holder.
+      writeFileSync(path, String(process.ppid), 'utf-8')
+      release()
+      assert.ok(existsSync(path), "the new holder's lock must survive our release")
+      assert.equal(readFileSync(path, 'utf-8'), String(process.ppid))
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('still removes an unstamped lock (the advisory pid write failed)', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = lockPathFor(dir, 'unstamped')
+      const release = acquireProjectLock(dir, 'unstamped')
+      writeFileSync(path, '', 'utf-8')
+      release()
+      assert.ok(!existsSync(path), 'an unstamped lock we created is still ours to remove')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('is idempotent and never throws after the file vanished', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = lockPathFor(dir, 'vanishing')
+      const release = acquireProjectLock(dir, 'vanishing')
+      rmSync(path)
+      assert.doesNotThrow(release)
+      assert.doesNotThrow(release)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('applies the same ownership check to the decision-log mutex', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = join(dir, '.iterate', '.decision-log.lock')
+      const first = acquireLogLockChecked(dir)
+      assert.equal(first.acquired, true)
+      writeFileSync(path, String(process.ppid), 'utf-8') // stolen by another live holder
+      first.release()
+      assert.ok(existsSync(path), "the new holder's lock must survive our release")
+      assert.equal(readFileSync(path, 'utf-8'), String(process.ppid))
+
+      writeFileSync(path, String(process.pid), 'utf-8') // ours again
+      first.release() // already released — idempotent
+      assert.ok(existsSync(path), 'a second release must not touch the file')
+
+      rmSync(path)
+      const second = acquireLogLockChecked(dir)
+      assert.equal(second.acquired, true)
+      second.release()
+      assert.ok(!existsSync(path), 'an unstolen lock is removed by its holder')
     } finally {
       cleanup()
     }

@@ -1,16 +1,17 @@
 {
   "name": "iterate-plugin",
-  "version": "3.6.0",
+  "version": "3.7.0",
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness with quality command center and experience bank (v3.3). Features: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus dry-run pure-review mode, quality gate compute/persist, writable experience bank, defense events stream (record + bilingual labels), and native command buttons — with a live quality command center (F8/F9/F10 render real session data), §8 assign-fix instruction, and task_mode indicator wired end to end.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jingzhao-l/iterate-plugin.git"
+    "url": "https://github.com/jingzhao-l/iterate-skill.git",
+    "directory": "harness/iterate-plugin"
   },
-  "homepage": "https://github.com/jingzhao-l/iterate-plugin",
+  "homepage": "https://github.com/jingzhao-l/iterate-skill/tree/main/harness/iterate-plugin",
   "bugs": {
-    "url": "https://github.com/jingzhao-l/iterate-plugin/issues"
+    "url": "https://github.com/jingzhao-l/iterate-skill/issues"
   },
   "keywords": [
     "dsh-plugin",
@@ -45,7 +46,8 @@
         "0.1.7-rc.2": "compatible",
         "0.2.0-rc.1": "compatible",
         "0.2.0-rc.2": "compatible",
-        "0.2.1-alpha.1": "compatible"
+        "0.2.1-alpha.1": "compatible",
+        "0.2.1-alpha.2": "compatible"
       }
     },
     "client": {
@@ -76,25 +78,28 @@
     "build": "tsc -p tsconfig.build.json",
     "build:client": "node scripts/build-client.mjs",
     "prepublishOnly": "npm run build && npm run build:client",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.client.json",
     "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
     "test": "tsx --test test/*.test.ts",
     "test:validate": "tsx --test test/validate.test.ts"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5-alpha.1",
-    "@deepseek-ai/dsh-tools": "0.2.1-alpha.1",
-    "@deepseek-ai/dsh-util-values": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-tools": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-util-values": "0.2.1-alpha.2",
     "js-yaml": "4.3.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-agent": "0.2.1-alpha.1",
-    "@deepseek-ai/dsh-jobs": "0.2.1-alpha.1",
-    "@deepseek-ai/dsh-session": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-jobs": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
     "@types/js-yaml": "4.0.9",
     "@types/node": "22.15.0",
     "@types/react": "19.2.2",
     "esbuild": "0.25.12",
+    "jsdom": "26.1.0",
+    "react": "19.2.2",
+    "react-dom": "19.2.2",
     "tsx": "4.20.3",
     "typescript": "5.9.3"
   },

@@ -2,6 +2,7 @@ import { appendFileSync, readFileSync, mkdirSync, existsSync, openSync, writeSyn
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
+import { makeLockRelease } from "../file-lock.js";
 const LOG_DIR = '.iterate';
 const LOG_FILE = 'decision-log.jsonl';
 // ─── Cross-process log mutex ────────────────────────────────────────────────
@@ -111,6 +112,8 @@ export function acquireLogLockChecked(projectRoot, options = {}) {
             continue;
         }
         // Owned the lock: stamp the holder pid, then release once on return.
+        // The release is ownership-checked (see `makeLockRelease`): a lock stolen
+        // from this process after its owner went stale must not be unlinked by us.
         try {
             writeSync(fd, String(process.pid));
         }
@@ -119,18 +122,9 @@ export function acquireLogLockChecked(projectRoot, options = {}) {
             closeSync(fd);
         }
         catch { /* best-effort */ }
-        let released = false;
         return {
             acquired: true,
-            release: () => {
-                if (released)
-                    return;
-                released = true;
-                try {
-                    unlinkSync(lockPath);
-                }
-                catch { /* already gone */ }
-            },
+            release: makeLockRelease(lockPath),
         };
     }
 }

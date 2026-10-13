@@ -22,13 +22,19 @@
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import { clientSourceDigest, DIGEST_MARKER } from './client-digest.mjs'
 
 const id = 'iterate-plugin'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const outfile = resolve(root, 'lib/client.js')
 
 async function main() {
-  const banner = `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: (require) => {
+  // The bundle is committed and shipped as-is, so it carries the digest of the
+  // sources it was built from; `test/package-contract.test.ts` recomputes it to
+  // catch "edited the client, forgot to rebuild".
+  const digest = clientSourceDigest(root)
+  const banner = `/* ${DIGEST_MARKER}${digest} */
+window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: (require) => {
 var module = { exports: {} };
 var exports = module.exports;`
 

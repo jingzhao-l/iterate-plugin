@@ -103,8 +103,24 @@ import {
   buildConfigFieldInstruction, // #8: field → iterate_config write instruction
   configFieldByKey, // #8: field lookup for the settings picker
   CONFIG_EDIT_FIELDS, // #8: field list incl. validation.commands
+  buildConfigReadInstruction, // #8b: read instruction (write -> read-back loop)
+  scanSessionForConfigRead, // #8b: latest config echoed into the session
+  configValueByPath, // #8b: current value of the selected dotted key
   DISK_SNAPSHOT_SOURCES, // #4/#3: read-side tools listed by the pull instruction
 } from '../../lib/parse.js'
+import {
+  configureLangStorage,
+  detectLang,
+  getLang,
+  setLang,
+  subscribeLang,
+  t,
+  tf,
+  LANG_NAMES,
+  LANG_STORAGE_KEY,
+  type Lang,
+} from './i18n.ts'
+import { noteSession, readSession, subscribeSession } from './session-cache.ts'
 
 // ─── Module contract ─────────────────────────────────────────────────────────
 
@@ -726,6 +742,37 @@ function removeStorageByPrefix(prefix: string): number {
   return removed
 }
 
+// ─── Language (bilingual UI) ─────────────────────────────────────────────────
+
+/**
+ * Subscribe a component to language changes. Components that render `t()` /
+ * `tf()` must call this so a language switch repaints them — the slot
+ * wrappers registered in `apply()` apply it once per slot, so no panel can be
+ * forgotten.
+ */
+function useLang(): Lang {
+  const [lang, set] = React.useState<Lang>(getLang())
+  React.useEffect(() => subscribeLang(set), [])
+  return lang
+}
+
+/**
+ * Newest session published by the session-scoped slots (session-cache.ts).
+ * `useSyncExternalStore` keeps a root-scoped panel consistent with the store
+ * even when a session lands between render and effect.
+ */
+function useSessionSnapshot(): unknown {
+  return React.useSyncExternalStore(subscribeSession, readSession, readSession)
+}
+
+/** Wrap a slot component so its whole subtree re-renders on a language change. */
+function withLang<P extends object>(Component: React.ComponentType<P>): React.ComponentType<P> {
+  return function LangScoped(props: P) {
+    useLang()
+    return React.createElement(Component, props)
+  }
+}
+
 /** Copy text to the clipboard, resolving to whether it actually succeeded. */
 function copyText(text: string): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
@@ -782,11 +829,28 @@ function severityLabel(severity: string | undefined): string {
   return SEVERITY_LABEL[coerceSeverity(severity)]
 }
 
+/** Render a config value read back from the session (arrays stay inline JSON). */
+function formatConfigValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === undefined) return '—'
+  if (value === null) return 'null'
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+/** Wrap a badge in full-width (zh) or ASCII (en) parentheses. */
+function parenthesize(label: string): string {
+  return getLang() === 'en' ? ` (${label})` : `（${label}）`
+}
+
 /** Badge text for the run's live/finished state, annotated with the stop reason. */
 function runStatusText(live: boolean, manifest: ObsManifest | null | undefined): string {
-  if (live) return '运行中'
+  if (live) return t('运行中')
   const reason = manifest && typeof manifest.stoppedReason === 'string' ? manifest.stoppedReason : ''
-  return reason ? stoppedReasonLabel(reason) : '已结束'
+  return reason ? stoppedReasonLabel(reason, getLang()) : t('已结束')
 }
 
 /** Resolve the slots service: prefer the typed `ctx.slots`, fall back to `ctx.get`. */
@@ -902,7 +966,7 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
       key: p.round,
       className: 'iterate-trend-bar',
       'data-hot': p.count > 0 ? '' : undefined,
-      title: `Round ${p.round}：${p.count} 项`,
+      title: tf(`Round {a0}：{a1} 项`, { a0: p.round, a1: p.count }),
       style: { height: `${Math.max(4, Math.round((p.count / max) * 24))}px` },
     }),
   )
@@ -912,7 +976,7 @@ function TrendChart({ points }: { points: Array<{ round: number; count: number }
   return React.createElement('div', {
     className: 'iterate-trend',
     role: 'img',
-    'aria-label': `各轮发现数量趋势：${summary}`,
+    'aria-label': tf(`各轮发现数量趋势：{a0}`, { a0: summary }),
   }, ...bars)
 }
 
@@ -960,12 +1024,12 @@ function StartIterationButton() {
       'data-failed': failed === key ? '' : undefined,
       onClick: () => copy(key, command),
       title,
-    }, copied === key ? '已复制' : failed === key ? '复制失败' : label)
+    }, copied === key ? t('已复制') : failed === key ? t('复制失败') : label)
   return React.createElement(
     'span',
     { className: 'iterate-dashboard-launch' },
-    btn('start-full', '完整迭代', START_INSTRUCTIONS.full, true, '复制启动指令：完整「审查 → 修复 → 验证 → 复盘」闭环（粘贴给模型即可）'),
-    btn('start-review', '仅评审', START_INSTRUCTIONS.reviewOnly, false, '复制启动指令：只审查不修改（dry-run）（粘贴给模型即可）'),
+    btn('start-full', t('完整迭代'), START_INSTRUCTIONS.full, true, t('复制启动指令：完整「审查 → 修复 → 验证 → 复盘」闭环（粘贴给模型即可）')),
+    btn('start-review', t('仅评审'), START_INSTRUCTIONS.reviewOnly, false, t('复制启动指令：只审查不修改（dry-run）（粘贴给模型即可）')),
   )
 }
 
@@ -982,6 +1046,12 @@ function ConvergenceDashboard(props: SlotProps) {
   // The `conversation.input.dock` slot owner share (InputZone) provides
   // `session` as a point-in-time snapshot — read it directly, never subscribe.
   const session = props && props.session ? props.session : null
+  // Publish it for ROOT-scoped panels (the settings card reads the config
+  // read-back through this cache). In an effect, not during render: notifying
+  // subscribers while another component is rendering is a React error.
+  React.useEffect(() => {
+    noteSession(session)
+  }, [session])
   const report = latestReport(session)
 
   React.useEffect(() => {
@@ -1003,11 +1073,11 @@ function ConvergenceDashboard(props: SlotProps) {
       return React.createElement(
         'div',
         { 'data-iterate-root': '', 'data-iterate': 'dashboard', 'data-run-state': 'running', className: 'iterate-dashboard iterate-dashboard-empty' },
-        React.createElement('span', { className: 'iterate-round-badge', 'data-live': '' }, '运行中'),
+        React.createElement('span', { className: 'iterate-round-badge', 'data-live': '' }, t('运行中')),
         React.createElement(
           'span',
           { className: 'iterate-empty-hint' },
-          `第 ${String(runState.round)} 轮进行中${runState.phase ? ` · 阶段「${runState.phase}」` : ''}——首轮汇总报告落地后，这里会显示收敛进度与发现统计。`,
+          tf(`第 {a0} 轮进行中{a1}——首轮汇总报告落地后，这里会显示收敛进度与发现统计。`, { a0: String(runState.round), a1: runState.phase ? tf(` · 阶段「{a0}」`, { a0: runState.phase }) : '' }),
         ),
         // No start button while a run is active.
       )
@@ -1016,11 +1086,11 @@ function ConvergenceDashboard(props: SlotProps) {
       return React.createElement(
         'div',
         { 'data-iterate-root': '', 'data-iterate': 'dashboard', 'data-run-state': 'done', className: 'iterate-dashboard iterate-dashboard-empty' },
-        React.createElement('span', { className: 'iterate-round-badge' }, '已结束'),
+        React.createElement('span', { className: 'iterate-round-badge' }, t('已结束')),
         React.createElement(
           'span',
           { className: 'iterate-empty-hint' },
-          `上次迭代在第 ${String(runState.round)} 轮后停止${runState.stoppedReason ? `（${stoppedReasonLabel(runState.stoppedReason)}）` : ''}，但没有可展示的汇总报告。`,
+          tf(`上次迭代在第 {a0} 轮后停止{a1}，但没有可展示的汇总报告。`, { a0: String(runState.round), a1: runState.stoppedReason ? parenthesize(stoppedReasonLabel(runState.stoppedReason, getLang())) : '' }),
         ),
         React.createElement(StartIterationButton, null),
       )
@@ -1033,7 +1103,7 @@ function ConvergenceDashboard(props: SlotProps) {
       'div',
       { 'data-iterate-root': '', 'data-iterate': 'dashboard', 'data-run-state': 'empty', className: 'iterate-dashboard iterate-dashboard-empty' },
       React.createElement('span', { className: 'iterate-round-badge' }, 'iterate'),
-      React.createElement('span', { className: 'iterate-empty-hint' }, '运行一次评审后，这里会显示收敛进度与发现统计。'),
+      React.createElement('span', { className: 'iterate-empty-hint' }, t('运行一次评审后，这里会显示收敛进度与发现统计。')),
       React.createElement(StartIterationButton, null),
     )
   }
@@ -1053,15 +1123,15 @@ function ConvergenceDashboard(props: SlotProps) {
     ? React.createElement('span', {
         className: 'iterate-chip-resume',
         key: 'resume',
-        title: '本次迭代从上一次中断的断点继续执行',
-      }, `已中断恢复 ×${String(resumeCount)}`)
+        title: t('本次迭代从上一次中断的断点继续执行'),
+      }, tf(`已中断恢复 ×{a0}`, { a0: String(resumeCount) }))
     : null
   const imageChip = imageCount > 0
     ? React.createElement('span', {
         className: 'iterate-chip-images',
         key: 'images',
-        title: '会话中检测到用户附带的图片，评审将作为视觉证据参考',
-      }, `附件图片 ${String(imageCount)}`)
+        title: t('会话中检测到用户附带的图片，评审将作为视觉证据参考'),
+      }, tf(`附件图片 {a0}`, { a0: String(imageCount) }))
     : null
 
   // Live run-state awareness: surface the transcript's current workflow phase
@@ -1075,8 +1145,8 @@ function ConvergenceDashboard(props: SlotProps) {
         key: 'phase',
         'data-live': transcript.active === true ? '' : undefined,
         title: transcript.active === true
-          ? `当前处于「${phase}」阶段（运行中）`
-          : `最近一次执行停留在「${phase}」阶段（已结束）`,
+          ? tf(`当前处于「{a0}」阶段（运行中）`, { a0: phase })
+          : tf(`最近一次执行停留在「{a0}」阶段（已结束）`, { a0: phase }),
       }, `${phase} · ${runStatusText(transcript.active === true, transcript)}`)
     : null
 
@@ -1089,7 +1159,7 @@ function ConvergenceDashboard(props: SlotProps) {
         className: 'iterate-chip-taskmode',
         key: 'taskmode',
         'data-mode': taskMode,
-        title: taskMode === 'code' ? '代码模式：直接修改文件' : '迭代模式：审查-修复循环',
+        title: taskMode === 'code' ? t('代码模式：直接修改文件') : t('迭代模式：审查-修复循环'),
       }, taskMode === 'code' ? '● code' : '● iterate')
     : null
 
@@ -1108,7 +1178,7 @@ function ConvergenceDashboard(props: SlotProps) {
       React.createElement(
         'span',
         { key: '+more', className: 'iterate-dim-badge iterate-dim-more', title: dimNames.slice(6).join(', ') },
-        `+${overflow} 更多`,
+        tf(`+{a0} 更多`, { a0: overflow }),
       ),
     )
   }
@@ -1123,7 +1193,7 @@ function ConvergenceDashboard(props: SlotProps) {
     ? React.createElement('span', {
         className: 'iterate-metric',
         key: 'fixes',
-        title: '本轮已应用的原子修复数（正常模式）',
+        title: t('本轮已应用的原子修复数（正常模式）'),
       }, `${String(fixCount)} fixes`)
     : null
 
@@ -1134,8 +1204,8 @@ function ConvergenceDashboard(props: SlotProps) {
     ? React.createElement('span', {
         className: 'iterate-chip-resume',
         key: 'converged',
-        title: '审查已收敛：最后一轮未发现新问题',
-      }, '✓ 已收敛')
+        title: t('审查已收敛：最后一轮未发现新问题'),
+      }, t('✓ 已收敛'))
     : null
 
   const sevMetric = (key: 'critical' | 'high' | 'medium' | 'low', label: string) =>
@@ -1203,14 +1273,14 @@ function StatsCard(props: SlotProps) {
       React.createElement('td', { style: { color: SEVERITY_COLOR.low } }, String(h.low)),
     ),
   )
-  const trendLine = `首轮 ${trend.firstRound} → 末轮 ${trend.lastRound} 项，降幅 ${trend.reductionPercent}%${trend.converged ? '，已收敛' : ''}`
-  const completion = buildCompletionSummary(report)
+  const trendLine = tf(`首轮 {a0} → 末轮 {a1} 项，降幅 {a2}%{a3}`, { a0: trend.firstRound, a1: trend.lastRound, a2: trend.reductionPercent, a3: trend.converged ? t('，已收敛') : '' })
+  const completion = buildCompletionSummary(report, getLang())
 
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'stats', className: 'iterate-stats' },
     React.createElement('div', { className: 'iterate-triage-head' },
-      React.createElement('span', {}, 'Iterate · 收敛统计'),
+      React.createElement('span', {}, t('Iterate · 收敛统计')),
       React.createElement('span', { className: 'iterate-triage-hint' },
-        `Round ${getCurrentRound(report)}/${getTotalRounds(report)} · ${total} findings · ${report.convergence && report.convergence.converged ? '已收敛' : '未收敛'}`,
+        `Round ${getCurrentRound(report)}/${getTotalRounds(report)} · ${total} findings · ${report.convergence && report.convergence.converged ? t('已收敛') : t('未收敛')}`,
       ),
     ),
     React.createElement('div', { className: 'iterate-stats-grid' }, ...rows),
@@ -1221,15 +1291,15 @@ function StatsCard(props: SlotProps) {
         className: 'iterate-btn',
         'data-primary': showHistory ? '' : undefined,
         onClick: () => setShowHistory((v) => !v),
-      }, showHistory ? '收起历史' : '历史 / 趋势'),
+      }, showHistory ? t('收起历史') : t('历史 / 趋势')),
     ),
     showHistory
       ? React.createElement('div', { className: 'iterate-history-body' },
           React.createElement('table', { className: 'iterate-history-table' },
             React.createElement('thead', {},
               React.createElement('tr', {},
-                React.createElement('th', {}, '轮次'),
-                React.createElement('th', {}, '发现'),
+                React.createElement('th', {}, t('轮次')),
+                React.createElement('th', {}, t('发现')),
                 React.createElement('th', { style: { color: SEVERITY_COLOR.critical } }, 'CRIT'),
                 React.createElement('th', { style: { color: SEVERITY_COLOR.high } }, 'HIGH'),
                 React.createElement('th', { style: { color: SEVERITY_COLOR.medium } }, 'MED'),
@@ -1397,7 +1467,7 @@ function TriagePanel(props: SlotProps) {
   }
 
   const doTriggerNewRound = () => {
-    const cmd = '请继续执行下一轮迭代审查'
+    const cmd = t('请继续执行下一轮迭代审查')
     copyWithFeedback(cmd, 'new-round')
   }
 
@@ -1405,7 +1475,7 @@ function TriagePanel(props: SlotProps) {
     // iterate_checkpoint has NO rollback operation (save/load/resume/clear
     // only); reverting applied fixes is done via iterate_rollback by fix id,
     // so the paste-able instruction must point there instead.
-    const cmd = '请回滚上一轮迭代的修复：调用 `iterate_history` 查看本轮 fix id，再用 `iterate_rollback` 逐个撤销这些修复'
+    const cmd = t('请回滚上一轮迭代的修复：调用 `iterate_history` 查看本轮 fix id，再用 `iterate_rollback` 逐个撤销这些修复')
     copyWithFeedback(cmd, 'rollback')
   }
 
@@ -1507,27 +1577,27 @@ function TriagePanel(props: SlotProps) {
       ),
       React.createElement('div', { className: 'iterate-finding-summary' }, String(finding.summary || '')),
       React.createElement('div', { className: 'iterate-finding-actions' },
-        btn('y 修复', 'keep', '保留该 finding，进入修复'),
-        btn('n 跳过', 'skip', '跳过该 finding'),
-        btn('a 已知有意', 'ignore', '标记为已知有意并写入 known_intentional'),
+        btn(t('y 修复'), 'keep', t('保留该 finding，进入修复')),
+        btn(t('n 跳过'), 'skip', t('跳过该 finding')),
+        btn(t('a 已知有意'), 'ignore', t('标记为已知有意并写入 known_intentional')),
       ),
     )
   })
 
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'triage', className: 'iterate-triage' },
     React.createElement('div', { className: 'iterate-triage-head' },
-      React.createElement('span', { role: 'heading', 'aria-level': 3 }, `Iterate · Findings 分诊 (${filtered.length}/${findings.length})`),
-      React.createElement('span', { className: 'iterate-triage-hint' }, 'y=修复 · n=跳过 · a=已知有意 · ↑/↓ 选择'),
+      React.createElement('span', { role: 'heading', 'aria-level': 3 }, tf(`Iterate · Findings 分诊 ({a0}/{a1})`, { a0: filtered.length, a1: findings.length })),
+      React.createElement('span', { className: 'iterate-triage-hint' }, t('y=修复 · n=跳过 · a=已知有意 · ↑/↓ 选择')),
     ),
     React.createElement('div', { className: 'iterate-filter' },
-      React.createElement('select', { className: 'iterate-filter-select', value: filter.severities[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setSeverityFilter(e.target.value), 'aria-label': '按严重度筛选' },
-        React.createElement('option', { value: '' }, '全部严重度'),
+      React.createElement('select', { className: 'iterate-filter-select', value: filter.severities[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setSeverityFilter(e.target.value), 'aria-label': t('按严重度筛选') },
+        React.createElement('option', { value: '' }, t('全部严重度')),
         ...options.severities.map((s) =>
           React.createElement('option', { key: s.value, value: s.value }, `${severityLabel(s.value)} (${s.count})`),
         ),
       ),
-      React.createElement('select', { className: 'iterate-filter-select', value: filter.dimensions[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDimensionFilter(e.target.value), 'aria-label': '按维度筛选' },
-        React.createElement('option', { value: '' }, '全部维度'),
+      React.createElement('select', { className: 'iterate-filter-select', value: filter.dimensions[0] || '', onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDimensionFilter(e.target.value), 'aria-label': t('按维度筛选') },
+        React.createElement('option', { value: '' }, t('全部维度')),
         ...options.dimensions.map((d) =>
           React.createElement('option', { key: d.value, value: d.value }, `${d.value} (${d.count})`),
         ),
@@ -1535,37 +1605,37 @@ function TriagePanel(props: SlotProps) {
       React.createElement('input', {
         className: 'iterate-filter-search',
         type: 'search',
-        placeholder: '搜索文件 / 摘要…',
-        'aria-label': '搜索文件或摘要',
+        placeholder: t('搜索文件 / 摘要…'),
+        'aria-label': t('搜索文件或摘要'),
         value: filter.search,
         onChange: (e: React.ChangeEvent<HTMLInputElement>) => setSearchFilter(e.target.value),
       }),
       React.createElement('span', { className: 'iterate-filter-count' },
         isFilterActive
-          ? React.createElement('button', { className: 'iterate-batch-btn', onClick: clearFilter }, `清除筛选（显示 ${filtered.length}）`)
-          : `共 ${findings.length} 项`,
+          ? React.createElement('button', { className: 'iterate-batch-btn', onClick: clearFilter }, tf(`清除筛选（显示 {a0}）`, { a0: filtered.length }))
+          : tf(`共 {a0} 项`, { a0: findings.length }),
       ),
     ),
     React.createElement('div', { className: 'iterate-batch' },
-      React.createElement('span', { className: 'iterate-batch-label' }, '批量作用于：'),
+      React.createElement('span', { className: 'iterate-batch-label' }, t('批量作用于：')),
       React.createElement('button', {
         className: selectAll ? 'iterate-batch-btn iterate-batch-scope' : 'iterate-batch-btn iterate-batch-scope iterate-batch-scope-on',
         onClick: () => setSelectAll(false),
-        title: '批量按钮仅作用于当前筛选可见的 findings',
-      }, `可见 ${indices.length}`),
+        title: t('批量按钮仅作用于当前筛选可见的 findings'),
+      }, tf(`可见 {a0}`, { a0: indices.length })),
       React.createElement('button', {
         className: selectAll ? 'iterate-batch-btn iterate-batch-scope iterate-batch-scope-on' : 'iterate-batch-btn iterate-batch-scope',
         onClick: () => setSelectAll(true),
-        title: '批量按钮作用于全部 findings',
-      }, `全部 ${allIndices.length}`),
+        title: t('批量按钮作用于全部 findings'),
+      }, tf(`全部 {a0}`, { a0: allIndices.length })),
       React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('keep') }, 'y'),
       React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('skip') }, 'n'),
       React.createElement('button', { className: 'iterate-batch-btn', onClick: () => applyBatch('ignore') }, 'a'),
-      React.createElement('button', { className: 'iterate-batch-btn', onClick: doResetVerdicts, title: '把所有判定恢复为默认 y（修复）' }, '重置'),
+      React.createElement('button', { className: 'iterate-batch-btn', onClick: doResetVerdicts, title: t('把所有判定恢复为默认 y（修复）') }, t('重置')),
     ),
     ...rows,
     React.createElement('div', { className: 'iterate-triage-foot' },
-      React.createElement('span', {}, `y ${counts.keep} · n ${counts.skip} · a ${counts.ignore} · 待写回 known_intentional：${ignoredCount} 条`),
+      React.createElement('span', {}, tf(`y {a0} · n {a1} · a {a2} · 待写回 known_intentional：{a3} 条`, { a0: counts.keep, a1: counts.skip, a2: counts.ignore, a3: ignoredCount })),
       React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
         // Gap #7: the apply instruction (safe path) is PRIMARY; the raw YAML
         // is demoted to an explicit "just the snippet" escape hatch.
@@ -1575,65 +1645,65 @@ function TriagePanel(props: SlotProps) {
           'data-failed': cmdFailed === 'apply' ? '' : undefined,
           onClick: doBuildInstruction, disabled: ignoredCount === 0,
           title: ignoredCount === 0
-            ? '当前没有标记为「已知有意」的 finding'
-            : '复制应用指令：粘贴后模型会调用 iterate_triage apply（校验、去重、写入前备份、失败自动回滚）',
-        }, cmdCopied === 'apply' ? '已复制' : cmdFailed === 'apply' ? '复制失败' : `生成应用指令${ignoredCount > 0 ? `（${ignoredCount}）` : ''}`),
+            ? t('当前没有标记为「已知有意」的 finding')
+            : t('复制应用指令：粘贴后模型会调用 iterate_triage apply（校验、去重、写入前备份、失败自动回滚）'),
+        }, cmdCopied === 'apply' ? t('已复制') : cmdFailed === 'apply' ? t('复制失败') : tf(`生成应用指令{a0}`, { a0: ignoredCount > 0 ? `（${ignoredCount}）` : '' })),
         React.createElement('button', {
           className: 'iterate-btn',
           'data-copied': copied ? '' : undefined,
           'data-failed': cmdFailed === 'yaml' ? '' : undefined,
           onClick: doCopyYaml, disabled: ignoredCount === 0,
           title: ignoredCount === 0
-            ? '当前没有标记为「已知有意」的 finding'
-            : '只复制 known_intentional YAML 片段（需自行粘到 iterate.config.yaml 的 personalization.known_intentional 下）',
-        }, copied ? '已复制' : cmdFailed === 'yaml' ? '复制失败' : '仅复制 YAML 片段'),
+            ? t('当前没有标记为「已知有意」的 finding')
+            : t('只复制 known_intentional YAML 片段（需自行粘到 iterate.config.yaml 的 personalization.known_intentional 下）'),
+        }, copied ? t('已复制') : cmdFailed === 'yaml' ? t('复制失败') : t('仅复制 YAML 片段')),
         React.createElement('button', {
           className: 'iterate-btn',
           'data-copied': cmdCopied === 'readback' ? '' : undefined,
           'data-failed': cmdFailed === 'readback' ? '' : undefined,
           onClick: doReadback,
-          title: '复制 iterate_triage list 指令，核对已经写入的 known_intentional 条目（写回闭环确认）',
-        }, cmdCopied === 'readback' ? '已复制' : cmdFailed === 'readback' ? '复制失败' : '回读已写入条目'),
+          title: t('复制 iterate_triage list 指令，核对已经写入的 known_intentional 条目（写回闭环确认）'),
+        }, cmdCopied === 'readback' ? t('已复制') : cmdFailed === 'readback' ? t('复制失败') : t('回读已写入条目')),
       ),
       cmdCopied === 'apply'
-        ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, '已复制应用指令——粘贴回会话，模型将调用 iterate_triage apply 并回报写入条数。')
+        ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, t('已复制应用指令——粘贴回会话，模型将调用 iterate_triage apply 并回报写入条数。'))
         : cmdCopied === 'readback'
-          ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, '已复制回读指令——粘贴回会话可列出当前已写入的 known_intentional。')
+          ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, t('已复制回读指令——粘贴回会话可列出当前已写入的 known_intentional。'))
           : null,
     ),
     // v3.0: Command buttons for native actions (§8)
     React.createElement('div', { className: 'iterate-triage-foot', style: { borderTop: '1px solid var(--dsw-alias-border-l1)' } },
-      React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' } }, '指挥操作'),
+      React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' } }, t('指挥操作')),
       React.createElement('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
         React.createElement('button', {
           className: 'iterate-cmd', 'data-primary': '',
           'data-copied': cmdCopied === 'approve-arch' ? '' : undefined,
           'data-failed': cmdFailed === 'approve-arch' ? '' : undefined,
           onClick: doApproveArchitecturalFix,
-          title: '批准架构修复（复制指令文本：iterate_fix force:true，含全部必填参数）',
-        }, cmdCopied === 'approve-arch' ? '已复制' : cmdFailed === 'approve-arch' ? '复制失败' : '批准架构修复'),
+          title: t('批准架构修复（复制指令文本：iterate_fix force:true，含全部必填参数）'),
+        }, cmdCopied === 'approve-arch' ? t('已复制') : cmdFailed === 'approve-arch' ? t('复制失败') : t('批准架构修复')),
         React.createElement('button', {
           className: 'iterate-cmd',
           'data-copied': cmdCopied === 'new-round' ? '' : undefined,
           'data-failed': cmdFailed === 'new-round' ? '' : undefined,
           onClick: doTriggerNewRound,
-          title: '触发新一轮迭代审查',
-        }, cmdCopied === 'new-round' ? '已复制' : cmdFailed === 'new-round' ? '复制失败' : '触发新一轮'),
+          title: t('触发新一轮迭代审查'),
+        }, cmdCopied === 'new-round' ? t('已复制') : cmdFailed === 'new-round' ? t('复制失败') : t('触发新一轮')),
         React.createElement('button', {
           className: 'iterate-cmd', 'data-primary': '',
           'data-copied': cmdCopied === 'assign' ? '' : undefined,
           'data-failed': cmdFailed === 'assign' ? '' : undefined,
           onClick: doAssignFindings,
           disabled: (selectAll ? allIndices : indices).length === 0,
-          title: selectAll ? `指派全部 ${allIndices.length} 个 findings 修复（逐个 iterate_fix）` : `指派当前可见 ${indices.length} 个 findings 修复（逐个 iterate_fix）`,
-        }, cmdCopied === 'assign' ? '已复制' : cmdFailed === 'assign' ? '复制失败' : '指派修复'),
+          title: selectAll ? tf(`指派全部 {a0} 个 findings 修复（逐个 iterate_fix）`, { a0: allIndices.length }) : tf(`指派当前可见 {a0} 个 findings 修复（逐个 iterate_fix）`, { a0: indices.length }),
+        }, cmdCopied === 'assign' ? t('已复制') : cmdFailed === 'assign' ? t('复制失败') : t('指派修复')),
         React.createElement('button', {
           className: 'iterate-cmd', 'data-danger': '',
           'data-copied': cmdCopied === 'rollback' ? '' : undefined,
           'data-failed': cmdFailed === 'rollback' ? '' : undefined,
           onClick: doRollbackToCheckpoint,
-          title: '回滚到上一个检查点',
-        }, cmdCopied === 'rollback' ? '已复制' : cmdFailed === 'rollback' ? '复制失败' : '回滚检查点'),
+          title: t('回滚到上一个检查点'),
+        }, cmdCopied === 'rollback' ? t('已复制') : cmdFailed === 'rollback' ? t('复制失败') : t('回滚检查点')),
       ),
     ),
     payload
@@ -1656,15 +1726,15 @@ function VerdictBanner(props: SlotProps) {
     'div',
     { 'data-iterate-root': '', 'data-iterate': 'verdict', className: 'iterate-verdict' },
     React.createElement('span', { className: 'iterate-verdict-tag', 'data-ok': ok ? '' : undefined, 'data-warn': ok ? undefined : '' },
-      ok ? '报告已批准' : '报告需修订'),
+      ok ? t('报告已批准') : t('报告需修订')),
     React.createElement('span', { className: 'iterate-verdict-detail' },
-      item(verdict.totalFindings, '项发现'),
-      item(verdict.totalRounds, '轮'),
-      item(verdict.checksRun, '项审查'),
+      item(verdict.totalFindings, t('项发现')),
+      item(verdict.totalRounds, t('轮')),
+      item(verdict.checksRun, t('项审查')),
       ok
-        ? phrase('报告通过全部一致性检查')
-        : item(verdict.reportIssues, '处报告缺陷'),
-      phrase(verdict.converged ? '已收敛' : '未收敛'),
+        ? phrase(t('报告通过全部一致性检查'))
+        : item(verdict.reportIssues, t('处报告缺陷')),
+      phrase(verdict.converged ? t('已收敛') : t('未收敛')),
     ),
   )
 }
@@ -1713,7 +1783,7 @@ function ProgressCapsule() {
     const listener = (payload: { round: number; converged: boolean }) => {
       const converged = payload && payload.converged === true
       const round = payload && typeof payload.round === 'number' ? payload.round : '?'
-      setInfo({ text: converged ? `Round ${round} 完成 · 已收敛` : `Round ${round} 完成`, ok: converged })
+      setInfo({ text: converged ? tf(`Round {a0} 完成 · 已收敛`, { a0: round }) : tf(`Round {a0} 完成`, { a0: round }), ok: converged })
       if (timer) clearTimeout(timer)
       // Converged notifications stay a bit longer.
       timer = setTimeout(() => setInfo(null), converged ? 3600 : 2400)
@@ -1736,7 +1806,17 @@ function ProgressCapsule() {
 }
 
 /** Settings page section (root scope; reads localStorage + latest known data). */
-function SettingsPanel(_props: SlotProps) {
+function SettingsPanel(props: SlotProps) {
+  // Re-render on a language switch (the slot wrapper covers the tree; this
+  // keeps the panel honest even if it is ever rendered directly).
+  const lang = useLang()
+  // Root-scoped slot: the host renders settings OUTSIDE the session scope, so
+  // take the session the session-scoped slots published (a host that does pass
+  // `props.session` wins). This is what makes the config read-back visible.
+  // The hook is called UNCONDITIONALLY — a conditional hook would break the
+  // panel as soon as a host started passing `props.session`.
+  const cachedSession = useSessionSnapshot()
+  const session = props && props.session ? props.session : cachedSession
   const [enabled, setEnabled] = React.useState(themeEnabled)
   const [guideCopied, setGuideCopied] = React.useState(false)
   const [statusCopied, setStatusCopied] = React.useState(false)
@@ -1753,10 +1833,20 @@ function SettingsPanel(_props: SlotProps) {
   const [cfgCopied, setCfgCopied] = React.useState(false)
   const [cfgFailed, setCfgFailed] = React.useState(false)
   const [cfgText, setCfgText] = React.useState<string | null>(null)
+  // Gap #1 (3.7.0): the read half of the write -> read-back loop.
+  const [cfgReadCopied, setCfgReadCopied] = React.useState(false)
+  const [cfgReadText, setCfgReadText] = React.useState<string | null>(null)
   const [pullCopied, setPullCopied] = React.useState(false)
-  const [copyError, setCopyError] = React.useState<'guide' | 'status' | 'pull' | null>(null)
+  const [copyError, setCopyError] = React.useState<'guide' | 'status' | 'pull' | 'cfgRead' | null>(null)
   const guide = buildConfigEditGuide()
   const statusGuide = buildRuntimeStatusGuide()
+
+  // What the config actually says right now: latest `iterate_config` result
+  // echoed into the session, then the value of the field being edited.
+  const cfgMeta = configFieldByKey(cfgField)
+  const cfgRead = scanSessionForConfigRead(session)
+  const cfgCurrent = cfgRead ? configValueByPath(cfgRead, cfgField) : null
+  const cfgFieldLabel = cfgMeta ? cfgMeta.label[getLang()] : cfgField
 
   // Audit: don't leak flash timers across settings unmounts.
   const cfgTimers = React.useRef<number[]>([])
@@ -1772,8 +1862,9 @@ function SettingsPanel(_props: SlotProps) {
   }
 
   /** Flash a per-slot "已复制" state for the given duration. */
-  const flashCopied = (slot: 'guide' | 'status' | 'pull') => {
-    const setter = slot === 'guide' ? setGuideCopied : slot === 'status' ? setStatusCopied : setPullCopied
+  const flashCopied = (slot: 'guide' | 'status' | 'pull' | 'cfgRead') => {
+    const setter =
+      slot === 'guide' ? setGuideCopied : slot === 'status' ? setStatusCopied : slot === 'pull' ? setPullCopied : setCfgReadCopied
     setter(true)
     cfgTimers.current.push(window.setTimeout(() => setter(false), 1600))
   }
@@ -1781,7 +1872,7 @@ function SettingsPanel(_props: SlotProps) {
   /** Copy a guide/status block; flash success only when it actually copied,
    *  and surface a visible error when the clipboard write is refused (the old
    *  behaviour was a silent no-op, which reads as a broken button). */
-  const doCopy = (text: string, slot: 'guide' | 'status' | 'pull') => {
+  const doCopy = (text: string, slot: 'guide' | 'status' | 'pull' | 'cfgRead') => {
     copyText(text).then((ok) => {
       setCopyError(ok ? null : slot)
       if (ok) flashCopied(slot)
@@ -1801,6 +1892,19 @@ function SettingsPanel(_props: SlotProps) {
     })
   }
 
+  /** Copy the read-back instruction; a refused clipboard reveals it below. */
+  const doCopyConfigRead = () => {
+    const text = buildConfigReadInstruction()
+    copyText(text).then((ok) => {
+      setCopyError(ok ? null : 'cfgRead')
+      if (ok) {
+        flashCopied('cfgRead')
+        return
+      }
+      setCfgReadText(text)
+    })
+  }
+
   /** Two-step destroy guard: first click arms, second click clears. */
   const requestClear = () => {
     if (confirming) {
@@ -1815,27 +1919,27 @@ function SettingsPanel(_props: SlotProps) {
   }
 
   const clearButton = clearedInfo !== null
-    ? React.createElement('button', { className: 'iterate-btn', 'data-copied': '', disabled: true }, `已清除 ${clearedInfo} 条`)
+    ? React.createElement('button', { className: 'iterate-btn', 'data-copied': '', disabled: true }, tf(`已清除 {a0} 条`, { a0: clearedInfo }))
     : React.createElement('button', {
         className: 'iterate-btn',
         'data-danger': confirming ? undefined : '',
         'data-confirm': confirming ? '' : undefined,
         onClick: requestClear,
-        title: confirming ? '再次点击以确认清除全部判定' : '清除所有分诊判定记录（需要二次确认）',
-      }, confirming ? '确认清除？' : '清除分诊')
+        title: confirming ? t('再次点击以确认清除全部判定') : t('清除所有分诊判定记录（需要二次确认）'),
+      }, confirming ? t('确认清除？') : t('清除分诊'))
 
   const themeCard = React.createElement('div', { key: 'theme', className: 'iterate-scard' },
     React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
-        React.createElement('div', { className: 'iterate-settings-title' }, '迭代主题'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '启用暖琥珀配色的 iterate 专属皮肤，覆盖 dsh 默认主题令牌。'),
+        React.createElement('div', { className: 'iterate-settings-title' }, t('迭代主题')),
+        React.createElement('div', { className: 'iterate-settings-desc' }, t('启用暖琥珀配色的 iterate 专属皮肤，覆盖 dsh 默认主题令牌。')),
       ),
       React.createElement('div', { className: 'iterate-scard-actions' },
-        React.createElement('span', { className: 'iterate-chip', 'data-ok': enabled ? '' : undefined }, enabled ? '已启用' : '已关闭'),
+        React.createElement('span', { className: 'iterate-chip', 'data-ok': enabled ? '' : undefined }, enabled ? t('已启用') : t('已关闭')),
         React.createElement('button', {
           role: 'switch',
           'aria-checked': enabled,
-          'aria-label': '开关 iterate 主题',
+          'aria-label': t('开关 iterate 主题'),
           className: 'iterate-switch',
           'data-on': enabled ? '' : undefined,
           onClick: toggleTheme,
@@ -1844,14 +1948,36 @@ function SettingsPanel(_props: SlotProps) {
     ),
   )
 
+  const langCard = React.createElement('div', { key: 'lang', className: 'iterate-scard' },
+    React.createElement('div', { className: 'iterate-scard-head' },
+      React.createElement('div', {},
+        React.createElement('div', { className: 'iterate-settings-title' }, t('界面语言')),
+        React.createElement('div', { className: 'iterate-settings-desc' },
+          t('面板文案的显示语言；复制给模型的指令保持中文，与 SKILL.md 的工作流契约一致。'),
+        ),
+      ),
+      React.createElement('div', { className: 'iterate-scard-actions' },
+        React.createElement('span', { className: 'iterate-chip', 'data-ok': '' }, LANG_NAMES[lang]),
+        React.createElement('button', {
+          role: 'switch',
+          'aria-checked': lang === 'en',
+          'aria-label': t('切换界面语言'),
+          className: 'iterate-switch',
+          'data-on': lang === 'en' ? '' : undefined,
+          onClick: () => setLang(lang === 'en' ? 'zh' : 'en'),
+        }, React.createElement('span', { className: 'iterate-switch-knob' })),
+      ),
+    ),
+  )
+
   const dataCard = React.createElement('div', { key: 'data', className: 'iterate-scard' },
     React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
-        React.createElement('div', { className: 'iterate-settings-title' }, '分诊持久化'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, 'y / n / a 判定保存在本地浏览器（localStorage），刷新会话后仍保留。'),
+        React.createElement('div', { className: 'iterate-settings-title' }, t('分诊持久化')),
+        React.createElement('div', { className: 'iterate-settings-desc' }, t('y / n / a 判定保存在本地浏览器（localStorage），刷新会话后仍保留。')),
       ),
       React.createElement('div', { className: 'iterate-scard-actions' },
-        React.createElement('span', { className: 'iterate-chip' }, '本地保存'),
+        React.createElement('span', { className: 'iterate-chip' }, t('本地保存')),
         clearButton,
       ),
     ),
@@ -1860,12 +1986,12 @@ function SettingsPanel(_props: SlotProps) {
   const guideCard = React.createElement('div', { key: 'guide', className: 'iterate-scard' },
     React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
-        React.createElement('div', { className: 'iterate-settings-title' }, '配置管理'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '目标 / 维度 / 最大轮数 / validation.commands 写在项目的 iterate.config.yaml，复制指引可让模型按需调整。'),
+        React.createElement('div', { className: 'iterate-settings-title' }, t('配置管理')),
+        React.createElement('div', { className: 'iterate-settings-desc' }, t('目标 / 维度 / 最大轮数 / validation.commands 写在项目的 iterate.config.yaml，复制指引可让模型按需调整。')),
       ),
       React.createElement('div', { className: 'iterate-scard-actions' },
-        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': guideCopied ? '' : undefined, onClick: () => doCopy(guide, 'guide') }, guideCopied ? '已复制' : '复制指引'),
-        React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowGuide((v) => !v) }, showGuide ? '收起' : '展开'),
+        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': guideCopied ? '' : undefined, onClick: () => doCopy(guide, 'guide') }, guideCopied ? t('已复制') : t('复制指引')),
+        React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowGuide((v) => !v) }, showGuide ? t('收起') : t('展开')),
       ),
     ),
     // Gap #8: wire up the previously-dead `buildConfigFieldInstruction` — pick
@@ -1875,32 +2001,60 @@ function SettingsPanel(_props: SlotProps) {
       React.createElement('select', {
         className: 'iterate-filter-select',
         value: cfgField,
-        'aria-label': '选择要修改的配置字段',
+        'aria-label': t('选择要修改的配置字段'),
         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setCfgField(e.target.value),
       },
         ...CONFIG_EDIT_FIELDS.map((f) =>
-          React.createElement('option', { key: f.key, value: f.key }, `${f.label}（${f.key}）`),
+          React.createElement('option', { key: f.key, value: f.key }, getLang() === 'en' ? `${f.label.en} (${f.key})` : `${f.label.zh}（${f.key}）`),
         ),
       ),
       React.createElement('span', { className: 'iterate-settings-desc' },
-        configFieldByKey(cfgField)?.hint ?? '',
+        cfgMeta?.hint[getLang()] ?? '',
       ),
       React.createElement('button', {
         className: 'iterate-btn', 'data-primary': '',
         'data-copied': cfgCopied ? '' : undefined,
         'data-failed': cfgFailed ? '' : undefined,
         onClick: doBuildConfigInstruction,
-        title: '生成并复制该字段的 iterate_config 写入指令（写入前自动备份、失败自动回滚）',
-      }, cfgCopied ? '已复制' : cfgFailed ? '复制失败' : '生成写入指令'),
+        title: t('生成并复制该字段的 iterate_config 写入指令（写入前自动备份、失败自动回滚）'),
+      }, cfgCopied ? t('已复制') : cfgFailed ? t('复制失败') : t('生成写入指令')),
       cfgFailed
-        ? React.createElement('span', { className: 'iterate-settings-desc' }, '剪贴板被拒绝——指令已展示在下方，请手动复制。')
+        ? React.createElement('span', { className: 'iterate-settings-desc' }, t('剪贴板被拒绝——指令已展示在下方，请手动复制。'))
         : null,
     ),
+    // Gap #1 (3.7.0): close the write -> read-back loop. Three honest states:
+    // nothing echoed yet, the value the model read back, or a read-back that
+    // never contained this field (defaults are in play — say so, don't blank).
+    React.createElement('div', { className: 'iterate-guide-bar', style: { marginTop: 8, flexWrap: 'wrap' } },
+      React.createElement('span', { className: 'iterate-settings-desc' },
+        !cfgRead
+          ? t('尚未回读当前配置——点「回读当前配置」复制指令发给模型，回显后即可在此看到当前值。')
+          : cfgCurrent && cfgCurrent.resolved
+            ? tf('当前值 {a0}：{a1}', { a0: cfgFieldLabel, a1: formatConfigValue(cfgCurrent.value) })
+            : tf('回读结果中没有 {a0}（该字段可能尚未写入配置文件）。', { a0: cfgFieldLabel }),
+      ),
+      React.createElement('button', {
+        className: 'iterate-btn',
+        'data-primary': '',
+        'data-copied': cfgReadCopied ? '' : undefined,
+        onClick: doCopyConfigRead,
+        title: t('复制回读指令：让模型调用 iterate_config(operation:"read") 并回显结果'),
+      }, cfgReadCopied ? t('已复制') : t('回读当前配置')),
+    ),
+    cfgReadText
+      ? React.createElement('div', { className: 'iterate-guide' },
+          React.createElement('div', { className: 'iterate-guide-bar' },
+            React.createElement('span', {}, t('回读指令（粘贴给模型）')),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(cfgReadText, 'cfgRead') }, t('复制')),
+          ),
+          React.createElement('div', { className: 'iterate-guide-body' }, cfgReadText),
+        )
+      : null,
     cfgText
       ? React.createElement('div', { className: 'iterate-guide' },
           React.createElement('div', { className: 'iterate-guide-bar' },
-            React.createElement('span', {}, '写入指令（粘贴给模型）'),
-            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(cfgText, 'guide') }, '复制'),
+            React.createElement('span', {}, t('写入指令（粘贴给模型）')),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(cfgText, 'guide') }, t('复制')),
           ),
           React.createElement('div', { className: 'iterate-guide-body' }, cfgText),
         )
@@ -1908,8 +2062,9 @@ function SettingsPanel(_props: SlotProps) {
     showGuide
       ? React.createElement('div', { className: 'iterate-guide' },
           React.createElement('div', { className: 'iterate-guide-bar' },
-            React.createElement('span', {}, 'iterate.config.yaml 可编辑字段'),
-            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(guide, 'guide') }, '复制'),
+            React.createElement('span', {}, t('iterate.config.yaml 可编辑字段')),
+            React.createElement('span', { className: 'iterate-chip' }, t('中文（粘贴给模型的契约文案）')),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(guide, 'guide') }, t('复制')),
           ),
           React.createElement('div', { className: 'iterate-guide-body' }, guide),
         )
@@ -1919,26 +2074,27 @@ function SettingsPanel(_props: SlotProps) {
   const statusCard = React.createElement('div', { key: 'status', className: 'iterate-scard' },
     React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
-        React.createElement('div', { className: 'iterate-settings-title' }, '状态概览'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '查看运行时产物布局与清理指引。iterate_status / iterate_history / iterate_prune 工具用于查看和管理。'),
+        React.createElement('div', { className: 'iterate-settings-title' }, t('状态概览')),
+        React.createElement('div', { className: 'iterate-settings-desc' }, t('查看运行时产物布局与清理指引。iterate_status / iterate_history / iterate_prune 工具用于查看和管理。')),
       ),
       React.createElement('div', { className: 'iterate-scard-actions' },
-        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': statusCopied ? '' : undefined, onClick: () => doCopy(statusGuide, 'status') }, statusCopied ? '已复制' : '复制指引'),
+        React.createElement('button', { className: 'iterate-btn', 'data-primary': '', 'data-copied': statusCopied ? '' : undefined, onClick: () => doCopy(statusGuide, 'status') }, statusCopied ? t('已复制') : t('复制指引')),
         // Gap #4: RUNTIME_ARTIFACTS stops being documentation-only — this
         // copies the instruction that makes the model echo those artifacts
         // into the session so the observatory panels can read them.
         React.createElement('button', {
           className: 'iterate-btn', 'data-copied': pullCopied ? '' : undefined,
           onClick: () => doCopy(buildDiskSnapshotInstruction(), 'pull'),
-        }, pullCopied ? '已复制' : '拉取磁盘快照'),
-        React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowStatus((v) => !v) }, showStatus ? '收起' : '展开'),
+        }, pullCopied ? t('已复制') : t('拉取磁盘快照')),
+        React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => setShowStatus((v) => !v) }, showStatus ? t('收起') : t('展开')),
       ),
     ),
     showStatus
       ? React.createElement('div', { className: 'iterate-guide' },
           React.createElement('div', { className: 'iterate-guide-bar' },
-            React.createElement('span', {}, '运行时布局与清理'),
-            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(statusGuide, 'status') }, '复制'),
+            React.createElement('span', {}, t('运行时布局与清理')),
+            React.createElement('span', { className: 'iterate-chip' }, t('中文（粘贴给模型的契约文案）')),
+            React.createElement('button', { className: 'iterate-btn', 'data-ghost': '', onClick: () => doCopy(statusGuide, 'status') }, t('复制')),
           ),
           React.createElement('div', { className: 'iterate-guide-body' }, statusGuide),
         )
@@ -1949,25 +2105,26 @@ function SettingsPanel(_props: SlotProps) {
     React.createElement('div', { className: 'iterate-scard-head' },
       React.createElement('div', {},
         React.createElement('div', { className: 'iterate-settings-title' }, 'iterate'),
-        React.createElement('div', { className: 'iterate-settings-desc' }, '为每次代码评审生成 Review 报告与交互式分诊视图，专注 AI 自我审查与修正。'),
+        React.createElement('div', { className: 'iterate-settings-desc' }, t('为每次代码评审生成 Review 报告与交互式分诊视图，专注 AI 自我审查与修正。')),
       ),
       React.createElement('span', { className: 'iterate-pill' },
         React.createElement('span', { className: 'iterate-pill-dot' }),
-        '就绪',
+        t('就绪'),
       ),
     ),
   )
 
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'settings', className: 'iterate-settings' },
-    React.createElement('div', { className: 'iterate-settings-title', style: { fontSize: 15, fontWeight: 700 } }, 'iterate 设置'),
+    React.createElement('div', { className: 'iterate-settings-title', style: { fontSize: 15, fontWeight: 700 } }, t('iterate 设置')),
     banner,
     copyError
       ? React.createElement('div', { key: 'copy-err', className: 'iterate-scard', role: 'alert' },
           React.createElement('div', { className: 'iterate-settings-desc' },
-            '剪贴板写入被拒绝，复制未生效——请展开对应区块手动选中文本复制。',
+            t('剪贴板写入被拒绝，复制未生效——请展开对应区块手动选中文本复制。'),
           ),
         )
       : null,
+    langCard,
     themeCard,
     dataCard,
     guideCard,
@@ -1981,19 +2138,21 @@ function SettingsPanel(_props: SlotProps) {
  *  activity stream) is first so it is the default view; F-panels follow.
  *  Gap #14: labels carry the "Fn" number used everywhere else (README,
  *  code comments, the copy instructions), so the docs and the UI line up. */
+/** Visible labels per tab, per language (module constants are evaluated once,
+ *  so they carry BOTH languages and resolve at render time). */
 const OBS_TABS = [
-  { key: 'live', label: '实时活动流', hotkey: '' },
-  { key: 'f1', label: '审查线程', hotkey: '1' },
-  { key: 'f2', label: '收敛趋势', hotkey: '2' },
-  { key: 'f3', label: '发现定位', hotkey: '3' },
-  { key: 'f4', label: '修复与回滚', hotkey: '4' },
-  { key: 'f5', label: '断点恢复', hotkey: '5' },
-  { key: 'f6', label: '运行控制台', hotkey: '6' },
-  { key: 'f7', label: '决策时间线', hotkey: '7' },
+  { key: 'live', label: { zh: '实时活动流', en: 'Live activity' }, hotkey: '' },
+  { key: 'f1', label: { zh: '审查线程', en: 'Review threads' }, hotkey: '1' },
+  { key: 'f2', label: { zh: '收敛趋势', en: 'Convergence trend' }, hotkey: '2' },
+  { key: 'f3', label: { zh: '发现定位', en: 'Finding locations' }, hotkey: '3' },
+  { key: 'f4', label: { zh: '修复与回滚', en: 'Fixes & rollback' }, hotkey: '4' },
+  { key: 'f5', label: { zh: '断点恢复', en: 'Checkpoint resume' }, hotkey: '5' },
+  { key: 'f6', label: { zh: '运行控制台', en: 'Run console' }, hotkey: '6' },
+  { key: 'f7', label: { zh: '决策时间线', en: 'Decision timeline' }, hotkey: '7' },
   // v3.0: Quality Command Center tabs
-  { key: 'f8', label: '质量门禁', hotkey: '8' },
-  { key: 'f9', label: '经验银行', hotkey: '9' },
-  { key: 'f10', label: '防御事件', hotkey: '0' },
+  { key: 'f8', label: { zh: '质量门禁', en: 'Quality gate' }, hotkey: '8' },
+  { key: 'f9', label: { zh: '经验银行', en: 'Experience bank' }, hotkey: '9' },
+  { key: 'f10', label: { zh: '防御事件', en: 'Defense events' }, hotkey: '0' },
 ] as const
 
 /** Digit → tab id. `1-9` map to F1–F9, `0` to F10, `-` back to the live feed
@@ -2007,26 +2166,31 @@ const OBS_HOTKEY_TABS: Record<string, (typeof OBS_TABS)[number]['key']> = {
 
 /** Visible label for a tab (keeps the number prefix in sync with `OBS_TABS`). */
 function obsTabLabel(t: (typeof OBS_TABS)[number]): string {
-  if (t.key === 'live') return t.label
-  return `${t.key.toUpperCase()} ${t.label}`
+  const label = t.label[getLang()]
+  if (t.key === 'live') return label
+  return `${t.key.toUpperCase()} ${label}`
 }
 
-/** Hotkey hint shown in the collapsed header, e.g. "11 页 · 1-9/0/- 切换". */
-const OBS_HOTKEY_HINT = `${String(OBS_TABS.length)} 页 · 按 1-9/0 切 Fn、- 回实时流`
+/** Hotkey hint shown in the collapsed header, e.g. "11 页 · 按 1-9/0 切 Fn、- 回实时流". */
+function obsHotkeyHint(): string {
+  return getLang() === 'en'
+    ? `${String(OBS_TABS.length)} tabs · keys 1-9/0 switch Fn, - returns to the live feed`
+    : tf(`{a0} 页 · 按 1-9/0 切 Fn、- 回实时流`, { a0: String(OBS_TABS.length) })
+}
 
-/** Live subagent activity badges: type → Chinese label + dsw token color accent. */
-const OBS_LIVE_META: Record<string, { label: string; color: string }> = {
-  read: { label: '阅读', color: 'var(--dsw-alias-brand-primary)' },
-  fix: { label: '修复', color: 'var(--dsw-alias-state-success-primary)' },
-  rollback: { label: '回滚', color: 'var(--dsw-alias-state-error-primary)' },
-  diff: { label: '差异', color: 'var(--dsw-alias-state-warn-primary)' },
-  review: { label: '审查', color: 'var(--dsw-alias-brand-primary)' },
-  triage: { label: '分流', color: 'var(--dsw-alias-state-warn-primary)' },
-  checkpoint: { label: '断点', color: 'var(--dsw-alias-brand-primary)' },
-  validate: { label: '校验', color: 'var(--dsw-alias-state-success-primary)' },
-  log: { label: '记录', color: 'var(--dsw-alias-label-secondary)' },
-  prune: { label: '清理', color: 'var(--dsw-alias-state-warn-primary)' },
-  info: { label: '信息', color: 'var(--dsw-alias-label-secondary)' },
+/** Live subagent activity badges: type → label + dsw token color accent. */
+const OBS_LIVE_META: Record<string, { label: { zh: string; en: string }; color: string }> = {
+  read: { label: { zh: '阅读', en: 'Read' }, color: 'var(--dsw-alias-brand-primary)' },
+  fix: { label: { zh: '修复', en: 'Fix' }, color: 'var(--dsw-alias-state-success-primary)' },
+  rollback: { label: { zh: '回滚', en: 'Rollback' }, color: 'var(--dsw-alias-state-error-primary)' },
+  diff: { label: { zh: '差异', en: 'Diff' }, color: 'var(--dsw-alias-state-warn-primary)' },
+  review: { label: { zh: '审查', en: 'Review' }, color: 'var(--dsw-alias-brand-primary)' },
+  triage: { label: { zh: '分流', en: 'Triage' }, color: 'var(--dsw-alias-state-warn-primary)' },
+  checkpoint: { label: { zh: '断点', en: 'Checkpoint' }, color: 'var(--dsw-alias-brand-primary)' },
+  validate: { label: { zh: '校验', en: 'Validate' }, color: 'var(--dsw-alias-state-success-primary)' },
+  log: { label: { zh: '记录', en: 'Log' }, color: 'var(--dsw-alias-label-secondary)' },
+  prune: { label: { zh: '清理', en: 'Prune' }, color: 'var(--dsw-alias-state-warn-primary)' },
+  info: { label: { zh: '信息', en: 'Info' }, color: 'var(--dsw-alias-label-secondary)' },
 }
 const OBS_LIVE_FALLBACK_COLOR = 'var(--dsw-alias-label-secondary)'
 
@@ -2097,6 +2261,9 @@ function buildObsFixInstruction(f: ObsFinding): string {
  */
 function ObservatoryPanel(props: SlotProps) {
   const session = props && props.session ? props.session : null
+  React.useEffect(() => {
+    noteSession(session)
+  }, [session])
   const manifest = latestTranscript(session)
   // v3.1+: command-center data scanned straight out of the session stream.
   const qualityGate = latestQualityGate(session)
@@ -2183,7 +2350,7 @@ function ObservatoryPanel(props: SlotProps) {
   // the one instruction that makes the model echo them into the session
   // stream, which is what every panel scans.
   const pullInstruction = buildDiskSnapshotInstruction()
-  const pullTitle = `复制拉取磁盘快照指令：让模型逐个调用 ${DISK_SNAPSHOT_SOURCES.map((s) => s.tool).join(' / ')} 并回显完整结果`
+  const pullTitle = tf(`复制拉取磁盘快照指令：让模型逐个调用 {a0} 并回显完整结果`, { a0: DISK_SNAPSHOT_SOURCES.map((s) => s.tool).join(' / ') })
 
   /** Toggle one thread; a manual toggle exits any forced all/none mode. */
   const toggleThread = (key: string) => {
@@ -2240,16 +2407,16 @@ function ObservatoryPanel(props: SlotProps) {
   if (!manifest) {
     return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'obs', className: 'iterate-obs' },
       React.createElement('div', { className: 'iterate-obs-head', 'data-closed': '' },
-        React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
-        React.createElement('span', { className: 'iterate-obs-head-meta' }, `暂无运行时观测数据 · ${OBS_HOTKEY_HINT}`),
+        React.createElement('span', { className: 'iterate-obs-title' }, t('iterate 观测台')),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`暂无运行时观测数据 · {a0}`, { a0: obsHotkeyHint() })),
         React.createElement('button', {
           className: 'iterate-btn', 'data-copied': copiedKey === 'pull-snapshot' ? '' : undefined,
           onClick: (e: React.MouseEvent<HTMLButtonElement>) => {
             e.stopPropagation()
             copyInstruction('pull-snapshot', pullInstruction)
           },
-          title: '复制拉取磁盘快照指令：磁盘上可能已有历史产物，回显进会话后观测台即可填充',
-        }, copiedKey === 'pull-snapshot' ? '已复制' : '拉取磁盘快照'),
+          title: t('复制拉取磁盘快照指令：磁盘上可能已有历史产物，回显进会话后观测台即可填充'),
+        }, copiedKey === 'pull-snapshot' ? t('已复制') : t('拉取磁盘快照')),
       ),
     )
   }
@@ -2275,49 +2442,49 @@ function ObservatoryPanel(props: SlotProps) {
   const renderThreads = () => {
     const rounds = manifest.rounds || []
     if (rounds.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无审查线程')
+      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无审查线程'))
     }
     return React.createElement('div', {},
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8, flexWrap: 'wrap' } },
-        React.createElement('b', {}, '审查线程'),
-        React.createElement('button', { className: 'iterate-btn', onClick: () => setAllThreads('all'), title: '展开全部线程' }, '全部展开'),
-        React.createElement('button', { className: 'iterate-btn', onClick: () => setAllThreads('none'), title: '收起全部线程' }, '全部收起'),
+        React.createElement('b', {}, t('审查线程')),
+        React.createElement('button', { className: 'iterate-btn', onClick: () => setAllThreads('all'), title: t('展开全部线程') }, t('全部展开')),
+        React.createElement('button', { className: 'iterate-btn', onClick: () => setAllThreads('none'), title: t('收起全部线程') }, t('全部收起')),
         React.createElement('span', { className: 'iterate-filter-count' },
-          `${threadMode === 'all' ? '全部展开' : threadMode === 'none' ? '全部收起' : '自由切换'} · ${rounds.length} 轮`,
+          tf(`{a0} · {a1} 轮`, { a0: threadMode === 'all' ? t('全部展开') : threadMode === 'none' ? t('全部收起') : t('自由切换'), a1: rounds.length }),
         ),
       ),
       ...rounds.map((r, ri) => {
       const threads = r.threads || []
       const fCount = threads.reduce((sum, t) => sum + (t.findings ? t.findings.length : 0), 0)
       const threadBlocks = threads.length === 0
-        ? [React.createElement('div', { key: 'none', className: 'iterate-obs-empty' }, '本轮无线程')]
-        : threads.map((t, ti) => {
+        ? [React.createElement('div', { key: 'none', className: 'iterate-obs-empty' }, t('本轮无线程'))]
+        : threads.map((th, ti) => {
             const key = `${ri}-${ti}`
             const expanded = isThreadExpanded(key)
-            const dim = t.dimension || '未命名维度'
-            const tFindings = t.findings || []
-            const files = t.readFiles || []
-            const msgs = t.messages || []
+            const dim = th.dimension || t('未命名维度')
+            const tFindings = th.findings || []
+            const files = th.readFiles || []
+            const msgs = th.messages || []
             return React.createElement('div', { key, className: 'iterate-obs-block' },
-              React.createElement('div', { className: 'iterate-obs-block-head', 'data-click': '', onClick: () => toggleThread(key), title: expanded ? '收起线程' : '展开线程' },
+              React.createElement('div', { className: 'iterate-obs-block-head', 'data-click': '', onClick: () => toggleThread(key), title: expanded ? t('收起线程') : t('展开线程') },
                 React.createElement('span', {}, expanded ? '−' : '+'),
                 React.createElement('b', {}, dim),
-                React.createElement('span', { className: 'iterate-obs-chip' }, `attempt ${typeof t.attempt === 'number' ? t.attempt : '?'}`),
+                React.createElement('span', { className: 'iterate-obs-chip' }, `attempt ${typeof th.attempt === 'number' ? th.attempt : '?'}`),
                 React.createElement('span', { className: 'iterate-obs-chip' }, `${tFindings.length} findings`),
               ),
               expanded
                 ? React.createElement('div', { className: 'iterate-obs-block-body' },
                     React.createElement('div', { className: 'iterate-obs-bar' },
-                      React.createElement('b', {}, '叙述'),
-                      React.createElement('span', { className: 'iterate-obs-head-meta' }, `${msgs.length} 条`),
+                      React.createElement('b', {}, t('叙述')),
+                      React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`{a0} 条`, { a0: msgs.length })),
                     ),
                     ...(msgs.length === 0
-                      ? [React.createElement('div', { key: 'msg-none', className: 'iterate-obs-empty' }, '无线索叙述')]
+                      ? [React.createElement('div', { key: 'msg-none', className: 'iterate-obs-empty' }, t('无线索叙述'))]
                       : msgs.map((m, mi) => React.createElement('div', { key: mi, className: 'iterate-obs-msg' }, String(m)))),
                     ...(files.length > 0
                       ? [
                           React.createElement('div', { key: 'files-h', className: 'iterate-obs-bar', style: { marginTop: 6 } },
-                            React.createElement('b', {}, '读取文件'),
+                            React.createElement('b', {}, t('读取文件')),
                           ),
                           ...files.map((f, fi) =>
                             React.createElement('div', { key: `f${fi}`, className: 'iterate-obs-file' }, String(f)),
@@ -2325,10 +2492,10 @@ function ObservatoryPanel(props: SlotProps) {
                         ]
                       : []),
                     React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
-                      React.createElement('b', {}, '发现'),
+                      React.createElement('b', {}, t('发现')),
                     ),
                     ...(tFindings.length === 0
-                      ? [React.createElement('div', { key: 'finding-none', className: 'iterate-obs-empty' }, '本线程无发现')]
+                      ? [React.createElement('div', { key: 'finding-none', className: 'iterate-obs-empty' }, t('本线程无发现'))]
                       : tFindings.map((f, fi) => threadFindingPill(f, `tf${fi}`))),
                   )
                 : null,
@@ -2337,7 +2504,7 @@ function ObservatoryPanel(props: SlotProps) {
       return React.createElement('div', { key: ri, className: 'iterate-obs-block' },
         React.createElement('div', { className: 'iterate-obs-block-head' },
           React.createElement('b', {}, `Round ${typeof r.round === 'number' ? r.round : ri + 1}`),
-          React.createElement('span', { className: 'iterate-obs-chip' }, `${threads.length} 线程`),
+          React.createElement('span', { className: 'iterate-obs-chip' }, tf(`{a0} 线程`, { a0: threads.length })),
           React.createElement('span', { className: 'iterate-obs-head-meta' }, `${fCount} findings`),
         ),
         React.createElement('div', { className: 'iterate-obs-block-body' }, ...threadBlocks),
@@ -2349,7 +2516,7 @@ function ObservatoryPanel(props: SlotProps) {
   const renderTrend = () => {
     const conv = manifest.convergence || []
     if (conv.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无收敛数据')
+      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无收敛数据'))
     }
     const points = conv.map((n, i) => ({ round: i + 1, count: n }))
     // Gap #13 (step ①): single-session cross-round comparison. One row per
@@ -2364,11 +2531,11 @@ function ObservatoryPanel(props: SlotProps) {
       : React.createElement('table', { className: 'iterate-obs-table' },
           React.createElement('thead', {},
             React.createElement('tr', {},
-              React.createElement('th', {}, '轮次'),
-              React.createElement('th', {}, '发现'),
-              React.createElement('th', {}, '已修复'),
-              React.createElement('th', {}, '严重度分布'),
-              React.createElement('th', {}, '验证'),
+              React.createElement('th', {}, t('轮次')),
+              React.createElement('th', {}, t('发现')),
+              React.createElement('th', {}, t('已修复')),
+              React.createElement('th', {}, t('严重度分布')),
+              React.createElement('th', {}, t('验证')),
             ),
           ),
           React.createElement('tbody', {},
@@ -2379,7 +2546,7 @@ function ObservatoryPanel(props: SlotProps) {
               const anyFailed = row.validations.some((v) => v.allowed !== true)
               const valText = row.validations.length === 0
                 ? '—'
-                : `${row.validations.filter((v) => v.allowed === true).length}/${row.validations.length} 通过${anyFailed ? '（含失败）' : ''}`
+                : tf(`{a0}/{a1} 通过{a2}`, { a0: row.validations.filter((v) => v.allowed === true).length, a1: row.validations.length, a2: anyFailed ? t('（含失败）') : '' })
               return React.createElement('tr', { key: `cmp-${row.round}` },
                 React.createElement('td', {}, `Round ${row.round}`),
                 React.createElement('td', {}, String(row.findings)),
@@ -2399,14 +2566,14 @@ function ObservatoryPanel(props: SlotProps) {
     return React.createElement('div', {},
       React.createElement(TrendChart, { points }),
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
-        `各轮发现数量：${conv.join(' → ')}${typeof manifest.round === 'number' ? ` · 当前 Round ${manifest.round}` : ''}`,
+        tf(`各轮发现数量：{a0}{a1}`, { a0: conv.join(' → '), a1: typeof manifest.round === 'number' ? tf(` · 当前 Round {a0}`, { a0: manifest.round }) : '' }),
       ),
       comparisonTable
         ? React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
             React.createElement('div', { className: 'iterate-obs-block-head' },
-              React.createElement('span', {}, '跨轮对比（本会话）'),
+              React.createElement('span', {}, t('跨轮对比（本会话）')),
               React.createElement('span', { className: 'iterate-obs-head-meta' },
-                '跨会话对比：本表只覆盖当前会话；点「拉取磁盘快照」让模型回显 iterate_history，再用「导出 JSON」并排比较两次运行',
+                t('跨会话对比：本表只覆盖当前会话；点「拉取磁盘快照」让模型回显 iterate_history，再用「导出 JSON」并排比较两次运行'),
               ),
             ),
             React.createElement('div', { className: 'iterate-obs-block-body' }, comparisonTable),
@@ -2419,7 +2586,7 @@ function ObservatoryPanel(props: SlotProps) {
   const renderFindings = () => {
     const findings = manifest.findings || []
     if (findings.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无发现')
+      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无发现'))
     }
     const opts = buildFilterOptions(findings as unknown as Record<string, unknown>[])
     const { filtered } = filterFindingsWithIndices(findings as unknown as Record<string, unknown>[], f3Filter)
@@ -2433,26 +2600,26 @@ function ObservatoryPanel(props: SlotProps) {
       }))
     }
     const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8, flexWrap: 'wrap' } },
-      React.createElement('b', {}, '发现'),
+      React.createElement('b', {}, t('发现')),
       ...opts.severities.map((s) =>
         React.createElement('button', {
           key: `sev-${s.value}`,
           className: 'iterate-filter-chip',
           'data-active': f3Filter.severities.includes(s.value) ? '' : undefined,
-          title: `${s.value}（${s.count} 项）`,
+          title: tf(`{a0}（{a1} 项）`, { a0: s.value, a1: s.count }),
           onClick: () => toggleSeverity(s.value),
         }, `${s.value} ${s.count}`),
       ),
       React.createElement('select', {
         className: 'iterate-filter-select',
         value: f3Filter.dimensions[0] || '',
-        'aria-label': '按维度筛选',
+        'aria-label': t('按维度筛选'),
         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
           const v = e.target.value
           setF3Filter((prev) => ({ ...prev, dimensions: v ? [v] : [] }))
         },
       },
-        React.createElement('option', { value: '' }, '全部维度'),
+        React.createElement('option', { value: '' }, t('全部维度')),
         ...opts.dimensions.map((d) =>
           React.createElement('option', { key: d.value, value: d.value }, `${d.value} (${d.count})`),
         ),
@@ -2460,8 +2627,8 @@ function ObservatoryPanel(props: SlotProps) {
       React.createElement('input', {
         className: 'iterate-filter-search',
         type: 'search',
-        placeholder: '搜索发现…',
-        'aria-label': '搜索发现',
+        placeholder: t('搜索发现…'),
+        'aria-label': t('搜索发现'),
         value: f3Filter.search,
         onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
           setF3Filter((prev) => ({ ...prev, search: e.target.value })),
@@ -2470,8 +2637,8 @@ function ObservatoryPanel(props: SlotProps) {
         ? React.createElement('button', {
             className: 'iterate-filter-clear',
             onClick: () => setF3Filter({ severities: [], dimensions: [], search: '' }),
-            title: '清除全部筛选',
-          }, '清除筛选')
+            title: t('清除全部筛选'),
+          }, t('清除筛选'))
         : null,
       React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${findings.length}`),
     )
@@ -2494,7 +2661,7 @@ function ObservatoryPanel(props: SlotProps) {
           React.createElement('span', { className: 'iterate-obs-file' }, loc),
           React.createElement('span', {}, String(finding.dimension || '')),
           finding.acknowledged === true
-            ? React.createElement('span', { className: 'iterate-obs-chip' }, '已确认')
+            ? React.createElement('span', { className: 'iterate-obs-chip' }, t('已确认'))
             : null,
         ),
         React.createElement('div', { className: 'iterate-obs-block-body' },
@@ -2503,18 +2670,18 @@ function ObservatoryPanel(props: SlotProps) {
             React.createElement('button', {
               className: 'iterate-btn', 'data-copied': copiedKey === `${k}-fix` ? '' : undefined,
               onClick: () => copyInstruction(`${k}-fix`, String(finding.suggested_fix || '')),
-              title: '复制该 finding 的建议修复文本',
-            }, copiedKey === `${k}-fix` ? '已复制' : '复制 suggested_fix'),
+              title: t('复制该 finding 的建议修复文本'),
+            }, copiedKey === `${k}-fix` ? t('已复制') : t('复制 suggested_fix')),
             React.createElement('button', {
               className: 'iterate-btn', 'data-copied': copiedKey === `${k}-known` ? '' : undefined,
               onClick: () => copyInstruction(`${k}-known`, knownInstruction),
-              title: '复制 iterate_triage 指令文本（标记为 known_intentional）',
-            }, copiedKey === `${k}-known` ? '已复制' : 'known_intentional'),
+              title: t('复制 iterate_triage 指令文本（标记为 known_intentional）'),
+            }, copiedKey === `${k}-known` ? t('已复制') : 'known_intentional'),
             React.createElement('button', {
               className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === `${k}-repair` ? '' : undefined,
               onClick: () => copyInstruction(`${k}-repair`, fixInstruction),
-              title: '复制 iterate_fix 指令文本',
-            }, copiedKey === `${k}-repair` ? '已复制' : '复制修复指令'),
+              title: t('复制 iterate_fix 指令文本'),
+            }, copiedKey === `${k}-repair` ? t('已复制') : t('复制修复指令')),
           ),
         ),
       )
@@ -2522,7 +2689,7 @@ function ObservatoryPanel(props: SlotProps) {
     if (filtered.length === 0) {
       return React.createElement('div', {},
         filterBar,
-        React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的发现'),
+        React.createElement('div', { className: 'iterate-obs-empty' }, t('无匹配的发现')),
       )
     }
     return React.createElement('div', {}, filterBar, ...findingBlocks)
@@ -2532,7 +2699,7 @@ function ObservatoryPanel(props: SlotProps) {
   const renderFixes = () => {
     const fixes = manifest.fixes || []
     if (fixes.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无修复记录')
+      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无修复记录'))
     }
     return React.createElement('div', {}, ...fixes.map((f, i) => {
       const k = `f4-${i}`
@@ -2544,7 +2711,7 @@ function ObservatoryPanel(props: SlotProps) {
         React.createElement('div', { className: 'iterate-obs-block-head' },
           React.createElement('b', {}, id),
           React.createElement('span', { className: 'iterate-obs-file' }, String(f.file || '?')),
-          React.createElement('span', { className: 'iterate-obs-chip' }, f.success === true ? '成功' : '失败'),
+          React.createElement('span', { className: 'iterate-obs-chip' }, f.success === true ? t('成功') : t('失败')),
           typeof f.round === 'number'
             ? React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${f.round}`)
             : null,
@@ -2557,8 +2724,8 @@ function ObservatoryPanel(props: SlotProps) {
             React.createElement('button', {
               className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === `${k}-rb` ? '' : undefined,
               onClick: () => copyInstruction(`${k}-rb`, rollbackText),
-              title: '复制 iterate_rollback 指令文本',
-            }, copiedKey === `${k}-rb` ? '已复制' : '回滚'),
+              title: t('复制 iterate_rollback 指令文本'),
+            }, copiedKey === `${k}-rb` ? t('已复制') : t('回滚')),
           ),
         ),
       )
@@ -2570,7 +2737,7 @@ function ObservatoryPanel(props: SlotProps) {
     const cp = manifest.checkpoint
     if (!cp) {
       return React.createElement('div', { className: 'iterate-obs-empty' },
-        diskEmptyStateText(toolCalledInSession(session, 'iterate_transcript'), '断点'),
+        diskEmptyStateText(toolCalledInSession(session, 'iterate_transcript'), t('断点'), getLang()),
       )
     }
     // Gap #10: `resume` accepts ONLY `operation` — `mode` / `round` /
@@ -2586,7 +2753,7 @@ function ObservatoryPanel(props: SlotProps) {
       React.createElement('span', { className: 'iterate-obs-chip' }, `${label} ${String(value ?? '?')}`)
     return React.createElement('div', { className: 'iterate-obs-block' },
       React.createElement('div', { className: 'iterate-obs-block-head' },
-        React.createElement('b', {}, '断点'),
+        React.createElement('b', {}, t('断点')),
         React.createElement('span', { className: 'iterate-obs-head-meta' }, String(cp.updatedAt || '')),
       ),
       React.createElement('div', { className: 'iterate-obs-block-body' },
@@ -2601,13 +2768,13 @@ function ObservatoryPanel(props: SlotProps) {
           React.createElement('button', {
             className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'cp-resume' ? '' : undefined,
             onClick: () => copyInstruction('cp-resume', resumeText),
-            title: '复制 iterate_checkpoint resume 指令文本（加载断点并计数一次恢复）',
-          }, copiedKey === 'cp-resume' ? '已复制' : '复制恢复指令'),
+            title: t('复制 iterate_checkpoint resume 指令文本（加载断点并计数一次恢复）'),
+          }, copiedKey === 'cp-resume' ? t('已复制') : t('复制恢复指令')),
           React.createElement('button', {
             className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'cp-clear' ? '' : undefined,
             onClick: () => copyInstruction('cp-clear', clearText),
-            title: '复制 iterate_checkpoint clear 指令文本（清除当前断点，供重新开始）',
-          }, copiedKey === 'cp-clear' ? '已复制' : '清除断点'),
+            title: t('复制 iterate_checkpoint clear 指令文本（清除当前断点，供重新开始）'),
+          }, copiedKey === 'cp-clear' ? t('已复制') : t('清除断点')),
         ),
       ),
     )
@@ -2616,16 +2783,16 @@ function ObservatoryPanel(props: SlotProps) {
   // ── F6: run console (status / approval / nudge draft) ──────────────────
   const renderConsole = () => {
     const approval = manifest.approval || { policy: 'ask' }
-    const policyLabelMap: Record<string, string> = { ask: '询问用户', deny: '拒绝', allow: '直接执行' }
+    const policyLabelMap: Record<string, string> = { ask: t('询问用户'), deny: t('拒绝'), allow: t('直接执行') }
     const policyLabel = policyLabelMap[String(approval.policy || 'ask')] || String(approval.policy || 'ask')
     const nudge = manifest.nudge || null
     const present = Boolean(nudge && nudge.text)
     const activeNudgeText = nudge && nudge.text ? nudge.text : ''
-    const nudgeInstruction = `请调用 \`iterate_transcript\` 写入 nudge 指令：\n\n\`\`\`json\n${JSON.stringify({ operation: 'nudge', text: nudgeText }, null, 2)}\n\`\`\``
+    const nudgeInstruction = tf(`请调用 \`iterate_transcript\` 写入 nudge 指令：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'nudge', text: nudgeText }, null, 2) })
     // Clearing the PERSISTED nudge (as opposed to the draft) requires
     // text:null. Copied as a paste-able instruction, mirroring the panel's
     // copy-to-command pattern — it cannot be cleared from the client directly.
-    const activeClearInstruction = `请调用 \`iterate_transcript\` 清除当前 nudge：\n\n\`\`\`json\n${JSON.stringify({ operation: 'nudge', text: null }, null, 2)}\n\`\`\``
+    const activeClearInstruction = tf(`请调用 \`iterate_transcript\` 清除当前 nudge：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'nudge', text: null }, null, 2) })
     // Gap #6: per-round validation rows (command / exitCode / allowed) live on
     // the manifest; when the run stopped on a validation failure the failing
     // command is called out explicitly instead of being buried in a list.
@@ -2646,54 +2813,54 @@ function ObservatoryPanel(props: SlotProps) {
         React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${typeof v.round === 'number' ? v.round : '?'}`),
         React.createElement('code', { className: 'iterate-obs-mono' }, String(v.command || '')),
         React.createElement('span', { className: 'iterate-obs-chip', 'data-status': allowed ? 'pass' : 'fail' },
-          allowed ? '通过' : '失败',
+          allowed ? t('通过') : t('失败'),
         ),
         React.createElement('span', { className: 'iterate-obs-head-meta' }, exit),
-        highlight ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, '导致中止') : null,
+        highlight ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, t('导致中止')) : null,
       )
     })
     const validationsBlock = React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
       React.createElement('div', { className: 'iterate-obs-block-head' },
-        React.createElement('span', {}, '验证结果'),
+        React.createElement('span', {}, t('验证结果')),
         validations.length === 0
-          ? React.createElement('span', { className: 'iterate-obs-head-meta' }, '本轮尚无验证记录')
-          : React.createElement('span', { className: 'iterate-obs-head-meta' }, `${validations.length} 条命令`),
+          ? React.createElement('span', { className: 'iterate-obs-head-meta' }, t('本轮尚无验证记录'))
+          : React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`{a0} 条命令`, { a0: validations.length })),
         abortedByValidation
-          ? React.createElement('span', { className: 'iterate-obs-badge', 'data-status': 'fail' }, '因验证失败中止')
+          ? React.createElement('span', { className: 'iterate-obs-badge', 'data-status': 'fail' }, t('因验证失败中止'))
           : null,
       ),
       React.createElement('div', { className: 'iterate-obs-block-body' },
         validations.length === 0
           ? React.createElement('div', { className: 'iterate-obs-empty' },
-              '尚未拉取验证结果：数据在磁盘 transcript 里，点「拉取磁盘快照」复制指令发回会话即可回填。',
+              t('尚未拉取验证结果：数据在磁盘 transcript 里，点「拉取磁盘快照」复制指令发回会话即可回填。'),
             )
           : React.createElement(React.Fragment, null, ...validationRows),
       ),
     )
     return React.createElement('div', { className: 'iterate-obs-block' },
       React.createElement('div', { className: 'iterate-obs-block-head' },
-        React.createElement('span', {}, '运行控制台'),
+        React.createElement('span', {}, t('运行控制台')),
         React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, runStatusText(live, manifest)),
-        React.createElement('span', { className: 'iterate-obs-head-meta' }, `批准策略：${policyLabel}`),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`批准策略：{a0}`, { a0: policyLabel })),
       ),
       React.createElement('div', { className: 'iterate-obs-block-body' },
         present
           ? React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 6 } },
-              React.createElement('b', {}, '当前 nudge'),
+              React.createElement('b', {}, t('当前 nudge')),
               React.createElement('span', { className: 'iterate-obs-msg' }, activeNudgeText),
               React.createElement('button', {
                 className: 'iterate-btn', 'data-copied': copiedKey === 'nudge-clear' ? '' : undefined,
                 onClick: () => copyInstruction('nudge-clear', activeClearInstruction),
-                title: '复制清除 nudge 指令（写 text:null），在运行控制台提示清除已持久化的 nudge',
-              }, copiedKey === 'nudge-clear' ? '已复制清除指令' : '复制清除指令'),
+                title: t('复制清除 nudge 指令（写 text:null），在运行控制台提示清除已持久化的 nudge'),
+              }, copiedKey === 'nudge-clear' ? t('已复制清除指令') : t('复制清除指令')),
             )
           : null,
         React.createElement('textarea', {
           className: 'iterate-obs-input iterate-obs-mono',
           rows: 3,
-          placeholder: '起草一条 nudge 方向指令…',
+          placeholder: t('起草一条 nudge 方向指令…'),
           value: nudgeText,
-          'aria-label': 'nudge 草稿',
+          'aria-label': t('nudge 草稿'),
           onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setNudgeText(e.target.value),
         }),
         React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
@@ -2701,8 +2868,8 @@ function ObservatoryPanel(props: SlotProps) {
             className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'nudge' ? '' : undefined,
             disabled: !nudgeText,
             onClick: () => copyInstruction('nudge', nudgeInstruction),
-            title: '复制 iterate_transcript nudge 指令文本',
-          }, copiedKey === 'nudge' ? '已复制' : '复制 nudge 指令'),
+            title: t('复制 iterate_transcript nudge 指令文本'),
+          }, copiedKey === 'nudge' ? t('已复制') : t('复制 nudge 指令')),
         ),
         validationsBlock,
       ),
@@ -2713,7 +2880,7 @@ function ObservatoryPanel(props: SlotProps) {
   const renderTimeline = () => {
     const entries = manifest.timeline || []
     if (entries.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无时间线条目')
+      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无时间线条目'))
     }
     const types = Array.from(new Set(entries.map((t) => String(t.type || 'unknown')).filter(Boolean))).sort()
     const rounds = Array.from(
@@ -2749,30 +2916,30 @@ function ObservatoryPanel(props: SlotProps) {
       )
     })
     const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-      React.createElement('b', {}, '时间线'),
+      React.createElement('b', {}, t('时间线')),
       React.createElement('select', {
         className: 'iterate-filter-select',
         value: timelineType,
-        'aria-label': '按时间线类型筛选',
+        'aria-label': t('按时间线类型筛选'),
         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setTimelineType(e.target.value),
       },
-        React.createElement('option', { value: '' }, '全部类型'),
+        React.createElement('option', { value: '' }, t('全部类型')),
         ...types.map((t) => React.createElement('option', { key: t, value: t }, t)),
       ),
       React.createElement('select', {
         className: 'iterate-filter-select',
         value: timelineRound,
-        'aria-label': '按轮次筛选',
+        'aria-label': t('按轮次筛选'),
         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setTimelineRound(e.target.value),
       },
-        React.createElement('option', { value: '' }, '全部轮次'),
+        React.createElement('option', { value: '' }, t('全部轮次')),
         ...rounds.map((r) => React.createElement('option', { key: r, value: r }, `Round ${r}`)),
       ),
       React.createElement('input', {
         className: 'iterate-filter-search',
         type: 'search',
-        placeholder: '搜索时间线…',
-        'aria-label': '搜索时间线',
+        placeholder: t('搜索时间线…'),
+        'aria-label': t('搜索时间线'),
         value: timelineSearch,
         onChange: (e: React.ChangeEvent<HTMLInputElement>) => setTimelineSearch(e.target.value),
       }),
@@ -2780,15 +2947,15 @@ function ObservatoryPanel(props: SlotProps) {
         ? React.createElement('button', {
             className: 'iterate-filter-clear',
             onClick: clearTimelineFilter,
-            title: '清除全部筛选',
-          }, '清除')
+            title: t('清除全部筛选'),
+          }, t('清除'))
         : null,
       React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${entries.length}`),
     )
     if (rows.length === 0) {
       return React.createElement('div', {},
         filterBar,
-        React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的时间线条目'),
+        React.createElement('div', { className: 'iterate-obs-empty' }, t('无匹配的时间线条目')),
       )
     }
     return React.createElement('div', {}, filterBar, ...rows)
@@ -2815,24 +2982,24 @@ function ObservatoryPanel(props: SlotProps) {
     const pulled = toolCalledInSession(session, 'iterate_quality_gate')
 
     const headerBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-      React.createElement('b', {}, '质量门禁'),
+      React.createElement('b', {}, t('质量门禁')),
       React.createElement('button', {
         className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'qgate' ? '' : undefined,
         onClick: () => copyInstruction('qgate', gateInstruction),
-        title: '复制 iterate_quality_gate 查询指令（含 JSON 参数）',
-      }, copiedKey === 'qgate' ? '已复制' : '查询门禁'),
+        title: t('复制 iterate_quality_gate 查询指令（含 JSON 参数）'),
+      }, copiedKey === 'qgate' ? t('已复制') : t('查询门禁')),
       React.createElement('button', {
         className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'qgate-clear' ? '' : undefined,
         onClick: () => copyInstruction('qgate-clear', gateClearInstruction),
-        title: '复制 iterate_quality_gate clear 指令文本（重置陈旧的 FAIL 证书）',
-      }, copiedKey === 'qgate-clear' ? '已复制' : '清除门禁'),
+        title: t('复制 iterate_quality_gate clear 指令文本（重置陈旧的 FAIL 证书）'),
+      }, copiedKey === 'qgate-clear' ? t('已复制') : t('清除门禁')),
       // Gap #4: the browser cannot read `.iterate/` directly — one click
       // copies the pull instruction that makes the model echo it into the stream.
       React.createElement('button', {
         className: 'iterate-btn', 'data-copied': copiedKey === 'disk-snapshot' ? '' : undefined,
         onClick: () => copyInstruction('disk-snapshot', pullInstruction),
-        title: '复制拉取磁盘快照指令：让模型回显 .iterate/ 下的门禁、经验、防御事件与 transcript',
-      }, copiedKey === 'disk-snapshot' ? '已复制' : '拉取磁盘快照'),
+        title: t('复制拉取磁盘快照指令：让模型回显 .iterate/ 下的门禁、经验、防御事件与 transcript'),
+      }, copiedKey === 'disk-snapshot' ? t('已复制') : t('拉取磁盘快照')),
     )
 
     if (!hasGate) {
@@ -2840,29 +3007,29 @@ function ObservatoryPanel(props: SlotProps) {
         headerBar,
         React.createElement('div', { className: 'iterate-obs-block' },
           React.createElement('div', { className: 'iterate-obs-block-head' },
-            React.createElement('span', {}, '质量门禁视图'),
+            React.createElement('span', {}, t('质量门禁视图')),
             React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
           ),
           React.createElement('div', { className: 'iterate-obs-block-body' },
             React.createElement('div', { className: 'iterate-obs-msg' },
               // Gap #4: distinguish "we pulled it and it is empty" from "we
               // never asked the model to read the disk".
-              diskEmptyStateText(pulled, '质量门禁证书'),
+              diskEmptyStateText(pulled, t('质量门禁证书'), getLang()),
             ),
             React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } },
-              '质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。',
+              t('质量门禁显示各维度收敛度、验证通过率和整体 PASS/FAIL 状态。'),
             ),
             React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
               React.createElement('button', {
                 className: 'iterate-btn', 'data-copied': copiedKey === 'qgate-instr' ? '' : undefined,
                 onClick: () => copyInstruction('qgate-instr', gateInstruction),
-                title: '复制查询指令',
-              }, copiedKey === 'qgate-instr' ? '已复制' : '复制查询指令'),
+                title: t('复制查询指令'),
+              }, copiedKey === 'qgate-instr' ? t('已复制') : t('复制查询指令')),
               React.createElement('button', {
                 className: 'iterate-btn', 'data-copied': copiedKey === 'disk-snapshot-2' ? '' : undefined,
                 onClick: () => copyInstruction('disk-snapshot-2', pullInstruction),
-                title: '复制拉取磁盘快照指令',
-              }, copiedKey === 'disk-snapshot-2' ? '已复制' : '拉取磁盘快照'),
+                title: t('复制拉取磁盘快照指令'),
+              }, copiedKey === 'disk-snapshot-2' ? t('已复制') : t('拉取磁盘快照')),
             ),
           ),
         ),
@@ -2875,7 +3042,7 @@ function ObservatoryPanel(props: SlotProps) {
         React.createElement('div', { className: 'iterate-obs-block-head' },
           React.createElement('span', { className: 'iterate-gate', 'data-status': status }, statusLabel),
           React.createElement('span', { className: 'iterate-obs-head-meta' },
-            `整体评分 ${num(gate && gate.overallScore)} · 验证 ${num(gate && gate.passedChecks)}/${num(gate && gate.totalChecks)} · 通过率 ${num(gate && gate.verificationPassRate)}%`,
+            tf(`整体评分 {a0} · 验证 {a1}/{a2} · 通过率 {a3}%`, { a0: num(gate && gate.overallScore), a1: num(gate && gate.passedChecks), a2: num(gate && gate.totalChecks), a3: num(gate && gate.verificationPassRate) }),
           ),
         ),
         React.createElement('div', { className: 'iterate-obs-block-body' },
@@ -2883,7 +3050,7 @@ function ObservatoryPanel(props: SlotProps) {
             ? React.createElement('div', { className: 'iterate-obs-bar', style: { flexWrap: 'wrap', gap: 6 } },
                 ...dims.map((d, i) =>
                   React.createElement('span', { key: `gdim-${i}`, className: 'iterate-obs-chip' },
-                    `${String(d.dimension || '?')} · 收敛 ${num(d.convergenceRate)}% · 评分 ${num(d.score)}`,
+                    tf(`{a0} · 收敛 {a1}% · 评分 {a2}`, { a0: String(d.dimension || '?'), a1: num(d.convergenceRate), a2: num(d.score) }),
                   ),
                 ),
               )
@@ -2900,12 +3067,12 @@ function ObservatoryPanel(props: SlotProps) {
                     style: { width: `${fill}%` },
                   }),
                 ),
-                React.createElement('span', {}, `评分 ${num(d.score)} · 发现 ${num(d.findingsCount)} · 已修复 ${num(d.fixedCount)}`),
+                React.createElement('span', {}, tf(`评分 {a0} · 发现 {a1} · 已修复 {a2}`, { a0: num(d.score), a1: num(d.findingsCount), a2: num(d.fixedCount) })),
               )
             }),
           ),
           gate && gate.failReason
-            ? React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } }, `失败原因：${String(gate.failReason)}`)
+            ? React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } }, tf(`失败原因：{a0}`, { a0: String(gate.failReason) }))
             : null,
         ),
       ),
@@ -2918,7 +3085,7 @@ function ObservatoryPanel(props: SlotProps) {
   // (list all / search / adopt one entry).
   const renderExperienceBank = () => {
     const expInstruction = expSearch
-      ? `请调用 \`iterate_experience\` 搜索经验：\n\n\`\`\`json\n${JSON.stringify({ operation: 'search', query: expSearch }, null, 2)}\n\`\`\``
+      ? tf(`请调用 \`iterate_experience\` 搜索经验：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'search', query: expSearch }, null, 2) })
       : buildExperienceListInstruction()
 
     const expEntries = experienceBank && experienceBank.entries ? experienceBank.entries : []
@@ -2933,12 +3100,12 @@ function ObservatoryPanel(props: SlotProps) {
     const pulled = toolCalledInSession(session, 'iterate_experience')
 
     const resultRows = visible.map((e, i) => {
-      const adoptInstruction = `请调用 \`iterate_experience\` 采纳经验并应用已验证修法：\n\n\`\`\`json\n${JSON.stringify({ operation: 'get', id: e.id }, null, 2)}\n\`\`\``
+      const adoptInstruction = tf(`请调用 \`iterate_experience\` 采纳经验并应用已验证修法：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'get', id: e.id }, null, 2) })
       return React.createElement('div', { key: `exp-${i}`, className: 'iterate-obs-block' },
         React.createElement('div', { className: 'iterate-obs-block-head' },
           React.createElement('span', { className: 'iterate-obs-chip' }, String(e.dimension || '')),
           React.createElement('span', {}, String(e.pattern || '?')),
-          React.createElement('span', { className: 'iterate-exp-hit' }, `命中 ${e.hitCount ?? 0} 次`),
+          React.createElement('span', { className: 'iterate-exp-hit' }, tf(`命中 {a0} 次`, { a0: e.hitCount ?? 0 })),
         ),
         React.createElement('div', { className: 'iterate-obs-block-body' },
           React.createElement('div', { className: 'iterate-obs-msg' }, String(e.description || '')),
@@ -2947,8 +3114,8 @@ function ObservatoryPanel(props: SlotProps) {
               ? React.createElement('button', {
                   className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === `exp-adopt-${i}` ? '' : undefined,
                   onClick: () => copyInstruction(`exp-adopt-${i}`, adoptInstruction),
-                  title: '复制采纳指令（查询该经验并应用到当前上下文）',
-                }, copiedKey === `exp-adopt-${i}` ? '已复制' : '采纳')
+                  title: t('复制采纳指令（查询该经验并应用到当前上下文）'),
+                }, copiedKey === `exp-adopt-${i}` ? t('已复制') : t('采纳'))
               : null,
           ),
         ),
@@ -2957,25 +3124,25 @@ function ObservatoryPanel(props: SlotProps) {
 
     return React.createElement('div', {},
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-        React.createElement('b', {}, '经验银行'),
-        React.createElement('span', { className: 'iterate-obs-head-meta' }, `会话内 ${expEntries.length} 条`),
+        React.createElement('b', {}, t('经验银行')),
+        React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`会话内 {a0} 条`, { a0: expEntries.length })),
         React.createElement('button', {
           className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'exp-list' ? '' : undefined,
           onClick: () => copyInstruction('exp-list', buildExperienceListInstruction()),
-          title: '复制列出经验指令（含 JSON 参数）',
-        }, copiedKey === 'exp-list' ? '已复制' : '列出经验'),
+          title: t('复制列出经验指令（含 JSON 参数）'),
+        }, copiedKey === 'exp-list' ? t('已复制') : t('列出经验')),
         React.createElement('button', {
           className: 'iterate-btn', 'data-copied': copiedKey === 'exp-snapshot' ? '' : undefined,
           onClick: () => copyInstruction('exp-snapshot', pullInstruction),
-          title: '复制拉取磁盘快照指令：把 .iterate/ 下的经验银行等产物回显进会话',
-        }, copiedKey === 'exp-snapshot' ? '已复制' : '拉取磁盘快照'),
+          title: t('复制拉取磁盘快照指令：把 .iterate/ 下的经验银行等产物回显进会话'),
+        }, copiedKey === 'exp-snapshot' ? t('已复制') : t('拉取磁盘快照')),
       ),
       React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
         React.createElement('input', {
           className: 'iterate-filter-search',
           type: 'search',
-          placeholder: '搜索经验模式…',
-          'aria-label': '搜索经验',
+          placeholder: t('搜索经验模式…'),
+          'aria-label': t('搜索经验'),
           value: expSearch,
           onChange: (e: React.ChangeEvent<HTMLInputElement>) => setExpSearch(e.target.value),
         }),
@@ -2983,17 +3150,17 @@ function ObservatoryPanel(props: SlotProps) {
           className: 'iterate-btn', 'data-copied': copiedKey === 'exp-search' ? '' : undefined,
           disabled: !expSearch,
           onClick: () => copyInstruction('exp-search', expInstruction),
-          title: '复制搜索指令',
-        }, copiedKey === 'exp-search' ? '已复制' : '搜索'),
+          title: t('复制搜索指令'),
+        }, copiedKey === 'exp-search' ? t('已复制') : t('搜索')),
       ),
       resultRows.length > 0
         ? React.createElement('div', {}, ...resultRows)
         : expEntries.length > 0
-          ? React.createElement('div', { className: 'iterate-obs-empty' }, '没有匹配「' + expSearch + '」的经验')
+          ? React.createElement('div', { className: 'iterate-obs-empty' }, t('没有匹配「') + expSearch + t('」的经验'))
           : React.createElement('div', {},
               // Gap #4: separate "pulled and empty" from "never pulled".
-              React.createElement('div', { className: 'iterate-obs-empty' }, diskEmptyStateText(pulled, '经验银行')),
-              React.createElement('div', { className: 'iterate-obs-empty' }, '也可点「列出经验」查询磁盘上的全部历史经验。'),
+              React.createElement('div', { className: 'iterate-obs-empty' }, diskEmptyStateText(pulled, t('经验银行'), getLang())),
+              React.createElement('div', { className: 'iterate-obs-empty' }, t('也可点「列出经验」查询磁盘上的全部历史经验。')),
             ),
     )
   }
@@ -3004,21 +3171,21 @@ function ObservatoryPanel(props: SlotProps) {
   // falsifications); copy buttons reach the back end for the full history.
   const renderDefenseEvents = () => {
     const defenseInstruction = defenseFilter
-      ? `请调用 \`iterate_defense_events\` 查询防御事件：\n\n\`\`\`json\n${JSON.stringify({ operation: 'list', type: defenseFilter || undefined }, null, 2)}\n\`\`\``
+      ? tf(`请调用 \`iterate_defense_events\` 查询防御事件：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'list', type: defenseFilter || undefined }, null, 2) })
       : buildDefenseEventsListInstruction()
 
     const typeOptions = [
-      { value: '', label: '全部类型' },
-      { value: 'precondition_failed', label: '前置校验失败' },
-      { value: 'rollback', label: '回滚' },
-      { value: 'invariant_violated', label: '不变量违反' },
-      { value: 'assumption_falsified', label: '假设被证伪' },
+      { value: '', label: t('全部类型') },
+      { value: 'precondition_failed', label: t('前置校验失败') },
+      { value: 'rollback', label: t('回滚') },
+      { value: 'invariant_violated', label: t('不变量违反') },
+      { value: 'assumption_falsified', label: t('假设被证伪') },
     ]
     const TYPE_LABEL: Record<string, string> = {
-      precondition_failed: '前置校验失败',
-      rollback: '回滚',
-      invariant_violated: '不变量违反',
-      assumption_falsified: '假设被证伪',
+      precondition_failed: t('前置校验失败'),
+      rollback: t('回滚'),
+      invariant_violated: t('不变量违反'),
+      assumption_falsified: t('假设被证伪'),
     }
 
     const counts = (defenseEvents && defenseEvents.counts) || {}
@@ -3029,28 +3196,28 @@ function ObservatoryPanel(props: SlotProps) {
       : allEvents
 
     const headerBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-      React.createElement('b', {}, '防御事件'),
-      React.createElement('span', { className: 'iterate-obs-head-meta' }, `会话内 ${allEvents.length} 条 / 累计 ${totalCount}`),
+      React.createElement('b', {}, t('防御事件')),
+      React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`会话内 {a0} 条 / 累计 {a1}`, { a0: allEvents.length, a1: totalCount })),
       React.createElement('button', {
         className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'defense-list' ? '' : undefined,
         onClick: () => copyInstruction('defense-list', buildDefenseEventsListInstruction()),
-        title: '复制列出防御事件指令（含 JSON 参数）',
-      }, copiedKey === 'defense-list' ? '已复制' : '列出事件'),
+        title: t('复制列出防御事件指令（含 JSON 参数）'),
+      }, copiedKey === 'defense-list' ? t('已复制') : t('列出事件')),
       React.createElement('button', {
         className: 'iterate-btn', 'data-copied': copiedKey === 'defense-snapshot' ? '' : undefined,
         onClick: () => copyInstruction('defense-snapshot', pullInstruction),
-        title: '复制拉取磁盘快照指令：把 .iterate/ 下的防御事件流回显进会话',
-      }, copiedKey === 'defense-snapshot' ? '已复制' : '拉取磁盘快照'),
+        title: t('复制拉取磁盘快照指令：把 .iterate/ 下的防御事件流回显进会话'),
+      }, copiedKey === 'defense-snapshot' ? t('已复制') : t('拉取磁盘快照')),
       React.createElement('button', {
         className: 'iterate-btn', 'data-copied': copiedKey === 'defense-counts' ? '' : undefined,
-        onClick: () => copyInstruction('defense-counts', `请调用 \`iterate_defense_events\` 查询事件统计：\n\n\`\`\`json\n${JSON.stringify({ operation: 'counts' }, null, 2)}\n\`\`\``),
-        title: '复制统计指令（含 JSON 参数）',
-      }, copiedKey === 'defense-counts' ? '已复制' : '统计'),
+        onClick: () => copyInstruction('defense-counts', tf(`请调用 \`iterate_defense_events\` 查询事件统计：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'counts' }, null, 2) })),
+        title: t('复制统计指令（含 JSON 参数）'),
+      }, copiedKey === 'defense-counts' ? t('已复制') : t('统计')),
       React.createElement('button', {
         className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'defense-clear' ? '' : undefined,
-        onClick: () => copyInstruction('defense-clear', `请调用 \`iterate_defense_events\` 清除防御事件流：\n\n\`\`\`json\n${JSON.stringify({ operation: 'clear' }, null, 2)}\n\`\`\``),
-        title: '复制 iterate_defense_events clear 指令文本（重置陈旧事件流）',
-      }, copiedKey === 'defense-clear' ? '已复制' : '清除事件'),
+        onClick: () => copyInstruction('defense-clear', tf(`请调用 \`iterate_defense_events\` 清除防御事件流：\n\n\`\`\`json\n{a0}\n\`\`\``, { a0: JSON.stringify({ operation: 'clear' }, null, 2) })),
+        title: t('复制 iterate_defense_events clear 指令文本（重置陈旧事件流）'),
+      }, copiedKey === 'defense-clear' ? t('已复制') : t('清除事件')),
     )
 
     if (allEvents.length === 0 && totalCount === 0) {
@@ -3058,22 +3225,22 @@ function ObservatoryPanel(props: SlotProps) {
         headerBar,
         React.createElement('div', { className: 'iterate-obs-block' },
           React.createElement('div', { className: 'iterate-obs-block-head' },
-            React.createElement('span', {}, '防御事件流'),
+            React.createElement('span', {}, t('防御事件流')),
             React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.0'),
           ),
           React.createElement('div', { className: 'iterate-obs-block-body' },
             React.createElement('div', { className: 'iterate-obs-msg' },
-              diskEmptyStateText(toolCalledInSession(session, 'iterate_defense_events'), '防御事件流'),
+              diskEmptyStateText(toolCalledInSession(session, 'iterate_defense_events'), t('防御事件流'), getLang()),
             ),
             React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } },
-              '防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。',
+              t('防御事件包括：前置校验失败、回滚、不变量违反、假设被证伪。'),
             ),
             React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
               React.createElement('button', {
                 className: 'iterate-btn', 'data-copied': copiedKey === 'defense-instr' ? '' : undefined,
                 onClick: () => copyInstruction('defense-instr', defenseInstruction),
-                title: '复制查询指令',
-              }, copiedKey === 'defense-instr' ? '已复制' : '复制查询指令'),
+                title: t('复制查询指令'),
+              }, copiedKey === 'defense-instr' ? t('已复制') : t('复制查询指令')),
             ),
           ),
         ),
@@ -3084,7 +3251,7 @@ function ObservatoryPanel(props: SlotProps) {
       React.createElement('select', {
         className: 'iterate-filter-select',
         value: defenseFilter,
-        'aria-label': '按事件类型筛选',
+        'aria-label': t('按事件类型筛选'),
         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDefenseFilter(e.target.value),
       },
         ...typeOptions.map((opt) => React.createElement('option', { key: opt.value, value: opt.value }, opt.label)),
@@ -3093,8 +3260,8 @@ function ObservatoryPanel(props: SlotProps) {
         ? React.createElement('button', {
             className: 'iterate-filter-clear',
             onClick: () => setDefenseFilter(''),
-            title: '清除类型筛选',
-          }, '清除')
+            title: t('清除类型筛选'),
+          }, t('清除'))
         : null,
     )
 
@@ -3114,7 +3281,7 @@ function ObservatoryPanel(props: SlotProps) {
           React.createElement('div', { className: 'iterate-obs-block-body' },
             React.createElement('div', { className: 'iterate-obs-msg' }, String(e.description || '')),
             e.defense
-              ? React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 4 } }, `防线：${String(e.defense)}`)
+              ? React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 4 } }, tf(`防线：{a0}`, { a0: String(e.defense) }))
               : null,
           ),
         )
@@ -3133,7 +3300,7 @@ function ObservatoryPanel(props: SlotProps) {
       ),
       eventRows.length > 0
         ? React.createElement('div', {}, ...eventRows)
-        : React.createElement('div', { className: 'iterate-obs-empty' }, '没有匹配该类型的防御事件'),
+        : React.createElement('div', { className: 'iterate-obs-empty' }, t('没有匹配该类型的防御事件')),
     )
   }
 
@@ -3148,25 +3315,29 @@ function ObservatoryPanel(props: SlotProps) {
       const hasFindings = (manifest.findings || []).length > 0
       if (hasThreads || hasFindings) {
         return React.createElement('div', { className: 'iterate-obs-empty' },
-          React.createElement('div', {}, '实时活动流仅在运行期间记录，当前已完成。'),
+          React.createElement('div', {}, t('实时活动流仅在运行期间记录，当前已完成。')),
           React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
-            React.createElement('button', { className: 'iterate-btn', onClick: () => setTab('f1') }, '查看审查线程'),
-            React.createElement('button', { className: 'iterate-btn', onClick: () => setTab('f3') }, '查看发现'),
+            React.createElement('button', { className: 'iterate-btn', onClick: () => setTab('f1') }, t('查看审查线程')),
+            React.createElement('button', { className: 'iterate-btn', onClick: () => setTab('f3') }, t('查看发现')),
           ),
         )
       }
-      return React.createElement('div', { className: 'iterate-obs-empty' }, '暂无实时活动')
+      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无实时活动'))
     }
     const types = Array.from(new Set(liveEntries.map((e) => String(e.type || 'unknown')).filter(Boolean))).sort()
     const filtered = filterLiveEntries(liveEntries, liveType)
     const rows = filtered.map((e, i) => {
       const type = String(e.type || 'unknown')
-      const meta = OBS_LIVE_META[type] || { label: String(e.type || '?'), color: OBS_LIVE_FALLBACK_COLOR }
+      // Module constants carry BOTH languages; resolve at render time so a
+      // language switch repaints the badges.
+      const meta = OBS_LIVE_META[type]
+      const typeLabel = meta ? meta.label[getLang()] : String(e.type || '?')
+      const typeColor = meta ? meta.color : OBS_LIVE_FALLBACK_COLOR
       const tool = String(e.tool || '')
       const target = String(e.target || '')
       const time = formatObsLiveTime(String(e.ts || ''))
       return React.createElement('div', { key: `live-${i}`, className: 'iterate-obs-row' },
-        React.createElement('span', { className: 'iterate-obs-livebadge', style: { color: meta.color } }, meta.label),
+        React.createElement('span', { className: 'iterate-obs-livebadge', style: { color: typeColor } }, typeLabel),
         tool
           ? React.createElement('span', { className: 'iterate-obs-chip' }, tool)
           : null,
@@ -3175,29 +3346,29 @@ function ObservatoryPanel(props: SlotProps) {
       )
     })
     const filterBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
-      React.createElement('b', {}, '实时活动'),
+      React.createElement('b', {}, t('实时活动')),
       React.createElement('select', {
         className: 'iterate-filter-select',
         value: liveType,
-        'aria-label': '按活动类型筛选',
+        'aria-label': t('按活动类型筛选'),
         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setLiveType(e.target.value),
       },
-        React.createElement('option', { value: '' }, '全部活动'),
+        React.createElement('option', { value: '' }, t('全部活动')),
         ...types.map((t) => React.createElement('option', { key: t, value: t }, t)),
       ),
       liveType
         ? React.createElement('button', {
             className: 'iterate-filter-clear',
             onClick: () => setLiveType(''),
-            title: '清除类型筛选',
-          }, '清除')
+            title: t('清除类型筛选'),
+          }, t('清除'))
         : null,
       React.createElement('span', { className: 'iterate-filter-count' }, `${filtered.length}/${liveEntries.length}`),
     )
     if (rows.length === 0) {
       return React.createElement('div', {},
         filterBar,
-        React.createElement('div', { className: 'iterate-obs-empty' }, '无匹配的实时活动'),
+        React.createElement('div', { className: 'iterate-obs-empty' }, t('无匹配的实时活动')),
       )
     }
     return React.createElement('div', {}, filterBar, ...rows)
@@ -3223,30 +3394,30 @@ function ObservatoryPanel(props: SlotProps) {
 
   return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'obs', className: 'iterate-obs' },
     React.createElement('div', { className: 'iterate-obs-head', 'data-closed': open ? undefined : '', onClick: () => setOpen((v) => !v) },
-      React.createElement('span', { className: 'iterate-obs-title' }, 'iterate 观测台'),
+      React.createElement('span', { className: 'iterate-obs-title' }, t('iterate 观测台')),
       React.createElement('span', { className: 'iterate-obs-badge', 'data-live': live ? '' : undefined }, runStatusText(live, manifest)),
       React.createElement('span', { className: 'iterate-obs-head-meta' }, headMeta || 'runtime'),
       // Gap #14: make the tab system discoverable without expanding it.
       React.createElement('span', {
         className: 'iterate-obs-head-meta',
-        title: OBS_HOTKEY_HINT,
-      }, OBS_HOTKEY_HINT),
+        title: obsHotkeyHint(),
+      }, obsHotkeyHint()),
       React.createElement('button', {
         className: 'iterate-btn', 'data-ghost': '',
         onClick: (e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); setOpen((v) => !v) },
-      }, open ? '收起' : '展开'),
+      }, open ? t('收起') : t('展开')),
     ),
     open
       ? React.createElement('div', {},
           copyFailText
             ? React.createElement('div', { className: 'iterate-obs-block' },
                 React.createElement('div', { className: 'iterate-obs-block-head' },
-                  React.createElement('b', {}, '复制未成功'),
-                  React.createElement('span', { className: 'iterate-obs-head-meta' }, '剪贴板写入被拒绝，请手动选中下方指令复制'),
+                  React.createElement('b', {}, t('复制未成功')),
+                  React.createElement('span', { className: 'iterate-obs-head-meta' }, t('剪贴板写入被拒绝，请手动选中下方指令复制')),
                   React.createElement('button', {
-                    className: 'iterate-btn', 'data-ghost': '', 'aria-label': '关闭复制失败提示',
+                    className: 'iterate-btn', 'data-ghost': '', 'aria-label': t('关闭复制失败提示'),
                     onClick: () => setCopyFailText(null),
-                  }, '关闭'),
+                  }, t('关闭')),
                 ),
                 React.createElement('div', { className: 'iterate-obs-code' }, copyFailText),
               )
@@ -3258,8 +3429,8 @@ function ObservatoryPanel(props: SlotProps) {
             React.createElement('button', {
               className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'export' ? '' : undefined,
               onClick: exportObservatory,
-              title: '将观测台全部数据导出为 JSON（优先下载，失败则复制）',
-            }, copiedKey === 'export' ? '已导出' : '导出 JSON'),
+              title: t('将观测台全部数据导出为 JSON（优先下载，失败则复制）'),
+            }, copiedKey === 'export' ? t('已导出') : t('导出 JSON')),
             // Gap #4: `.iterate/` artifacts are unreachable from the browser;
             // this copies the one instruction that makes the model echo them
             // into the session stream (which is what every panel scans).
@@ -3267,9 +3438,9 @@ function ObservatoryPanel(props: SlotProps) {
               className: 'iterate-btn', 'data-copied': copiedKey === 'pull-snapshot' ? '' : undefined,
               onClick: () => copyInstruction('pull-snapshot', pullInstruction),
               title: pullTitle,
-            }, copiedKey === 'pull-snapshot' ? '已复制' : '拉取磁盘快照'),
+            }, copiedKey === 'pull-snapshot' ? t('已复制') : t('拉取磁盘快照')),
           ),
-          React.createElement('div', { className: 'iterate-obs-tabs', role: 'tablist', 'aria-label': '观测台页签（快捷键 1-9 / 0 / -）' },
+          React.createElement('div', { className: 'iterate-obs-tabs', role: 'tablist', 'aria-label': t('观测台页签（快捷键 1-9 / 0 / -）') },
             ...OBS_TABS.map((t) =>
               React.createElement('button', {
                 key: t.key,
@@ -3278,7 +3449,7 @@ function ObservatoryPanel(props: SlotProps) {
                 'aria-selected': tab === t.key,
                 'data-active': tab === t.key ? '' : undefined,
                 onClick: () => setTab(t.key),
-                title: t.hotkey ? `${obsTabLabel(t)}（按 ${t.hotkey} 切换）` : `${obsTabLabel(t)}（按 - 切换）`,
+                title: t.hotkey ? tf(`{a0}（按 {a1} 切换）`, { a0: obsTabLabel(t), a1: t.hotkey }) : tf(`{a0}（按 - 切换）`, { a0: obsTabLabel(t) }),
               }, obsTabLabel(t)),
             ),
           ),
@@ -3302,6 +3473,17 @@ function selectTurnTail(owner: SlotProps): { matched: boolean } | null {
 }
 
 /**
+ * Slot components wrapped once at module scope so the wrapper identity is
+ * stable — creating the wrapper inside the render callback would remount the
+ * subtree (and wipe triage verdicts, expanded tabs …) on every render.
+ */
+const LangDashboard = withLang(ConvergenceDashboard)
+const LangObservatory = withLang(ObservatoryPanel)
+const LangTurnTail = withLang(TurnTailEntry)
+const LangProgress = withLang(ProgressCapsule)
+const LangSettings = withLang(SettingsPanel)
+
+/**
  * Plugin client entry. Called by the dsh client runtime with its context.
  */
 export function apply(ctx: ClientContext): void {
@@ -3309,6 +3491,15 @@ export function apply(ctx: ClientContext): void {
   slotsSvc = readSlots(ctx)
   themeSvc = readTheme(ctx)
   storage = createStorage()
+
+  // 1b. Language: an explicit stored choice wins, then the browser locale.
+  //     Deliberately NOT persisted here (see setLang's `persist` flag) — an
+  //     auto-detected language must not shadow a choice the user never made.
+  configureLangStorage(storage)
+  setLang(
+    detectLang(storage.get(LANG_STORAGE_KEY), typeof navigator !== 'undefined' ? navigator.language : ''),
+    false,
+  )
 
   // 2. Theme preference bootstrap.
   const savedTheme = storage.get(THEME_STORAGE_KEY)
@@ -3344,7 +3535,7 @@ export function apply(ctx: ClientContext): void {
     slotsSvc.inject('conversation.input.dock', () =>
       slotsSvc?.register(
         { name: 'conversation.input.dock', id: 'iterate-dashboard', order: 90 },
-        (props) => React.createElement(ConvergenceDashboard, props),
+        (props) => React.createElement(LangDashboard, props),
       ),
     )
 
@@ -3353,7 +3544,7 @@ export function apply(ctx: ClientContext): void {
     slotsSvc.inject('conversation.input.dock', () =>
       slotsSvc?.register(
         { name: 'conversation.input.dock', id: 'iterate-observatory', order: 91 },
-        (props) => React.createElement(ObservatoryPanel, props),
+        (props) => React.createElement(LangObservatory, props),
       ),
     )
 
@@ -3361,7 +3552,7 @@ export function apply(ctx: ClientContext): void {
     slotsSvc.inject('conversation.chat.turnTail', () =>
       slotsSvc?.register(
         { name: 'conversation.chat.turnTail', id: 'iterate-turn-tail', select: selectTurnTail },
-        (props) => React.createElement(TurnTailEntry, props),
+        (props) => React.createElement(LangTurnTail, props),
       ),
     )
 
@@ -3369,7 +3560,7 @@ export function apply(ctx: ClientContext): void {
     slotsSvc.inject('shell.overlay', () =>
       slotsSvc?.register(
         { name: 'shell.overlay', id: 'iterate-progress', order: 0 },
-        (props) => React.createElement(ProgressCapsule, props),
+        (props) => React.createElement(LangProgress, props),
       ),
     )
 
@@ -3377,7 +3568,7 @@ export function apply(ctx: ClientContext): void {
     slotsSvc.inject('settings.section', () =>
       slotsSvc?.register(
         { name: 'settings.section', id: 'iterate-settings', order: 30, label: () => 'iterate' },
-        (props) => React.createElement(SettingsPanel, props),
+        (props) => React.createElement(LangSettings, props),
       ),
     )
   }

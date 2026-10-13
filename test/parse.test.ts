@@ -5,6 +5,7 @@ import {
   SEVERITY_LABEL,
   SEVERITY_COLOR,
   isReviewReport,
+  isTranscriptManifest,
   findReportInObject,
   scanSessionForReport,
   isRunSummary,
@@ -93,6 +94,10 @@ import {
   CONFIG_EDIT_FIELDS,
   CONFIG_VALUE_PLACEHOLDER,
   normalizeValidations,
+  buildConfigReadInstruction,
+  isEffectiveConfig,
+  scanSessionForConfigRead,
+  configValueByPath,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -160,6 +165,39 @@ describe('isReviewReport', () => {
     assert.equal(isReviewReport({}), false)
     assert.equal(isReviewReport({ convergence: {}, findings: [] }), false)
     assert.equal(isReviewReport({ convergence: {}, findings: [], rounds: [] }), true)
+  })
+
+  it('rejects a TranscriptManifest, whose convergence is the count SERIES', () => {
+    // Regression: a manifest also carries `convergence`/`rounds`/`findings`,
+    // and `typeof [] === 'object'` made the old predicate accept it. The
+    // client dashboard then rendered an in-flight run as a degenerate
+    // "Round 0 / 0" report strip instead of its running state.
+    const manifest = {
+      version: 1,
+      project: '/srv/proj',
+      updatedAt: '2026-10-11T00:00:00.000Z',
+      active: true,
+      mode: 'normal',
+      goal: 'ship it',
+      phases: ['review'],
+      round: 2,
+      maxRounds: 3,
+      rounds: [],
+      convergence: [3, 0],
+      findings: [],
+      fixes: [],
+    }
+    assert.equal(isTranscriptManifest(manifest), true)
+    assert.equal(isReviewReport(manifest), false, 'a manifest is never a report')
+
+    // …and the reverse direction stays clean: a real report is not a manifest.
+    assert.equal(isTranscriptManifest(makeReport()), false)
+
+    // An empty (pre-round) manifest is the exact state a freshly started run
+    // is in — it must not read as "a report with zero findings" either.
+    const fresh = { ...manifest, round: 1, convergence: [], phases: [] }
+    assert.equal(isReviewReport(fresh), false)
+    assert.equal(isTranscriptManifest(fresh), true)
   })
 })
 
@@ -723,6 +761,12 @@ describe('completion & guidance helpers', () => {
       findings: [makeFinding()],
     })
     assert.match(buildCompletionSummary(notConverged), /已达最大轮数 3/)
+    // English UI: same numbers, English chrome (the dashboard renders this line).
+    const en = buildCompletionSummary(report, 'en')
+    assert.match(en, /iterate review complete/)
+    assert.match(en, /2\/3 rounds/)
+    assert.match(en, /converged$/)
+    assert.match(buildCompletionSummary(notConverged, 'en'), /reached the round limit 3/)
   })
 
   it('buildConfigEditGuide lists the editable fields', () => {
@@ -1140,6 +1184,22 @@ describe('transcript live bridge', () => {
     assert.equal(stoppedReasonLabel(null), '已结束')
     assert.equal(stoppedReasonLabel(undefined), '已结束')
     assert.equal(stoppedReasonLabel(''), '已结束')
+  })
+
+  it('stoppedReasonLabel renders English badges for every known stop reason', () => {
+    assert.equal(stoppedReasonLabel('converged', 'en'), 'Done \u00b7 converged (no new findings)')
+    assert.equal(stoppedReasonLabel('max_rounds_reached', 'en'), 'Done \u00b7 reached the round limit')
+    assert.equal(stoppedReasonLabel('aborted_by_validation', 'en'), 'Done \u00b7 rolled back after a validation failure')
+    assert.match(stoppedReasonLabel('aborted_by_config', 'en'), /not allow-listed/)
+    assert.match(stoppedReasonLabel('inconclusive', 'en'), /inconclusive/)
+    assert.match(stoppedReasonLabel('schema_invalid', 'en'), /schema validation failures/)
+    assert.match(stoppedReasonLabel('no_usable_reviewer_output', 'en'), /no usable review output/)
+    // Unknown / absent values degrade instead of leaking "undefined".
+    assert.equal(stoppedReasonLabel('some_other_reason', 'en'), 'Done \u00b7 some_other_reason')
+    assert.equal(stoppedReasonLabel(null, 'en'), 'Done')
+    assert.equal(stoppedReasonLabel('', 'en'), 'Done')
+    // zh and en must never collapse into each other.
+    assert.notEqual(stoppedReasonLabel('converged', 'en'), stoppedReasonLabel('converged'))
   })
 
   it('scanSessionForQualityGate returns the latest normalized snapshot (reverse chronological)', () => {
@@ -2148,8 +2208,97 @@ describe('config field picker (gap #8)', () => {
   it('CONFIG_EDIT_FIELDS includes validation.commands with an explicit empty warning', () => {
     const field = configFieldByKey('validation.commands')
     assert.ok(field, 'validation.commands must be selectable in the settings UI')
-    assert.match(field!.hint, /npm test/)
-    assert.match(field!.hint, /不验证/)
+    assert.match(field!.hint.zh, /npm test/)
+    assert.match(field!.hint.zh, /不验证/)
+    // The settings picker renders the hint in the UI language, so the en copy
+    // must carry the same empty-array warning (the P0 this field exists for).
+    assert.match(field!.hint.en, /npm test/)
+    assert.match(field!.hint.en, /no verification/)
+  })
+
+  it('CONFIG_EDIT_FIELDS is fully bilingual (label + hint, both languages)', () => {
+    assert.ok(CONFIG_EDIT_FIELDS.length >= 10, 'field list must not shrink silently')
+    const CJK = /[\u4e00-\u9fff]/
+    for (const f of CONFIG_EDIT_FIELDS) {
+      for (const part of ['label', 'hint'] as const) {
+        for (const lang of ['zh', 'en'] as const) {
+          const value = f[part][lang]
+          assert.ok(value.trim().length > 0, `${f.key}.${part}.${lang} must be non-empty`)
+        }
+        // The en half must be actually English: no Chinese may leak through.
+        assert.ok(!CJK.test(f[part].en), `${f.key}.${part}.en still contains Chinese: ${f[part].en}`)
+      }
+      // Labels are words in both languages; hints may be language-neutral
+      // tokens ("true / false"), so only labels must differ AND stay Chinese.
+      assert.ok(CJK.test(f.label.zh), `${f.key}.label.zh must stay Chinese`)
+      assert.notEqual(f.label.zh, f.label.en, `${f.key}.label must actually be translated`)
+    }
+  })
+
+  it('buildConfigReadInstruction asks the model to echo a full read', () => {
+    const text = buildConfigReadInstruction()
+    assert.match(text, /iterate_config/)
+    assert.match(text, /"operation": "read"/)
+    assert.match(text, /config/)
+    // Model-facing contract text — stays Chinese like every other builder.
+    assert.match(text, /回读当前生效配置/)
+  })
+
+  it('isEffectiveConfig accepts a real config and rejects impostors', () => {
+    assert.equal(isEffectiveConfig(null), false)
+    assert.equal(isEffectiveConfig([1, 2, 3]), false)
+    assert.equal(isEffectiveConfig({ goal: 'x' }), false, 'one stray key is not a config')
+    assert.equal(isEffectiveConfig({ operation: 'write', updates: { max_rounds: 5 } }), false, 'a write payload is not a config')
+    assert.equal(
+      isEffectiveConfig({ goal: 'x', dimensions: ['correctness'], max_rounds: 3, language: 'zh' }),
+      true,
+      'the effective config (defaults + file) carries several known sections',
+    )
+  })
+
+  it('scanSessionForConfigRead returns the newest full iterate_config result', () => {
+    const cfgA = { goal: 'old', dimensions: [], max_rounds: 3 }
+    const cfgB = { goal: 'new', dimensions: ['correctness'], max_rounds: 5, validation: { commands: ['npm test'] } }
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_config', result: { found: true, config: cfgA } },
+        { tool: 'iterate_config', result: { found: true, config: cfgB } },
+      ],
+    }
+    assert.deepEqual(scanSessionForConfigRead(session), cfgB, 'newest read wins')
+    // A write result reports the post-write config — that is the read-back too.
+    assert.deepEqual(
+      scanSessionForConfigRead({ toolCalls: [{ tool: 'iterate_config', result: { operation: 'write', ok: true, config: cfgA } }] }),
+      cfgA,
+    )
+  })
+
+  it('scanSessionForConfigRead falls back to a deep scan without the envelope', () => {
+    const cfg = { goal: 'g', dimensions: ['security'], max_rounds: 4, language: 'en' }
+    assert.deepEqual(scanSessionForConfigRead({ snapshot: cfg }), cfg)
+    assert.equal(scanSessionForConfigRead({}), null)
+    assert.equal(scanSessionForConfigRead(null), null)
+  })
+
+  it('scanSessionForConfigRead ignores section-only reads (a slice is not the config)', () => {
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_config', result: { found: true, section: 'validation', data: { commands: ['npm test'] } } },
+      ],
+    }
+    assert.equal(scanSessionForConfigRead(session), null)
+  })
+
+  it('configValueByPath resolves dotted field keys and reports misses', () => {
+    const config = { validation: { commands: ['npm test'] }, review: { scope: 'full' }, max_rounds: 5 }
+    assert.deepEqual(configValueByPath(config, 'validation.commands'), { resolved: true, value: ['npm test'] })
+    assert.deepEqual(configValueByPath(config, 'review.scope'), { resolved: true, value: 'full' })
+    assert.deepEqual(configValueByPath(config, 'max_rounds'), { resolved: true, value: 5 })
+    assert.deepEqual(configValueByPath(config, 'atomic.max_lines'), { resolved: false, value: undefined })
+    // Non-object intermediate, null config and prototype keys never resolve.
+    assert.equal(configValueByPath({ review: 'full' }, 'review.scope').resolved, false)
+    assert.equal(configValueByPath(null, 'goal').resolved, false)
+    assert.equal(configValueByPath({}, '__proto__').resolved, false)
   })
 
   it('also lists language and personalization.known_intentional', () => {
@@ -2387,6 +2536,15 @@ describe('disk snapshot pull instruction (gap #4)', () => {
     assert.match(diskEmptyStateText(true, '质量门禁证书'), /已从磁盘拉取/)
     assert.match(diskEmptyStateText(true, '质量门禁证书'), /磁盘无数据/)
     assert.match(diskEmptyStateText(true, ''), /已从磁盘拉取：数据/)
+  })
+
+  it('diskEmptyStateText localizes the wrapper (topic arrives already translated)', () => {
+    assert.match(diskEmptyStateText(false, 'Breakpoint', 'en'), /Not pulled from disk yet: Breakpoint/)
+    assert.match(diskEmptyStateText(false, 'Breakpoint', 'en'), /Pull disk snapshot/)
+    assert.match(diskEmptyStateText(true, 'Breakpoint', 'en'), /Pulled from disk: Breakpoint has no records/)
+    assert.match(diskEmptyStateText(true, '', 'en'), /Pulled from disk: data has no records/)
+    // zh output is unchanged by the new parameter.
+    assert.equal(diskEmptyStateText(false, '断点'), diskEmptyStateText(false, '断点', 'zh'))
   })
 
   it('toolCalledInSession detects a tool call in either session shape', () => {

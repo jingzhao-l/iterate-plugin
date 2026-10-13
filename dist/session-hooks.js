@@ -54,6 +54,7 @@
  */
 import { loadEffectiveConfig, resolveProjectRoot } from "./config-loader.js";
 import { decideApproval, isDestructiveIterateTool } from "./approval-gate.js";
+import { sessionCwdOf } from "./working-directory.js";
 /** Structured error identity attached to policy denials (dsh 0.1.6-alpha.1:
  *  `deny.info` lets durable projections / retry / replay distinguish an
  *  approval-policy denial from a tool-thrown failure). */
@@ -111,7 +112,11 @@ export function gateDecision(exec) {
             if (typeof p === 'string')
                 argPath = p;
         }
-        sessionCwd = exec?.agent?.session?.header?.cwd;
+        // Effective session directory (see ./working-directory.ts): a session whose
+        // directory was switched via dsh 0.2.1-alpha.2's `working_directory` tool
+        // must have its POLICY read from the workspace it is now in — `header.cwd`
+        // alone would read the original project's approval policy.
+        sessionCwd = sessionCwdOf(exec);
     }
     catch {
         // hostile/proxied exec — fall through with both undefined (defaults to ask)

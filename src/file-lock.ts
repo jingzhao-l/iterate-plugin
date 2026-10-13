@@ -151,15 +151,42 @@ export function acquireProjectLock(
     } catch {
       // best-effort
     }
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      try {
-        unlinkSync(lockPath)
-      } catch {
-        // already gone
-      }
+    return makeLockRelease(lockPath)
+  }
+}
+
+/**
+ * Build the release function for a lock file this process just acquired.
+ *
+ * Advisory locks here are STOLEN when the recorded owner dies or the mtime
+ * goes ancient: the steal unlinks our file and creates a new one stamped with
+ * the STEALER's pid. An unguarded release would then unlink the new holder's
+ * lock — turning our release into a double-release that admits a third process
+ * into a "held" critical section. So the release re-reads the stamp and only
+ * unlinks a file that is still ours (same pid) or unstamped (the shape left
+ * when our own advisory pid write failed, or when the content is not a pid).
+ *
+ * Always callable, idempotent, and never throws.
+ */
+export function makeLockRelease(lockPath: string): () => void {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    let raw = ''
+    try {
+      raw = readFileSync(lockPath, 'utf-8').trim()
+    } catch {
+      // Already gone (or unreadable) — nothing of ours left to remove.
+      return
+    }
+    // A stamp naming another pid means the lock was stolen and reassigned:
+    // it is no longer ours to delete.
+    if (raw !== '' && Number(raw) !== process.pid) return
+    try {
+      unlinkSync(lockPath)
+    } catch {
+      // already gone
     }
   }
 }

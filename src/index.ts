@@ -45,6 +45,7 @@ import { registerQualityGateTool } from './tools/quality-gate.ts'
 import { registerDefenseEventsTool } from './tools/defense-events.ts'
 import { registerSessionHooks } from './session-hooks.ts'
 import { registerLiveCapture } from './live.ts'
+import { installWorkingDirectoryContext } from './working-directory.ts'
 import { ITERATE_SKILL_PROMPT } from './skill-prompt.ts'
 
 export const name = 'iterate-plugin'
@@ -58,6 +59,12 @@ export function apply(ctx: Context): void {
   //    running with NO `tools/pre-execute` approval gate — a fail-open hole
   //    created by load order. Registering the gate first means a partial load
   //    can only ever err on the side of MORE gating, never less.
+  //
+  //    The working-directory context is installed first for the same reason:
+  //    every cwd read below (gate policy, live capture, tool project roots)
+  //    must see dsh 0.2.1-alpha.2+ directory switches, and installing it last
+  //    would leave a partially-loaded plugin resolving the wrong workspace.
+  installWorkingDirectoryContext(ctx)
   registerSessionHooks(ctx)
   registerLiveCapture(ctx)
 

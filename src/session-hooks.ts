@@ -55,6 +55,7 @@
 
 import { loadEffectiveConfig, resolveProjectRoot } from './config-loader.ts'
 import { decideApproval, isDestructiveIterateTool } from './approval-gate.ts'
+import { sessionCwdOf } from './working-directory.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolErrorInfo, ToolExecution, PreToolDecision } from '@deepseek-ai/dsh-tools'
 
@@ -114,7 +115,11 @@ export function gateDecision(exec: ToolExecution): PreToolDecision {
       const p = (args as Record<string, unknown>).path
       if (typeof p === 'string') argPath = p
     }
-    sessionCwd = exec?.agent?.session?.header?.cwd
+    // Effective session directory (see ./working-directory.ts): a session whose
+    // directory was switched via dsh 0.2.1-alpha.2's `working_directory` tool
+    // must have its POLICY read from the workspace it is now in — `header.cwd`
+    // alone would read the original project's approval policy.
+    sessionCwd = sessionCwdOf(exec)
   } catch {
     // hostile/proxied exec — fall through with both undefined (defaults to ask)
   }

@@ -31,6 +31,7 @@ import { existsSync } from 'node:fs';
 import { writeTextAtomicAsync } from "./atomic-fs.js";
 import { join } from 'node:path';
 import { loadEffectiveConfig, resolveProjectRoot } from "./config-loader.js";
+import { sessionCwdOf } from "./working-directory.js";
 /** Keep at most this many live activity entries. */
 export const LIVE_MAX_ENTRIES = 300;
 /** Rewrite the live file when its byte size exceeds this threshold. */
@@ -107,7 +108,7 @@ export function appendLive(projectRoot, entry) {
 }
 /** Resolve the project root a tool execution belongs to, if any. */
 function projectRootOf(exec) {
-    const cwd = exec.agent?.session?.header?.cwd;
+    const cwd = sessionCwdOf(exec);
     if (!cwd)
         return null;
     const resolved = resolveProjectRoot(undefined, cwd);

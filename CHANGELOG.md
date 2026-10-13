@@ -5,6 +5,102 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] - 2026-10-13
+
+### Changed
+
+- **Upgraded upstream dsh to `v0.2.1-alpha.2`** (released 2026-10-09) — all
+  five `@deepseek-ai/*` packages pinned to the exact `0.2.1-alpha.2`
+  (`dsh-tools` / `dsh-util-values` runtime, `dsh-agent` / `dsh-jobs` /
+  `dsh-session` dev); `@deepseek-ai/cordis` stays `4.0.5-alpha.1`.
+  `dsh.compatibility.dshReleases` now declares `0.2.1-alpha.2: compatible`
+  (19 releases, mirrored verbatim in both READMEs).
+  - **Adopted: the mutable session working directory.** New
+    `src/working-directory.ts` feature-detects `ctx.get('workingDirectory')`
+    and resolves the project root from the *current* session directory — as of
+    alpha.2 the immutable `Session.header.cwd` keeps the ORIGINAL project by
+    design, so reading it after a directory switch would anchor reviews, fixes
+    and the approval policy to the wrong checkout. Every failure mode (no
+    service, throwing service, hostile getters, non-string result) falls back
+    to `header.cwd`. Wired into `index.ts`, `config-loader.ts`,
+    `session-hooks.ts` and `live.ts` (+14 unit tests, incl. a security case).
+  - **Evaluated, not adopted**: the session state-record APIs (fragile
+    private-field access to shell-owned records), the shared `AGENTS.md`
+    agents directory (`DSH_AGENTS_HOME`, a host-level instruction concern), the
+    experimental Git Worktrees plugin (unrelated to the plugin's own
+    `git.use_worktree` config), the removed `both` tool-presentation mode (the
+    plugin never set one — it renders `presentCall` cards), and installing the
+    dsh CLI globally (disk cost for a plugin that never shells out).
+- **Type-check split into three programs.** The root `tsconfig.json` stays
+  server-only with a DOM-free `lib` (so a stray `window` in server code remains
+  a type error), new `tsconfig.test.json` covers the test program with DOM
+  (the render tests legitimately mount browser components), and
+  `npm run typecheck` now runs server + tests + client.
+
+### Added
+
+- **Bilingual UI (简体中文 / English)** — new `src/client/i18n.ts` dictionary
+  (≈290 keys) with `t()` / `tf()`; every piece of UI chrome in
+  `src/client/index.ts` is localized (panels, empty states, observatory tabs,
+  badges, severity/stop-reason/completion labels, settings). A
+  **界面语言 / Interface language** card in Settings switches the language and
+  persists it in `localStorage` (`iterate-ui-lang`); with no stored choice the
+  language is detected from `navigator.language` (a stored choice always wins,
+  and detection never writes a preference). Slot components are wrapped once
+  at module scope (`withLang`) so a switch repaints without remounting and
+  keeps panel state. **Model-facing copy stays Chinese by design** — the
+  `build*Instruction` payloads and copy-paste guides are contract text mirroring
+  `SKILL.md`; the two expanded guides now carry a
+  「中文（粘贴给模型的契约文案）」 chip so an English reader is told why.
+  - `lib/parse.js` UI labels gained an optional `lang` param (`zh` default):
+    `stoppedReasonLabel`, `diskEmptyStateText`, `buildCompletionSummary`, and
+    `CONFIG_EDIT_FIELDS` label/hint became `{ zh, en }` pairs (guide and
+    instruction builders keep reading `.zh`).
+  - Enforced by `test/client-i18n.test.ts` (12 tests): every Chinese literal in
+    the client needs an English entry or an inline `{zh,en}` pair, no dead
+    entries, `{aN}` placeholder parity between languages, and the
+    detect/switch/persist behavior itself.
+- **Config read-back loop (settings)** — the write instruction had no
+  counterpart: new `buildConfigReadInstruction()` + `scanSessionForConfigRead()`
+  + `configValueByPath()` in `lib/parse.js`, and the settings card now shows
+  the **current value of the selected field** once the model echoes an
+  `iterate_config` read (write results carry the post-write config too). Three
+  states are told apart: not read back yet / the value / read back but the
+  field is absent. New `src/client/session-cache.ts` carries the session from
+  the session-scoped slots to the ROOT-scoped settings slot
+  (`useSyncExternalStore`), because `settings.section` gets no session prop.
+  A refused clipboard reveals the instruction for manual copy — the button is
+  never a dead end.
+- **Browser-half render coverage** (previously untestable — the client's
+  `react` arrives through an injected `require`): `test/client-render.test.ts`
+  boots `apply()` with a fake `ClientContext` inside jsdom and mounts every
+  registered slot — bootstrap contract, degraded services, dashboard
+  empty/running/report/converged states, triage panel, observatory
+  compact→expanded tabs + F8 hotkey, settings cards incl. the destructive
+  confirm, the config read-back states, and both languages (24 tests).
+  devDeps added: `react` / `react-dom` `19.2.2`, `jsdom` `26.1.0`.
+- **Bundle-integrity coverage** — `test/package-contract.test.ts` (16 tests)
+  plus a recursive `scripts/client-digest.mjs` over `src/client/**` and
+  `lib/parse.js`, so a stale committed `lib/client.js` / `dist/` fails the
+  suite instead of shipping; `test/present-helpers.test.ts` (22 tests) covers
+  the previously untested `present` helpers.
+
+### Fixed
+
+- **`isReviewReport` accepted a transcript manifest** (`typeof [] === 'object'`
+  is `true`), so a running iteration rendered a bogus "Round 0 / 0" report
+  strip instead of the running state — convergence must now be a non-array
+  record (regression test in `test/parse.test.ts`).
+- **Session scanners only read tool-call envelopes** — `scanSessionForTranscript`
+  / `scanSessionForQualityGate` / `scanSessionForExperienceBank` /
+  `scanSessionForDefenseEvents` now fall back to a deep scan
+  (`findFirstInObject`) over the whole tree, so a restored transcript or a host
+  that surfaces artifacts directly still fills the panels instead of claiming
+  "not pulled yet".
+- **Decision-log lock ownership** — `makeLockRelease` in `src/file-lock.ts`
+  (used by `src/tools/decision-log.ts`) never removes a lock another process
+  owns (+6 tests).
+
 ## [3.6.0] - 2026-10-06
 
 ### Changed

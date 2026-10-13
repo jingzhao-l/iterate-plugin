@@ -104,7 +104,7 @@ Both modes share:
 - Validates after each round's fixes
 - Rolls back failed fixes, and can save / resume progress
 
-### UI layer (build-free client slots, v3.6: 11 tabs)
+### UI layer (build-free client slots, v3.7: 11 tabs, bilingual)
 
 - **ConvergenceDashboard** (`conversation.input.dock`) — live round progress bar, severity stats, dimension badges, trend mini-chart above the input; normal mode also shows fix-count badges; plus a live workflow-phase chip (current phase + running/stopped) and a **task_mode indicator (code / iterate)**, now backed by the persisted transcript (`iterate_status` / `iterate_transcript` emit `taskMode`). While a run is active the dashboard switches to a running state (round + phase) instead of the static empty state, and the start buttons are hidden.
 - **ObservatoryPanel** (`conversation.input.dock`) — an **eleven-tab** runtime observatory below the input: **live activity stream** (default tab, type filter) + **F1** review threads (expand / collapse all), **F2** convergence trend (incl. the per-round comparison table: findings raised / fixed / severity mix / validation outcomes), **F3** finding locations (severity / dimension / search filter), **F4** fixes + rollback, **F5** checkpoint resume, **F6** run console, **F7** decision timeline (type / round filter + search), **F8** Quality Gate, **F9** Experience Bank, **F10** Defense Events. Number-key shortcuts: `1`–`9` jump to F1–F9, `0` to F10, `-` back to the live stream. **F8/F9/F10 are live** — they scan the session stream for the latest `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` results and render real data (PASS/FAIL chip + per-dimension score bars, experience entries with adopt buttons + client-side search, defense type-count chips + filtered event stream); when the session stream has none they distinguish "no data on disk" from "not pulled yet" and offer a **拉取磁盘快照 (pull disk snapshot)** instruction that has the model call the read-side tools and echo the `.iterate/` artifacts back into the stream. One-click JSON export of all observatory data — manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report` (download, copy fallback). **v3.5.3: reset actions surfaced** — F5 copies an `iterate_checkpoint clear` instruction, F8 an `iterate_quality_gate clear` instruction, F10 an `iterate_defense_events clear` instruction.
@@ -112,7 +112,8 @@ Both modes share:
 - **StatsCard** (`conversation.chat.turnTail`) — convergence stats, round history, trend chart and completion summary when no findings remain.
 - **iterate theme skin** (`theme.overrideTokens`) — a warm-amber 13-token `--dsw-*` override, light/dark modes, togglable in settings.
 - **ProgressCapsule** (`shell.overlay`) — popup notification on each round completion / convergence (incl. convergence confirm).
-- **SettingsPanel** (`settings.section`) — theme toggle, triage-persistence notes, config-management guide (covers `validation.commands` / `language` / `personalization.known_intentional` with an explicit "empty validation.commands = unprotected" warning; a field picker generates the matching `iterate_config write` instruction), runtime status overview (artifact layout + view/cleanup tool guide + disk-snapshot pull), one-click triage data reset.
+- **SettingsPanel** (`settings.section`) — theme toggle, triage-persistence notes, config-management guide (covers `validation.commands` / `language` / `personalization.known_intentional` with an explicit "empty validation.commands = unprotected" warning; a field picker generates the matching `iterate_config write` instruction), **v3.7: a 回读当前配置 (read back current config) button that closes the write → read-back loop** — it copies an `iterate_config read` instruction and, once the model echoes the result into the session, shows the current value of the selected field, runtime status overview (artifact layout + view/cleanup tool guide + disk-snapshot pull), one-click triage data reset.
+- **Bilingual UI (v3.7)** — every piece of UI chrome (panels, empty states, tabs, badges, settings, stop-reason and completion labels) ships in 简体中文 and English. Pick the language under **Settings → 界面语言 / Interface language**; the choice persists in `localStorage` (`iterate-ui-lang`) and otherwise auto-detects from `navigator.language` (a stored choice always wins, and auto-detection never writes a preference). **Model-facing copy deliberately stays Chinese** — the `build*Instruction` payloads and the copy-paste guides are contract text mirroring `SKILL.md`, so the two expanded guides carry a 「中文（粘贴给模型的契约文案）」 chip instead of looking like a missed translation.
 
 The UI layer is **defensive by design**: it degrades gracefully if any of `slots` / `theme` / `React` is unavailable — it never crashes the client.
 
@@ -125,7 +126,8 @@ Beyond the 17 registered tools (full reference further down), the plugin closes 
 - **Breakpoint resume** — checkpoints saved at the start of each round; interrupted long iterations can resume
 - **History audit** — `iterate_history` reads the decision log (filtered by `type` / `since` / `round` / fixed `file` / `limit`, default latest 50, cap 200) plus a fix-registry summary (per-round fixed/failed counts, scoped by the same round/file filters) to audit run process and fix details
 - **Runtime cleanup** — `iterate_prune` removes stale decision-log entries, stale checkpoints, orphaned fix backups, empty rounds and stray temp files left by crashed atomic writes; dry-run by default (report-only), real cleanup requires `dryRun:false`, and every cleanup is logged
-- **Config read / write** — `iterate_config` supports validated, backed-up, rollback-capable partial writes
+- **Config read / write** — `iterate_config` supports validated, backed-up, rollback-capable partial writes; since v3.7 the settings page can also **read the effective config back** (instruction + inline current value)
+- **Session-aware project root (v3.7)** — on dsh ≥ `0.2.1-alpha.2` the plugin follows the session's *mutable* working directory through the host's `WorkingDirectoryService` instead of the immutable `Session.header.cwd`, so a mid-session directory switch redirects everything under `.iterate/` (config, decision log, checkpoints, fix backups, approval policy) to the workspace actually in use. The service is feature-detected with a `header.cwd` fallback on every failure mode, so older hosts behave exactly as before.
 - **v3.2 Experience Bank** — `iterate_experience` queries historical fixes and patterns with search / filter / adopt, and can persist new verified fixes (`add`) — re-adding the same pattern+dimension bumps its hit count instead of duplicating it
 - **v3.2 Quality Gate** — `iterate_quality_gate` reads quality gate status with per-dimension convergence rates and PASS/FAIL, and can recompute + persist a fresh certificate (`compute`) from this round's findings / validation results (real convergence from `findingsByRound`)
 - **v3.2 Defense Events** — `iterate_defense_events` queries defense events (precondition failures, rollbacks, invariant violations, assumption falsifications) and can `record` new ones; readable labels follow the project language (en / zh)
@@ -208,6 +210,8 @@ Press `1`–`9` to jump to F1–F9, `0` for F10, and `-` to return to the live s
 ### Config management from the settings page
 
 The settings section copies a config-edit guide that lists the supported `iterate.config.yaml` fields — including `validation.commands` (with an explicit warning that an empty list means every round runs unprotected) — and offers a **field picker**: choose a field, and the button generates the matching `iterate_config write` instruction (schema-validated, auto-backup, auto-rollback) for you to paste back.
+
+**Reading back what actually landed** — the matching **回读当前配置 / Read back current config** button copies an `iterate_config` `{ operation: "read" }` instruction; when the model echoes the result into the session, the card shows the current value of the selected field right under the picker (arrays inline, e.g. `["npm test","npm run lint"]`). Three states are told apart honestly: *nothing read back yet*, *the value*, and *read back but this field is absent* (the built-in defaults are in play). If the clipboard refuses, the read instruction is revealed in the panel for manual copy — the button is never a dead end.
 
 ---
 
@@ -338,9 +342,10 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   `0.1.2-rc.1`, `0.1.3-alpha.1`, `0.1.5-alpha.1`, `0.1.5-alpha.2`,
   `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.6-alpha.1`, `0.1.6-alpha.2`,
   `0.1.7-alpha.1`, `0.1.7-alpha.2`, `0.1.7-rc.1`, `0.1.7-rc.2`, `0.2.0-rc.1`,
-  `0.2.0-rc.2`, `0.2.1-alpha.1` (18 releases, `0.1.1-rc.1` … `0.2.1-alpha.1`).
+  `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2` (19 releases, `0.1.1-rc.1` …
+  `0.2.1-alpha.2`).
   The plugin is built against `@deepseek-ai/dsh-tools` /
-  `@deepseek-ai/dsh-util-values` `0.2.1-alpha.1` and uses only public contracts
+  `@deepseek-ai/dsh-util-values` `0.2.1-alpha.2` and uses only public contracts
   (tool registration, client slots + theme, bundle patch).
 - **Disposable-Profile evidence (real, `dsh` CLI `0.1.1-rc.1`)**: on a temp
   `$DSH_HOME`, `dsh plugin --profile <p> add <this-repo>` installed the bundle in
@@ -380,7 +385,33 @@ following capabilities; elevated capability means a DSH Profile install stays
 ### Dependencies
 
 Runtime dependencies: `@deepseek-ai/cordis`, `@deepseek-ai/dsh-tools`,
-`@deepseek-ai/dsh-util-values`, `js-yaml` — all pinned exact versions. No
+`@deepseek-ai/dsh-util-values`, `js-yaml` — all pinned exact versions.
+
+#### Upstream adoption (v3.7.0 → dsh `0.2.1-alpha.2`)
+
+- **Adopted — the mutable session working directory.** `src/working-directory.ts`
+  resolves the project root through `ctx.get('workingDirectory').get(session)`
+  when the host offers it (feature-detected; `header.cwd` fallback on a missing
+  service, a throwing service, hostile getters or a non-string result). Needed
+  because as of `0.2.1-alpha.2` the immutable header keeps the *original*
+  project by design, so reading it after a directory switch would anchor the
+  review to the wrong checkout.
+- **Evaluated, not adopted:**
+  - *Session state-record APIs* (experimental plugins writing/reading their own
+    session records) — reaching into shell-owned record internals is fragile
+    across alpha releases, and iterate's cross-session state already lives in
+    `.iterate/`.
+  - *Shared `AGENTS.md` agents directory (`DSH_AGENTS_HOME`)* — a host-level
+    instruction concern; the plugin injects its own workflow prompt.
+  - *Experimental Git Worktrees plugin* — an upstream agent-workflow feature;
+    the plugin's own `git.use_worktree` config predates it and is unrelated
+    (per-round git hygiene for the iterate loop).
+  - *Removal of the `both` tool-presentation mode* — the plugin never set a
+    presentation mode (it renders `presentCall` cards), so nothing to migrate.
+  - *Installing the dsh CLI globally from the plugin* — disk cost for a plugin
+    that never shells out at runtime.
+- All five `@deepseek-ai/*` packages are pinned to the exact `0.2.1-alpha.2`
+  (`@deepseek-ai/cordis` stays `4.0.5-alpha.1`). No
 install-time lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`);
 only `prepublishOnly` (build) runs on publish.
 

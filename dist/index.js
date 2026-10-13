@@ -43,6 +43,7 @@ import { registerQualityGateTool } from "./tools/quality-gate.js";
 import { registerDefenseEventsTool } from "./tools/defense-events.js";
 import { registerSessionHooks } from "./session-hooks.js";
 import { registerLiveCapture } from "./live.js";
+import { installWorkingDirectoryContext } from "./working-directory.js";
 import { ITERATE_SKILL_PROMPT } from "./skill-prompt.js";
 export const name = 'iterate-plugin';
 export const inject = ['tools', 'systemPrompt'];
@@ -54,6 +55,12 @@ export function apply(ctx) {
     //    running with NO `tools/pre-execute` approval gate — a fail-open hole
     //    created by load order. Registering the gate first means a partial load
     //    can only ever err on the side of MORE gating, never less.
+    //
+    //    The working-directory context is installed first for the same reason:
+    //    every cwd read below (gate policy, live capture, tool project roots)
+    //    must see dsh 0.2.1-alpha.2+ directory switches, and installing it last
+    //    would leave a partially-loaded plugin resolving the wrong workspace.
+    installWorkingDirectoryContext(ctx);
     registerSessionHooks(ctx);
     registerLiveCapture(ctx);
     // 1. Register the 17 tools (14 original + 3 v3.0). Each registration is

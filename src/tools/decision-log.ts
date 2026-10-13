@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
+import { makeLockRelease } from '../file-lock.ts'
 import type { DecisionLogEntry } from '../types.ts'
 
 const LOG_DIR = '.iterate'
@@ -124,16 +125,13 @@ export function acquireLogLockChecked(
       continue
     }
     // Owned the lock: stamp the holder pid, then release once on return.
+    // The release is ownership-checked (see `makeLockRelease`): a lock stolen
+    // from this process after its owner went stale must not be unlinked by us.
     try { writeSync(fd, String(process.pid)) } catch { /* pid stamp is advisory */ }
     try { closeSync(fd) } catch { /* best-effort */ }
-    let released = false
     return {
       acquired: true,
-      release: () => {
-        if (released) return
-        released = true
-        try { unlinkSync(lockPath) } catch { /* already gone */ }
-      },
+      release: makeLockRelease(lockPath),
     }
   }
 }

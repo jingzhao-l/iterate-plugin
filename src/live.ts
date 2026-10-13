@@ -34,6 +34,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { loadEffectiveConfig, resolveProjectRoot } from './config-loader.ts'
+import { sessionCwdOf } from './working-directory.ts'
 
 /** Keep at most this many live activity entries. */
 export const LIVE_MAX_ENTRIES = 300
@@ -140,7 +141,7 @@ export function appendLive(projectRoot: string, entry: LiveActivityEntry): Promi
 
 /** Resolve the project root a tool execution belongs to, if any. */
 function projectRootOf(exec: ToolExecution): string | null {
-  const cwd = exec.agent?.session?.header?.cwd
+  const cwd = sessionCwdOf(exec)
   if (!cwd) return null
   const resolved = resolveProjectRoot(undefined, cwd)
   return resolved.ok ? resolved.root : null
