@@ -59,7 +59,6 @@ jobs:
           else
             echo "NPM_TOKEN unset; relying on OIDC trusted publishing."
           fi
-          echo "ACTIONS_ID_TOKEN_REQUEST_URL is ${ACTIONS_ID_TOKEN_REQUEST_URL:+present}"
-          npm publish --provenance --access public --loglevel silly
+          npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
