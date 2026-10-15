@@ -384,8 +384,13 @@ following capabilities; elevated capability means a DSH Profile install stays
 
 ### Dependencies
 
-Runtime dependencies: `@deepseek-ai/cordis`, `@deepseek-ai/dsh-tools`,
-`@deepseek-ai/dsh-util-values`, `js-yaml` — all pinned exact versions.
+Runtime dependency: `js-yaml` (pinned exact version). The three DSH host
+modules the plugin is built against — `@deepseek-ai/cordis`,
+`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-util-values` — are declared as
+**optional `peerDependencies`** so the host's own copies are used instead of a
+second one bundled with the plugin (no duplicate module instances; `dsh`
+supplies them). They stay pinned in `devDependencies` for local builds and
+tests, in lockstep with the newest `dsh.compatibility.dshReleases` entry.
 
 #### Upstream adoption (v3.7.0 → dsh `0.2.1-alpha.2`)
 

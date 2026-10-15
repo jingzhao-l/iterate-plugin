@@ -5,6 +5,28 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.1] - 2026-10-15
+
+### Fixed
+
+- **DSH host modules moved out of `dependencies` into optional
+  `peerDependencies`.** `@deepseek-ai/cordis`, `@deepseek-ai/dsh-tools` and
+  `@deepseek-ai/dsh-util-values` are now declared as optional peers, so the
+  `dsh` host's own copies are used instead of a second one installed alongside
+  the plugin (a plugin-local copy makes `dsh` boot two module instances of
+  Cordis / `dsh-tools` and fails the host preflight). The three stay pinned in
+  `devDependencies` for local builds and tests, in lockstep with the newest
+  `dsh.compatibility.dshReleases` entry; `js-yaml` remains the only runtime
+  `dependency`.
+- **`repository` / `homepage` / `bugs` repointed at the standalone plugin repo
+  `jingzhao-l/iterate-plugin`** (no `directory` subpath), reversing the
+  monorepo form adopted in `v3.3.1`. `npm-publish.yml` documents that
+  `npm publish --provenance` requires the package's `repository` to match the
+  Trusted Publisher repo (`jingzhao-l/iterate-plugin`), and npm-download
+  registries link an npm package to a GitHub listing through that same field —
+  pointing at `iterate-skill` with a `directory` path dropped both the
+  provenance origin and the registry's npm-download link.
+
 ## [3.7.0] - 2026-10-13
 
 ### Changed

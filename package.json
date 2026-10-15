@@ -1,17 +1,16 @@
 {
   "name": "iterate-plugin",
-  "version": "3.7.0",
+  "version": "3.7.1",
   "description": "dsh plugin that turns the iterate skill into an autonomous closed-loop harness with quality command center and experience bank (v3.3). Features: plan -> parallel review xN -> atomic fixes -> validate -> loop -> auto-stop, plus dry-run pure-review mode, quality gate compute/persist, writable experience bank, defense events stream (record + bilingual labels), and native command buttons — with a live quality command center (F8/F9/F10 render real session data), §8 assign-fix instruction, and task_mode indicator wired end to end.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jingzhao-l/iterate-skill.git",
-    "directory": "harness/iterate-plugin"
+    "url": "https://github.com/jingzhao-l/iterate-plugin.git"
   },
-  "homepage": "https://github.com/jingzhao-l/iterate-skill/tree/main/harness/iterate-plugin",
+  "homepage": "https://github.com/jingzhao-l/iterate-plugin#readme",
   "bugs": {
-    "url": "https://github.com/jingzhao-l/iterate-skill/issues"
+    "url": "https://github.com/jingzhao-l/iterate-plugin/issues"
   },
   "keywords": [
     "dsh-plugin",
@@ -84,15 +83,31 @@
     "test:validate": "tsx --test test/validate.test.ts"
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "4.0.5-alpha.1",
-    "@deepseek-ai/dsh-tools": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-util-values": "0.2.1-alpha.2",
     "js-yaml": "4.3.2"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5-alpha.1",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.1 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.5-rc.2 || 0.1.6-alpha.1 || 0.1.6-alpha.2 || 0.1.7-alpha.1 || 0.1.7-alpha.2 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-alpha.2",
+    "@deepseek-ai/dsh-util-values": "0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.5-rc.2 || 0.1.6-alpha.1 || 0.1.6-alpha.2 || 0.1.7-alpha.1 || 0.1.7-alpha.2 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-alpha.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-util-values": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
     "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-jobs": "0.2.1-alpha.2",
     "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-util-values": "0.2.1-alpha.2",
     "@types/js-yaml": "4.0.9",
     "@types/node": "22.15.0",
     "@types/react": "19.2.2",

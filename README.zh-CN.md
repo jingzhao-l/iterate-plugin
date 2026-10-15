@@ -364,8 +364,11 @@ validation:
 
 ### 依赖
 
-运行时依赖：`@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、
-`@deepseek-ai/dsh-util-values`、`js-yaml`——全部精确锁版。
+运行时依赖：`js-yaml`（精确锁版）。本插件构建所依赖的三个 DSH 宿主模块——
+`@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-util-values`
+——已声明为**可选 `peerDependencies`**，直接复用宿主自带的那一份，避免插件内
+再打包一份造成双模块实例（由 `dsh` 提供）；同时在 `devDependencies` 中精确锁版，
+供本地构建与测试，并与 `dsh.compatibility.dshReleases` 的最新条目保持一致。
 
 #### 上游采纳记录（v3.7.0 → dsh `0.2.1-alpha.2`）
 
