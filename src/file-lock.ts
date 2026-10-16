@@ -30,6 +30,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -40,7 +41,14 @@ import {
 import { join } from 'node:path'
 
 const LOCK_DIR = '.iterate'
-const DEFAULT_WAIT_MS = 5000
+// Bounded wait before degrading to "proceed unlocked". `acquireProjectLock`
+// spins on `Atomics.wait`, which BLOCKS the single plugin thread for the whole
+// budget — so a long default wedges unrelated tool calls and the UI heartbeat
+// whenever a sibling process holds the lock. Healthy holders release in
+// microseconds, so 1000ms is very generous; anything slower is treated as
+// contention and degrades to the historical unlocked behavior rather than
+// stalling the event loop for five seconds.
+const DEFAULT_WAIT_MS = 1000
 const DEFAULT_STALE_MS = 10000
 const POLL_MS = 25
 
@@ -80,19 +88,28 @@ function lockFileName(name: string): string {
   return `.${name}.lock`
 }
 
+/** Outcome of a checked acquisition: whether the lock was actually TAKEN. */
+export interface AcquireLockResult {
+  acquired: boolean
+  release: () => void
+}
+
 /**
- * Acquire an advisory lock named `name` inside `<projectRoot>/.iterate/`.
+ * Acquire an advisory lock named `name` inside `<projectRoot>/.iterate/`,
+ * reporting whether it was actually taken.
  *
- * Returns a release function: always callable, idempotent, never throws.
- * A no-op (but callable) release is returned when the lock directory cannot be
- * created or the wait times out — callers then proceed unlocked, which is the
- * historical best-effort behavior, rather than failing the operation.
+ * The returned release function is always callable, idempotent, and never
+ * throws. `acquired:false` (with a no-op release) is returned when the lock
+ * directory cannot be created or the wait times out — callers then proceed
+ * unlocked, which is the historical best-effort behavior, rather than failing
+ * the operation. Callers that MUST hold the mutex (e.g. a log rewrite that
+ * renames the file) branch on `acquired` and refuse to run unlocked.
  */
-export function acquireProjectLock(
+export function acquireProjectLockChecked(
   projectRoot: string,
   name: string,
   options: LockOptions = {},
-): () => void {
+): AcquireLockResult {
   const waitMs = Number.isFinite(options.waitMs) && (options.waitMs ?? 0) >= 0
     ? (options.waitMs as number)
     : DEFAULT_WAIT_MS
@@ -105,7 +122,7 @@ export function acquireProjectLock(
     try {
       mkdirSync(dir, { recursive: true })
     } catch {
-      return () => {}
+      return { acquired: false, release: () => {} }
     }
   }
   const lockPath = join(dir, lockFileName(name))
@@ -115,7 +132,7 @@ export function acquireProjectLock(
     try {
       fd = openSync(lockPath, 'wx')
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return () => {}
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return { acquired: false, release: () => {} }
       // Lock exists — steal it when the owner is gone or the lock is ancient.
       let stale = false
       try {
@@ -136,11 +153,20 @@ export function acquireProjectLock(
         }
         continue
       }
-      if (Date.now() - start > waitMs) return () => {}
+      if (Date.now() - start > waitMs) return { acquired: false, release: () => {} }
       sleepSync(POLL_MS)
       continue
     }
-    // Owned the lock: stamp the holder pid, then release once on return.
+    // Owned the lock: capture the created inode (for the ownership-checked
+    // release), stamp the holder pid, then release once on return.
+    let ino = 0
+    try {
+      ino = fstatSync(fd).ino
+    } catch {
+      // inode unavailable on this filesystem — the release falls back to the
+      // pid-stamp check only.
+      ino = 0
+    }
     try {
       writeSync(fd, String(process.pid))
     } catch {
@@ -151,8 +177,24 @@ export function acquireProjectLock(
     } catch {
       // best-effort
     }
-    return makeLockRelease(lockPath)
+    return { acquired: true, release: makeLockRelease(lockPath, ino) }
   }
+}
+
+/**
+ * Acquire an advisory lock named `name` inside `<projectRoot>/.iterate/`.
+ *
+ * Returns a release function: always callable, idempotent, never throws.
+ * A no-op (but callable) release is returned when the lock directory cannot be
+ * created or the wait times out — callers then proceed unlocked, which is the
+ * historical best-effort behavior, rather than failing the operation.
+ */
+export function acquireProjectLock(
+  projectRoot: string,
+  name: string,
+  options: LockOptions = {},
+): () => void {
+  return acquireProjectLockChecked(projectRoot, name, options).release
 }
 
 /**
@@ -168,7 +210,25 @@ export function acquireProjectLock(
  *
  * Always callable, idempotent, and never throws.
  */
-export function makeLockRelease(lockPath: string): () => void {
+/**
+ * Build the release function for a lock file this process just acquired.
+ *
+ * Advisory locks here are STOLEN when the recorded owner dies or the mtime
+ * goes ancient: the steal unlinks our file and creates a new one stamped with
+ * the STEALER's pid. An unguarded release would then unlink the new holder's
+ * lock — turning our release into a double-release that admits a third process
+ * into a "held" critical section. So the release re-reads the stamp and only
+ * unlinks a file that is still ours: same pid (or unstamped) AND, when we know
+ * the inode we created, the SAME inode still at the path. The inode check closes
+ * the read-then-unlink window where the stamp check alone could race a steal
+ * (our pid is alive, but the file was already replaced between the two calls).
+ *
+ * Always callable, idempotent, and never throws.
+ *
+ * @param lockPath - the lock file path.
+ * @param ino - the inode captured at acquisition (0 = unknown; skip the check).
+ */
+export function makeLockRelease(lockPath: string, ino?: number): () => void {
   let released = false
   return () => {
     if (released) return
@@ -183,6 +243,16 @@ export function makeLockRelease(lockPath: string): () => void {
     // A stamp naming another pid means the lock was stolen and reassigned:
     // it is no longer ours to delete.
     if (raw !== '' && Number(raw) !== process.pid) return
+    // The path must still refer to the file WE created. A stealer unlinked our
+    // file and created a fresh one; that replacement carries a different inode,
+    // so unlinking by path would delete the NEW holder's lock.
+    if (typeof ino === 'number' && ino !== 0) {
+      try {
+        if (statSync(lockPath).ino !== ino) return
+      } catch {
+        return // vanished mid-release — nothing of ours left
+      }
+    }
     try {
       unlinkSync(lockPath)
     } catch {

@@ -342,11 +342,15 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   `0.1.2-rc.1`, `0.1.3-alpha.1`, `0.1.5-alpha.1`, `0.1.5-alpha.2`,
   `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.6-alpha.1`, `0.1.6-alpha.2`,
   `0.1.7-alpha.1`, `0.1.7-alpha.2`, `0.1.7-rc.1`, `0.1.7-rc.2`, `0.2.0-rc.1`,
-  `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2` (19 releases, `0.1.1-rc.1` …
-  `0.2.1-alpha.2`).
+  `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`,
+  `0.2.1-alpha.4` (21 releases, `0.1.1-rc.1` …
+  `0.2.1-alpha.4`).
   The plugin is built against `@deepseek-ai/dsh-tools` /
-  `@deepseek-ai/dsh-util-values` `0.2.1-alpha.2` and uses only public contracts
+  `@deepseek-ai/dsh-util-values` `0.2.1-alpha.4` and uses only public contracts
   (tool registration, client slots + theme, bundle patch).
+  It also declares `engines.dsh` (`>=0.1.1-rc.1`) so the dsh ≥ 0.2.1-alpha.4
+  runtime evaluates compatibility from that single range (earlier runtimes fall
+  back to the `@deepseek-ai/dsh-*` peer versions listed in `package.json`).
 - **Disposable-Profile evidence (real, `dsh` CLI `0.1.1-rc.1`)**: on a temp
   `$DSH_HOME`, `dsh plugin --profile <p> add <this-repo>` installed the bundle in
   ~449 ms; `dsh --profile <p> --dump-config` composed the `iterate-plugin` bundle
@@ -391,6 +395,29 @@ modules the plugin is built against — `@deepseek-ai/cordis`,
 second one bundled with the plugin (no duplicate module instances; `dsh`
 supplies them). They stay pinned in `devDependencies` for local builds and
 tests, in lockstep with the newest `dsh.compatibility.dshReleases` entry.
+
+#### Upstream adoption (v3.8.0 → dsh `0.2.1-alpha.4`)
+
+- **Adopted — the `engines.dsh` compatibility contract.** As of `0.2.1-alpha.4`
+  the dsh runtime decides a third-party plugin's compatibility **from
+  `engines.dsh` when it is declared** (a semver range, prereleases included),
+  ignoring `peerDependencies`; when it is absent the runtime falls back to
+  checking the exact `@deepseek-ai/dsh-*` peer versions. The plugin now declares
+  `engines.dsh: ">=0.1.1-rc.1"` — the same lower bound as the oldest
+  `dshReleases` entry — so a current runtime loads it without flagging the
+  exact-pinned peer list, while every host-specific capability stays
+  feature-detected (a missing `WorkingDirectoryService`, `ask.displayReason`,
+  `ctx.jobs`, etc. still degrade to the safe fallback). Earlier runtimes keep
+  using the `@deepseek-ai/dsh-*` peer versions, which are extended through
+  `0.2.1-alpha.4`.
+- **`0.2.1-alpha.3` / `0.2.1-alpha.4` are otherwise host-level releases** — Web
+  sign-in, secret/token masking, minimal-mode image reading, `/compact`, plugin
+  hot-reload, custom plugin index sources, and per-model reasoning-level UI. None
+  expose a tool/agent/session API this plugin consumes (`defineTool`, `JsonValue`,
+  `exec.*`, `tools/pre-execute`, `presentCall`), so no further adoption is
+  required this cycle.
+- All five `@deepseek-ai/*` packages are pinned to the exact `0.2.1-alpha.4`
+  (`@deepseek-ai/cordis` stays `4.0.5-alpha.2`).
 
 #### Upstream adoption (v3.7.0 → dsh `0.2.1-alpha.2`)
 

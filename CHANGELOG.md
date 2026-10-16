@@ -5,6 +5,122 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.0] - 2026-10-16
+
+### Changed
+
+- **Upgraded upstream dsh to `v0.2.1-alpha.4`** (released 2026-10-15) — all
+  five `@deepseek-ai/*` packages pinned to the exact `0.2.1-alpha.4`, and
+  `@deepseek-ai/cordis` moved to `4.0.5-alpha.2` (the `~4.0.5-alpha.2` peer
+  required by every dsh package at alpha.4). `dsh.compatibility.dshReleases`
+  now declares `0.2.1-alpha.3: compatible` and `0.2.1-alpha.4: compatible`
+  (21 releases, mirrored verbatim in both READMEs).
+  - **Adopted: the `engines.dsh` compatibility contract.** As of
+    `0.2.1-alpha.4` the dsh runtime decides a third-party plugin's
+    compatibility from `engines.dsh` when it is declared, ignoring
+    `peerDependencies`; when it is absent the runtime falls back to checking
+    the exact `@deepseek-ai/dsh-*` peer versions. The plugin now declares
+    `engines.dsh: ">=0.1.1-rc.1"` (the same lower bound as the oldest
+    `dshReleases` entry), so a current runtime loads the plugin without
+    flagging the exact-pinned peer list; every host capability stays
+    feature-detected. The peer versions are extended through `0.2.1-alpha.4`
+    for earlier runtimes that still use the peer fallback.
+  - **`0.2.1-alpha.3` / `0.2.1-alpha.4` are otherwise host-level releases** —
+    Web sign-in, secret/token masking, minimal-mode image reading, `/compact`,
+    plugin hot-reload, custom plugin index sources, and per-model
+    reasoning-level UI. None expose a tool/agent/session API this plugin
+    consumes (`defineTool`, `JsonValue`, `exec.*`, `tools/pre-execute`,
+    `presentCall`), so no further adoption is required this cycle.
+
+### Fixed
+
+- **`iterate_config write` and `iterate_triage apply` were unlocked read-
+  modify-write cycles.** Both wrote `iterate.config.yaml` by reading a base,
+  merging, and writing back with no mutex — two sessions on the same project
+  each read a stale base and the second merge silently discarded the first's
+  update (lost update), and the backup/rollback chain only reflected the
+  version each process had read. Both cycles now run inside the shared
+  `withProjectLock(projectRoot, 'config-write', …)`, so the two writers are
+  mutually exclusive and the lock spans read → merge → validate → backup →
+  write → backup-prune.
+- **`stoppedReasonLabel` could return an object instead of a string and crash
+  the client.** The badge keyed off the manifest's `stoppedReason` with a
+  plain object index (`zh[reason]`); a value of `__proto__` / `constructor` /
+  `toString` resolves through the prototype chain to `Object.prototype` or a
+  function — and the client rendered that return value as a React child,
+  throwing `Objects are not valid as a React child` and taking down the whole
+  observatory/dashboard. The label now requires an own-key hit
+  (`Object.hasOwn`) before returning a table value, degrades any other value
+  to a plain text label, and coerces non-strings; `iterate_transcript
+  capture` also gained an `enum` guard on `stoppedReason` (defense for the
+  seven documented values — the `Object.hasOwn` fix is the one that protects
+  hand-edited manifests).
+- **The cross-round comparison table's "已修复" column was always 0.**
+  `buildRoundComparison` read `finding.status === 'fixed'`, but the review
+  findings schema carries no `status` field, so the column never reflected
+  anything. `fixed` is now counted from the transcript's applied fixes
+  (`{ round, success }`, successful only) and the client passes the manifest's
+  `fixes` — the column shows real data.
+- **Stale config-edit copy contradicted the fail-closed contract.** The
+  settings guide still told users that an empty validation result is treated as
+  a pass; the actual contract aborts the run (`converged_unverified` /
+  `aborted_by_config`, never a plain `converged`). The text now matches.
+- **Triage-panel keyboard shortcuts silently died on the 2nd+ panel.** Every
+  turn with a report mounts its own triage panel, but the keydown handler
+  resolved `document.querySelector('[data-iterate="triage"]')` — only the
+  first one — so y/n/a and ↑/↓ did nothing whenever focus sat in a later
+  panel, with no indication. The handler now uses a per-instance ref.
+- **Opening a session popped a stale "Round X 完成" pulse.** The dashboard
+  effect keyed on the report hash fires on mount, so opening a session that
+  already had a report emitted a completion pulse for work that did not just
+  complete. The first report an instance sees is now recorded without a pulse;
+  only a subsequent round progression pulses.
+- **Review-prompt builder used a guarded `meta` and then dereferenced it
+  unguarded.** `agent(base, { schema: meta.findingsSchema })` would have thrown
+  on an undefined `meta` while the line above handled it gracefully; both sites
+  now use `meta?.findingsSchema`.
+- **A nudge with no manifest yet recorded `mode: 'normal'`.** Recording a
+  concrete mode before `capture` would rewrite a dry-run run into a `normal`
+  one in the status/badge until capture landed. The fallback now records
+  `null` ("not captured yet"), matching the manifest-level rule. Checkpoint
+  `mode` is also nullable now, so a hand-corrupted checkpoint is reported as
+  unknown instead of silently labelled `normal`.
+- **Lock release had a read-then-unlink TOCTOU, and the wait budget blocked the
+  event loop for up to 5 s.** The release re-read the pid stamp and unlinked by
+  path; a lock stolen from a live owner between the read and the unlink could
+  be reassigned, turning our release into a double-release that admitted a third
+  process into a "held" critical section. The acquisition now captures the
+  created inode and the release verifies the inode is still the one at the
+  path before unlinking. The bounded wait is 1000 ms instead of 5000 ms
+  (healthy holders release in microseconds; the degrade-to-unlocked fallback is
+  unchanged).
+- **`decision-log.ts` hand-rolled a second copy of the project lock.** Its
+  acquire/steal/wait/pid-alive/sleep logic duplicated `file-lock.ts` with a
+  separate stale/wait parameter set that could drift. `acquireLogLockChecked`
+  is now a thin wrapper over the shared `acquireProjectLockChecked` with lock
+  name `decision-log` (`.iterate/.decision-log.lock`), keeping the
+  `acquired` flag the prune rewrite needs.
+- **The `changed-only` review scope admitted out-of-bounds symlinks.**
+  `filterExistingFiles` used `existsSync`/`statSync`, which follow symlinks, so
+  a git entry that is a link to a file OUTSIDE the project passed the path-only
+  containment check and entered the scope. Every finding on it then failed the
+  evidence gate (`file_not_found`) and was permanently `EVIDENCE_VIOLATION` —
+  an unresolvable false positive for repos with dotfile or shared-config links.
+  The scope now uses `lstatSync`/`realpathSync` and drops links whose real
+  target escapes the project root.
+- **`iterate_transcript nudge` and `iterate_checkpoint resume` were unlocked
+  read-modify-writes.** A concurrent call in a sibling process could drop the
+  other's steering text or lose the other's `resumeCount` increment. Both now
+  serialize on the shared advisory lock (`transcript` / `checkpoint`).
+
+### Tests
+
+- 1219 tests (from 1216): `engines.dsh` contract (range + lower bound), the
+  `fixed`-count wiring from transcript fixes, the `stoppedReasonLabel`
+  prototype-key guard, and the nudge/checkpoint mode fallback. Typecheck clean
+  across all three programs (server + tests + client), `dist/` and
+  `lib/client.js` rebuilt in step with `src/`.
+
 ## [3.7.1] - 2026-10-15
 
 ### Fixed

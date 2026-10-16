@@ -479,14 +479,17 @@ describe('iterate_transcript nudge execute', () => {
     }
   })
 
-  it('a missing manifest nudge defaults to a fresh normal-mode run', async () => {
+  it('a missing manifest nudge records an unknown mode (capture sets it)', async () => {
     const tool = captureTranscriptTool()
     const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
     try {
       const res = (await tool({ operation: 'nudge', path: root, text: 'go' })) as Record<string, unknown>
       assert.equal(res.updated, true)
-      const manifest = res.transcript as { mode: 'dry-run' | 'normal' }
-      assert.equal(manifest.mode, 'normal')
+      const manifest = res.transcript as { mode: 'dry-run' | 'normal' | null }
+      // The run's mode is genuinely unknown before `capture`; fabricating
+      // `'normal'` here would rewrite a dry-run run into a `normal` one in the
+      // status/badge until capture lands.
+      assert.equal(manifest.mode, null)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

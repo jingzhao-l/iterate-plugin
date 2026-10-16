@@ -334,7 +334,7 @@ validation:
 ### Node.js / DSH 兼容范围
 
 - **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
-- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`（共 19 个版本，`0.1.1-rc.1` … `0.2.1-alpha.2`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.1-alpha.2` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。
+- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`（共 21 个版本，`0.1.1-rc.1` … `0.2.1-alpha.4`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.1-alpha.4` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch）。插件同时声明 `engines.dsh`（`>=0.1.1-rc.1`），使 dsh ≥ 0.2.1-alpha.4 运行时只依据该范围判断兼容性（更早的运行时仍回退校验 `package.json` 中列出的 `@deepseek-ai/dsh-*` peer 版本）。
 - **一次性 Profile 证据（真实，`dsh` CLI `0.1.1-rc.1`）**：在临时 `$DSH_HOME` 下
   `dsh plugin --profile <p> add <本仓库>` 约 449ms 完成安装；`dsh --profile <p>
   --dump-config` 正确合成 `iterate-plugin` bundle patch；`dsh plugin --profile <p>
@@ -369,6 +369,23 @@ validation:
 ——已声明为**可选 `peerDependencies`**，直接复用宿主自带的那一份，避免插件内
 再打包一份造成双模块实例（由 `dsh` 提供）；同时在 `devDependencies` 中精确锁版，
 供本地构建与测试，并与 `dsh.compatibility.dshReleases` 的最新条目保持一致。
+
+#### 上游采纳记录（v3.8.0 → dsh `0.2.1-alpha.4`）
+
+- **已采纳——`engines.dsh` 兼容契约。** 自 `0.2.1-alpha.4` 起，dsh 运行时**在声明了
+  `engines.dsh` 时只依据该字段**（一个含预发布版本的 semver 范围）判断第三方插件兼容性，
+  忽略 `peerDependencies`；未声明时才回退逐个校验精确的 `@deepseek-ai/dsh-*` peer 版本。
+  插件现已声明 `engines.dsh: ">=0.1.1-rc.1"`（与最早的 `dshReleases` 条目同下界），
+  使当前运行时加载时不再因精确锁版的 peer 列表被判不兼容；而所有宿主相关能力依旧
+  特性探测（缺少 `WorkingDirectoryService`、`ask.displayReason`、`ctx.jobs` 等一律
+  降级到安全回退）。更早的运行时仍走 `@deepseek-ai/dsh-*` peer 版本，已扩展至
+  `0.2.1-alpha.4`。
+- **`0.2.1-alpha.3` / `0.2.1-alpha.4` 其余均为宿主级变更**——Web 登录、密钥/令牌脱敏、
+  极简模式读图、`/compact`、插件热重载、自定义插件索引源、按模型配置推理等级 UI。
+  都未暴露本插件消费的 tool/agent/session API（`defineTool`、`JsonValue`、`exec.*`、
+  `tools/pre-execute`、`presentCall`），本轮无需进一步采纳。
+- 五个 `@deepseek-ai/*` 包全部精确锁到 `0.2.1-alpha.4`
+  （`@deepseek-ai/cordis` 保持 `4.0.5-alpha.2`）。
 
 #### 上游采纳记录（v3.7.0 → dsh `0.2.1-alpha.2`）
 

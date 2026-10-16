@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
 import { writeJsonAtomic } from "../atomic-fs.js";
+import { withProjectLock } from "../file-lock.js";
 import { checkpointPath, iterateDir, transcriptPath } from "../paths.js";
 import { readRegistry } from "./fix.js";
 import { readDecisionEntries } from "./decision-log.js";
@@ -289,23 +290,29 @@ export function registerCheckpointTool(ctx) {
                 return { operation: 'load', ok: true, checkpoint: checkpoint };
             }
             if (args.operation === 'resume') {
-                const current = readCheckpoint(projectRoot);
-                if (!current) {
-                    return { operation: 'resume', ok: false, error: 'no checkpoint to resume — run `save` first' };
-                }
-                const resumed = {
-                    ...current,
-                    resumeCount: (current.resumeCount ?? 0) + 1,
-                    updatedAt: new Date().toISOString(),
-                };
-                try {
-                    mkdirSync(iterateDir(projectRoot), { recursive: true });
-                    writeJsonAtomic(checkpointPath(projectRoot), resumed);
-                }
-                catch (err) {
-                    return { operation: 'resume', ok: false, error: `failed to persist resumed checkpoint: ${String(err)}` };
-                }
-                return { operation: 'resume', ok: true, checkpoint: resumed };
+                // Read-modify-write across processes: a concurrent resume in a
+                // sibling process would read the same resumeCount and write it back,
+                // losing one increment. Serialize on a checkpoint lock (the same
+                // advisory pattern the config/triage/transcript writers use).
+                return withProjectLock(projectRoot, 'checkpoint', () => {
+                    const current = readCheckpoint(projectRoot);
+                    if (!current) {
+                        return { operation: 'resume', ok: false, error: 'no checkpoint to resume — run `save` first' };
+                    }
+                    const resumed = {
+                        ...current,
+                        resumeCount: (current.resumeCount ?? 0) + 1,
+                        updatedAt: new Date().toISOString(),
+                    };
+                    try {
+                        mkdirSync(iterateDir(projectRoot), { recursive: true });
+                        writeJsonAtomic(checkpointPath(projectRoot), resumed);
+                    }
+                    catch (err) {
+                        return { operation: 'resume', ok: false, error: `failed to persist resumed checkpoint: ${String(err)}` };
+                    }
+                    return { operation: 'resume', ok: true, checkpoint: resumed };
+                });
             }
             if (args.operation === 'clear') {
                 const existed = existsSync(checkpointPath(projectRoot));

@@ -565,7 +565,7 @@ export class ReviewTranscriptBuilder {
       return
     }
     this.checkpoint = {
-      mode: state.mode === 'dry-run' || state.mode === 'normal' ? state.mode : 'normal',
+      mode: state.mode === 'dry-run' || state.mode === 'normal' ? state.mode : null,
       round: typeof state.round === 'number' ? state.round : 0,
       maxRounds: typeof state.maxRounds === 'number' ? state.maxRounds : 0,
       fixedCount: typeof state.fixedCount === 'number' ? state.fixedCount : 0,
@@ -804,7 +804,7 @@ function normalizeCheckpointRow(input: unknown): TranscriptCheckpoint | null {
   const round = typeof c.round === 'number' && Number.isFinite(c.round) ? c.round : 0
   if (round <= 0) return null
   return {
-    mode: c.mode === 'dry-run' || c.mode === 'normal' ? c.mode : 'normal',
+    mode: c.mode === 'dry-run' || c.mode === 'normal' ? c.mode : null,
     round: clampRoundValue(c.round),
     maxRounds: clampCountValue(c.maxRounds),
     fixedCount: clampCountValue(c.fixedCount),

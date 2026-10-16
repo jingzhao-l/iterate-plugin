@@ -134,7 +134,7 @@ for (let r = 1; r <= maxRounds; r++) {
         (attachments.length > 0 ? '\\n User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
         '\\n Already-known findings (do NOT re-report): ' +
         JSON.stringify(known) + nudge + '\\nReturn the findings JSON object.'
-      return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
+      return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta?.findingsSchema }, backend))
     }))
     // A per-dimension reviewer subagent resolves \`null\` on child failure; the
     // aggregate below would report an all-failed round as an empty round, and
@@ -463,7 +463,7 @@ for (let r = startRound; r <= maxRounds; r++) {
         (steering ? '\\n STEERING — read this first: ' + steering : '') +
         (attachments.length > 0 ? '\\n User-attached images are part of the evidence; use their descriptions when judging (you see the metadata/descriptions below, not the pixels): ' + JSON.stringify(attachments) + '.' : '') +
         '\\n Do NOT re-report already-known architectural findings: ' + JSON.stringify(architectural) + nudge + '\\nReturn the findings JSON object.'
-      return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta.findingsSchema }, backend))
+      return agent(base + extra, Object.assign({ label: 'review:' + dim + ':r' + r, schema: meta?.findingsSchema }, backend))
     }))
     // ALL reviewers returning null (child failures) means this round produced
     // no usable output — an empty aggregate must not read like a clean

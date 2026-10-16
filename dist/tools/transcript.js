@@ -23,6 +23,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { writeTextAtomicAsync } from "../atomic-fs.js";
+import { withProjectLock } from "../file-lock.js";
 import { dirname } from 'node:path';
 import { loadEffectiveConfig, resolveProjectRootForExec, } from "../config-loader.js";
 import { transcriptPath } from "../paths.js";
@@ -73,7 +74,7 @@ function normalizeCheckpoint(input) {
     if (round <= 0)
         return null;
     return {
-        mode: c.mode === 'dry-run' || c.mode === 'normal' ? c.mode : 'normal',
+        mode: c.mode === 'dry-run' || c.mode === 'normal' ? c.mode : null,
         round,
         maxRounds: typeof c.maxRounds === 'number' && Number.isFinite(c.maxRounds) ? c.maxRounds : 0,
         fixedCount: typeof c.fixedCount === 'number' && Number.isFinite(c.fixedCount) ? c.fixedCount : 0,
@@ -198,7 +199,23 @@ export function registerTranscriptTool(ctx) {
                     'the run console can show which commands ran and whether they passed.',
             },
             refReadFiles: { type: 'json', description: 'For `capture`: flat array of all read files across rounds (optional).' },
-            stoppedReason: { type: 'string', description: 'For `capture`: why the run ended — "converged" | "max_rounds_reached" | "aborted_by_validation" | "aborted_by_config" | "schema_invalid" | "no_usable_reviewer_output" | "inconclusive". When omitted, derived from the convergence trend (trailing 0 = converged, otherwise = max_rounds_reached once a round ran).' },
+            stoppedReason: {
+                type: 'string',
+                // Enum guard: the label renderer keys off this value, so a stray or
+                // prototype-chain string (e.g. "__proto__") must not enter the tool.
+                // The render path additionally uses Object.hasOwn (defense for
+                // hand-edited manifests that bypass this schema).
+                enum: [
+                    'converged',
+                    'max_rounds_reached',
+                    'aborted_by_validation',
+                    'aborted_by_config',
+                    'schema_invalid',
+                    'no_usable_reviewer_output',
+                    'inconclusive',
+                ],
+                description: 'For `capture`: why the run ended — "converged" | "max_rounds_reached" | "aborted_by_validation" | "aborted_by_config" | "schema_invalid" | "no_usable_reviewer_output" | "inconclusive". When omitted, derived from the convergence trend (trailing 0 = converged, otherwise = max_rounds_reached once a round ran).'
+            },
             // `string | null` (NOT plain `type: 'string'`): dsh validates arguments
             // against the compiled schema BEFORE execute, and the docs — plus the
             // client's clear button — advertise `{"operation":"nudge","text":null}`.
@@ -288,52 +305,65 @@ export function registerTranscriptTool(ctx) {
                 };
             }
             if (args.operation === 'nudge') {
-                let manifest = null;
-                if (existsSync(file)) {
-                    try {
-                        const parsed = JSON.parse(await readFile(file, 'utf-8'));
-                        manifest = parsed;
+                // Read-modify-write across processes: a concurrent nudge in a sibling
+                // process would otherwise read the same manifest and write back over
+                // each other's steering text. Serialize on the shared transcript lock
+                // (same pattern as the config/triage writers). The body still awaits,
+                // so the lock is held across the read and write; a same-process
+                // re-entry degrades to unlocked (the advisory lock is per-pid), which
+                // is the documented best-effort fallback for a low-value projection.
+                return withProjectLock(projectRoot, 'transcript', async () => {
+                    let manifest = null;
+                    if (existsSync(file)) {
+                        try {
+                            const parsed = JSON.parse(await readFile(file, 'utf-8'));
+                            manifest = parsed;
+                        }
+                        catch {
+                            manifest = null;
+                        }
                     }
-                    catch {
-                        manifest = null;
+                    // Rehydrating a parsed-but-malformed manifest (e.g. `rounds: [null]`
+                    // or a non-object) must never crash the nudge — degrade to a fresh
+                    // builder so the steering text still lands. The fallback must keep
+                    // the ORIGINAL run identity (mode/taskMode/goal/maxRounds) so a
+                    // stray malformed field can never silently rewrite a dry-run run
+                    // into a `normal` one.
+                    const fallbackOpts = {
+                        project: projectRoot,
+                        mode: (manifest?.mode === 'dry-run' || manifest?.mode === 'normal' ? manifest.mode : null),
+                        taskMode: (manifest?.taskMode === 'code' || manifest?.taskMode === 'iterate' ? manifest.taskMode : null),
+                        approval,
+                        goal: typeof manifest?.goal === 'string' ? manifest.goal : '',
+                        maxRounds: typeof manifest?.maxRounds === 'number' ? manifest.maxRounds : 0,
+                    };
+                    let builder;
+                    if (manifest) {
+                        try {
+                            builder = rehydrateBuilder(manifest, approval);
+                        }
+                        catch {
+                            builder = new ReviewTranscriptBuilder(fallbackOpts);
+                        }
                     }
-                }
-                // Rehydrating a parsed-but-malformed manifest (e.g. `rounds: [null]`
-                // or a non-object) must never crash the nudge — degrade to a fresh
-                // builder so the steering text still lands. The fallback must keep
-                // the ORIGINAL run identity (mode/taskMode/goal/maxRounds) so a
-                // stray malformed field can never silently rewrite a dry-run run
-                // into a `normal` one.
-                const fallbackOpts = {
-                    project: projectRoot,
-                    mode: (manifest?.mode === 'dry-run' || manifest?.mode === 'normal' ? manifest.mode : null),
-                    taskMode: (manifest?.taskMode === 'code' || manifest?.taskMode === 'iterate' ? manifest.taskMode : null),
-                    approval,
-                    goal: typeof manifest?.goal === 'string' ? manifest.goal : '',
-                    maxRounds: typeof manifest?.maxRounds === 'number' ? manifest.maxRounds : 0,
-                };
-                let builder;
-                if (manifest) {
-                    try {
-                        builder = rehydrateBuilder(manifest, approval);
+                    else {
+                        // No manifest yet: the run's mode is genuinely unknown at nudge
+                        // time (capture sets it). Recording `mode: 'normal'` here would
+                        // rewrite a dry-run run into a `normal` one in the status/badge
+                        // until capture lands — `null` honestly says "not captured yet".
+                        builder = new ReviewTranscriptBuilder({ project: projectRoot, mode: null, approval });
                     }
-                    catch {
-                        builder = new ReviewTranscriptBuilder(fallbackOpts);
+                    builder.setNudge(typeof args.text === 'string' && args.text.trim() ? args.text : null);
+                    const persisted = await persistChecked(file, builder.serialize());
+                    if (!persisted.ok) {
+                        return { operation: 'nudge', updated: false, error: persisted.error };
                     }
-                }
-                else {
-                    builder = new ReviewTranscriptBuilder({ project: projectRoot, mode: 'normal', approval });
-                }
-                builder.setNudge(typeof args.text === 'string' && args.text.trim() ? args.text : null);
-                const persisted = await persistChecked(file, builder.serialize());
-                if (!persisted.ok) {
-                    return { operation: 'nudge', updated: false, error: persisted.error };
-                }
-                return {
-                    operation: 'nudge',
-                    updated: true,
-                    transcript: builder.serialize(),
-                };
+                    return {
+                        operation: 'nudge',
+                        updated: true,
+                        transcript: builder.serialize(),
+                    };
+                });
             }
             // capture
             // `observatory.capture: false` opts the project out of transcript

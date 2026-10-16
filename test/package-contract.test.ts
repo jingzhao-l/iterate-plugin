@@ -32,6 +32,7 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
   }
   files?: string[]
   exports?: Record<string, unknown>
+  engines?: Record<string, string>
 }
 const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')) as {
   version: string
@@ -114,6 +115,27 @@ describe('aligned @deepseek-ai/* dependency versions', () => {
 
   it('keeps @deepseek-ai/cordis on the peer range the target dsh release requires', () => {
     assert.match(all['@deepseek-ai/cordis']!, /^~?\d+\.\d+\.\d+/, 'cordis must stay a concrete range')
+  })
+})
+
+describe('engines.dsh compatibility range', () => {
+  const releases = Object.keys(pkg.dsh.compatibility.dshReleases)
+
+  it('declares engines.dsh as a semver range', () => {
+    const range = pkg.engines?.dsh
+    assert.ok(range, 'engines.dsh must be declared (dsh ≥ 0.2.1-alpha.4 evaluates it first)')
+    assert.equal(typeof range, 'string', 'engines.dsh must be a string range')
+    assert.match(range!, /^\s*>=\s*\d+\.\d+\.\d+/, 'engines.dsh must be a ">=X.Y.Z" range')
+  })
+
+  it('anchors the range lower bound to the oldest declared-compatible release', () => {
+    const range = pkg.engines?.dsh!
+    const lowerBound = />=\s*([\w.-]+)/.exec(range)![1]!
+    assert.equal(
+      lowerBound,
+      releases[0],
+      'engines.dsh lower bound must equal the oldest dshReleases entry',
+    )
   })
 })
 

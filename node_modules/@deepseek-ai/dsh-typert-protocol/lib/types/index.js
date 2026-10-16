@@ -8,6 +8,8 @@ import { Context, Service } from '@deepseek-ai/cordis';
 export { RemoteError, remoteErrorOf } from "./remote-error.js";
 export { TYPERT_OWNED_VALUE, isTypertOwnedValue, typertOwnedValue } from "./owned-value.js";
 export { isRemoteJsonValue, isRemoteUplinkItem } from "./json-value.js";
+export { createTypertRemoteInfo, isTypertRemoteMethod } from "./remote-info.js";
+export { principalOf } from "./principal.js";
 const TYPERT_REMOTE_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/;
 /**
  * Test one generated Remote name against the Connection endpoint grammar.
@@ -25,7 +27,7 @@ const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-method
  * a Host composition to read it.
  * @param service - owning Service instance, normally `this`.
  * @param serviceKey - exact Cordis service key.
- * @param options - optional distinct wire namespace.
+ * @param options - optional wire namespace.
  * @returns a frozen, inspectable binding with no compiler-injected metadata.
  */
 export function bindTypertRemote(service, serviceKey, options = {}) {
@@ -33,7 +35,7 @@ export function bindTypertRemote(service, serviceKey, options = {}) {
     const namespace = options.namespace ?? serviceKey;
     validateName('namespace', namespace);
     const ctx = Reflect.get(service, 'ctx');
-    if (ctx instanceof Context)
+    if (Context.is(ctx))
         provideInvocationAccessor(ctx);
     return Object.freeze({ service, serviceKey, namespace });
 }
@@ -45,7 +47,7 @@ export class TypertRemoteService extends Service {
      * Register the Service and bind the same key to Typert Gateway.
      * @param ctx - owning Cordis Context.
      * @param serviceKey - exact Cordis service key and default wire namespace.
-     * @param options - optional distinct wire namespace.
+     * @param options - optional wire namespace.
      */
     constructor(ctx, serviceKey, options = {}) {
         super(ctx, serviceKey);
@@ -66,38 +68,61 @@ function provideInvocationAccessor(ctx) {
 export function Remote(methodExportOrOptions, context) {
     if (typeof methodExportOrOptions === 'string') {
         validateName('Remote export name', methodExportOrOptions);
-        return remoteDecorator({ kind: 'direct' }, undefined, methodExportOrOptions);
+        return remoteDecorator({ kind: 'direct' }, { exportName: methodExportOrOptions });
     }
     if (typeof methodExportOrOptions === 'object') {
-        if (remoteOptionMode(methodExportOrOptions) !== 'stream'
-            || Reflect.ownKeys(methodExportOrOptions).length !== 1) {
-            throw new TypeError('typert-protocol: Remote options must contain exactly mode: "stream"');
-        }
-        return remoteDecorator({ kind: 'direct' }, 'stream');
+        return remoteDecorator({ kind: 'direct' }, markerOptions(methodExportOrOptions, REMOTE_OPTION_KEYS, 'Remote options require name, mode: "stream", or resources'));
     }
     if (context === undefined)
         throw new TypeError('typert-protocol: Remote decorator context is missing');
     addMarkerInitializer(context, { kind: 'direct' });
 }
-function remoteOptionMode(options) {
-    return Reflect.get(options, 'mode');
-}
-function remoteDecorator(invocation, mode, exportName) {
-    return function (_method, context) {
-        addMarkerInitializer(context, invocation, mode, exportName);
+const REMOTE_OPTION_KEYS = new Set(['name', 'mode', 'resources']);
+const REMOTE_SCOPE_OPTION_KEYS = new Set(['name', 'resources']);
+/** Validate one decorator options object against its accepted keys and select the marker fields. */
+function markerOptions(options, accepted, requirement) {
+    const keys = Reflect.ownKeys(options);
+    if (keys.length === 0 || keys.some(key => typeof key !== 'string' || !accepted.has(key))
+        || (Object.hasOwn(options, 'mode') && options.mode !== 'stream')) {
+        throw new TypeError(`typert-protocol: ${requirement}`);
+    }
+    const { mode, name, resources } = options;
+    if (name !== undefined)
+        validateName('Remote export name', name);
+    return {
+        ...(mode === undefined ? {} : { mode }),
+        ...(name === undefined ? {} : { exportName: name }),
+        ...(resources === undefined ? {} : { resources: resourceReaders(resources) }),
     };
 }
-/**
- * Create a decorator for a method resolved from one Remote Scope.
- * @param key - scope key declared through the Context map.
- * @param exportName - optional Remote export name; defaults to the method name.
- * @returns a standard method decorator that records a versioned prototype descriptor.
- */
-export function RemoteScope(key, exportName) {
+/** Freeze declared readers into the marker record; a misdeclared reader fails at decoration. */
+function resourceReaders(resources) {
+    const readers = {};
+    for (const [kind, reader] of Object.entries(resources)) {
+        if (typeof reader !== 'function') {
+            throw new TypeError(`typert-protocol: Remote resource reader "${kind}" must be a function`);
+        }
+        readers[kind] = reader;
+    }
+    if (Object.keys(readers).length === 0)
+        throw new TypeError('typert-protocol: Remote resources require at least one reader');
+    return Object.freeze(readers);
+}
+function remoteDecorator(invocation, options = {}) {
+    return function (_method, context) {
+        addMarkerInitializer(context, invocation, options);
+    };
+}
+export function RemoteScope(key, option) {
     validateName('Scope key', key);
-    if (exportName !== undefined)
-        validateName('Remote export name', exportName);
-    return remoteDecorator({ kind: 'context', context: key }, undefined, exportName);
+    const invocation = { kind: 'context', context: key };
+    if (option === undefined)
+        return remoteDecorator(invocation);
+    if (typeof option === 'string') {
+        validateName('Remote export name', option);
+        return remoteDecorator(invocation, { exportName: option });
+    }
+    return remoteDecorator(invocation, markerOptions(option, REMOTE_SCOPE_OPTION_KEYS, 'RemoteScope options require name or resources'));
 }
 /**
  * Read Remote markers attached to a live Service's class prototype.
@@ -129,7 +154,7 @@ function readRemoteMethodDescriptor(prototype) {
     }
     return descriptor;
 }
-function addMarkerInitializer(context, invocation, mode, exportName) {
+function addMarkerInitializer(context, invocation, options = {}) {
     if (context.private || context.static || typeof context.name !== 'string') {
         throw new TypeError('typert-protocol: Remote decorators require a public instance method with a string name');
     }
@@ -139,21 +164,24 @@ function addMarkerInitializer(context, invocation, mode, exportName) {
         if (prototype === null) {
             throw new TypeError(`typert-protocol: cannot mark Remote method "${method}" on an object without a prototype`);
         }
-        mark(prototype, method, invocation, mode, exportName);
+        mark(prototype, method, invocation, options);
     });
 }
-function mark(prototype, method, invocation, mode, exportName) {
+function mark(prototype, method, invocation, { mode, exportName, resources }) {
     const descriptor = readRemoteMethodDescriptor(prototype);
     const marker = Object.freeze({
         method,
         ...(exportName === undefined || exportName === method ? {} : { exportName }),
         ...(mode === undefined ? {} : { mode }),
         invocation: Object.freeze(invocation),
+        ...(resources === undefined ? {} : { resources }),
     });
     const current = descriptor?.methods.find(candidate => candidate.method === method);
     if (current !== undefined) {
+        // One decorator application owns one frozen reader record, so identity marks the same declaration.
         if (current.exportName === marker.exportName
             && current.mode === marker.mode
+            && current.resources === marker.resources
             && sameInvocation(current.invocation, invocation))
             return;
         throw new Error(`typert-protocol: Remote method "${method}" has conflicting invocation markers`);

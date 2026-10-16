@@ -6,6 +6,7 @@ import yaml from 'js-yaml'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 import { writeTextAtomic } from '../atomic-fs.ts'
 import { configBackupSuffix } from '../config-write.ts'
+import { withProjectLock } from '../file-lock.ts'
 import { WHOLE_FILE_LINE } from '../evidence.ts'
 import type { KnownIntentional } from '../types.ts'
 
@@ -268,56 +269,62 @@ function applyEntries(
   error: string
 } {
   const configPath = join(projectRoot, CONFIG_FILE)
-  let config: Record<string, unknown>
-  try {
-    config = readConfigFile(configPath)
-  } catch (err) {
-    // The file exists but is malformed — refuse to overwrite user data.
-    return { ok: false, error: `Failed to read config: ${String(err)}` }
-  }
-  const existing = readKnownIntentional(config)
-  const { merged, added, skipped, dropped } = mergeKnownIntentional(existing, incoming)
-  const nextConfig = buildConfigWithKnownIntentional(config, merged)
-
-  const hadFile = existsSync(configPath)
-  const backupPath = hadFile ? `${configPath}.bak-${backupSuffix()}` : null
-
-  if (backupPath) {
+  // Serialize against `iterate_config write` (SAME lock name) so a triage apply
+  // and a config write on one project cannot interleave their read-modify-write
+  // and silently drop each other's updates. The lock spans read → merge →
+  // backup → write → backup-prune so the whole cycle is atomic.
+  return withProjectLock(projectRoot, 'config-write', () => {
+    let config: Record<string, unknown>
     try {
-      copyFileSync(configPath, backupPath)
+      config = readConfigFile(configPath)
     } catch (err) {
-      return {
-        ok: false,
-        error: `Failed to create backup: ${String(err)}`,
+      // The file exists but is malformed — refuse to overwrite user data.
+      return { ok: false, error: `Failed to read config: ${String(err)}` }
+    }
+    const existing = readKnownIntentional(config)
+    const { merged, added, skipped, dropped } = mergeKnownIntentional(existing, incoming)
+    const nextConfig = buildConfigWithKnownIntentional(config, merged)
+
+    const hadFile = existsSync(configPath)
+    const backupPath = hadFile ? `${configPath}.bak-${backupSuffix()}` : null
+
+    if (backupPath) {
+      try {
+        copyFileSync(configPath, backupPath)
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Failed to create backup: ${String(err)}`,
+        }
       }
     }
-  }
 
-  const yamlText = yaml.dump(nextConfig, { noRefs: true })
-  try {
-    writeTextAtomic(configPath, yamlText)
-  } catch (err) {
-    // Rollback: restore the backup, or REMOVE the file we just created when
-    // there was no prior config — an empty file left behind would poison all
-    // future config reads (empty YAML is not a valid mapping).
-    let rollbackError = ''
+    const yamlText = yaml.dump(nextConfig, { noRefs: true })
     try {
-      if (backupPath) copyFileSync(backupPath, configPath)
-      else if (existsSync(configPath)) rmSync(configPath, { force: true })
-    } catch (rbErr) {
-      rollbackError = `; rollback also failed: ${String(rbErr)}`
+      writeTextAtomic(configPath, yamlText)
+    } catch (err) {
+      // Rollback: restore the backup, or REMOVE the file we just created when
+      // there was no prior config — an empty file left behind would poison all
+      // future config reads (empty YAML is not a valid mapping).
+      let rollbackError = ''
+      try {
+        if (backupPath) copyFileSync(backupPath, configPath)
+        else if (existsSync(configPath)) rmSync(configPath, { force: true })
+      } catch (rbErr) {
+        rollbackError = `; rollback also failed: ${String(rbErr)}`
+      }
+      return {
+        ok: false,
+        error: `Failed to write config: ${String(err)}${rollbackError}`,
+      }
     }
-    return {
-      ok: false,
-      error: `Failed to write config: ${String(err)}${rollbackError}`,
-    }
-  }
 
-  // Success: bound the accumulation of timestamped backups so a long-lived
-  // project never collects an unbounded pile of config snapshots.
-  if (backupPath) pruneOldConfigBackups(configPath)
+    // Success: bound the accumulation of timestamped backups so a long-lived
+    // project never collects an unbounded pile of config snapshots.
+    if (backupPath) pruneOldConfigBackups(configPath)
 
-  return { ok: true, added, skipped, dropped, count: merged.length, configPath, backupPath }
+    return { ok: true, added, skipped, dropped, count: merged.length, configPath, backupPath }
+  })
 }
 
 /**

@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { defaultConfig, loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from "../config-loader.js";
 import { applyConfigUpdates, readRawConfig, validateConfigUpdates, writeConfigFile, } from "../config-write.js";
+import { withProjectLock } from "../file-lock.js";
 /**
  * Register the `iterate_config` tool.
  * Reads and returns the iterate.config.yaml configuration, or writes a
@@ -105,42 +106,50 @@ export function registerConfigTool(ctx) {
                 if (updateErrors.length > 0) {
                     return { operation: 'write', ok: false, found: false, errors: updateErrors };
                 }
-                let base;
-                try {
-                    // Partial updates must be mergeable on a FRESH project (no config
-                    // file yet): otherwise `{max_rounds: 5}` alone fails schema
-                    // validation with a misleading "missing goal". Merge against the
-                    // built-in defaults when there is no file to read, so the written
-                    // config captures the effective config (defaults + update) and the
-                    // documented "write a partial update" contract works out of the box.
-                    base = existsSync(join(projectRoot, 'iterate.config.yaml'))
-                        ? readRawConfig(join(projectRoot, 'iterate.config.yaml'))
-                        : defaultConfig();
-                }
-                catch (err) {
-                    return { operation: 'write', ok: false, found: false, error: `failed to read config: ${String(err)}` };
-                }
-                const merged = applyConfigUpdates(base, updates ?? {});
-                const schemaErrors = validateConfig(merged);
-                if (schemaErrors.length > 0) {
+                // Serialize the read→merge→validate→write cycle against any other
+                // config/triage writer in a sibling process: without the lock, two
+                // sessions on the same project each read a stale base and the second
+                // merge silently discards the first's update (lost update). The same
+                // lock name is shared with `iterate_triage apply` so the two writers
+                // are mutually exclusive.
+                return withProjectLock(projectRoot, 'config-write', () => {
+                    let base;
+                    try {
+                        // Partial updates must be mergeable on a FRESH project (no config
+                        // file yet): otherwise `{max_rounds: 5}` alone fails schema
+                        // validation with a misleading "missing goal". Merge against the
+                        // built-in defaults when there is no file to read, so the written
+                        // config captures the effective config (defaults + update) and the
+                        // documented "write a partial update" contract works out of the box.
+                        base = existsSync(join(projectRoot, 'iterate.config.yaml'))
+                            ? readRawConfig(join(projectRoot, 'iterate.config.yaml'))
+                            : defaultConfig();
+                    }
+                    catch (err) {
+                        return { operation: 'write', ok: false, found: false, error: `failed to read config: ${String(err)}` };
+                    }
+                    const merged = applyConfigUpdates(base, updates ?? {});
+                    const schemaErrors = validateConfig(merged);
+                    if (schemaErrors.length > 0) {
+                        return {
+                            operation: 'write',
+                            ok: false,
+                            found: false,
+                            errors: schemaErrors.map((e) => `missing/required field: ${e}`),
+                        };
+                    }
+                    const result = writeConfigFile(projectRoot, merged);
+                    if (!result.ok)
+                        return { operation: 'write', ok: false, found: false, error: result.error };
+                    const { config } = loadEffectiveConfig(projectRoot);
                     return {
                         operation: 'write',
-                        ok: false,
-                        found: false,
-                        errors: schemaErrors.map((e) => `missing/required field: ${e}`),
+                        ok: true,
+                        found: true,
+                        backupPath: result.backupPath ?? null,
+                        config: config,
                     };
-                }
-                const result = writeConfigFile(projectRoot, merged);
-                if (!result.ok)
-                    return { operation: 'write', ok: false, found: false, error: result.error };
-                const { config } = loadEffectiveConfig(projectRoot);
-                return {
-                    operation: 'write',
-                    ok: true,
-                    found: true,
-                    backupPath: result.backupPath ?? null,
-                    config: config,
-                };
+                });
             }
             // ── Read operations (original behavior) ────────────────────────────
             const { config, source } = loadEffectiveConfig(projectRoot);

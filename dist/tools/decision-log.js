@@ -1,8 +1,8 @@
-import { appendFileSync, readFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, unlinkSync, statSync, } from 'node:fs';
+import { appendFileSync, readFileSync, mkdirSync, existsSync, statSync, } from 'node:fs';
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
-import { makeLockRelease } from "../file-lock.js";
+import { acquireProjectLockChecked } from "../file-lock.js";
 const LOG_DIR = '.iterate';
 const LOG_FILE = 'decision-log.jsonl';
 // ─── Cross-process log mutex ────────────────────────────────────────────────
@@ -19,34 +19,15 @@ const LOG_FILE = 'decision-log.jsonl';
 // be lost to a wedged append), never to a crash. The prune REWRITE is the
 // opposite — it renames the log and therefore refuses to run when the lock
 // cannot be taken (see `rewriteDecisionLogKeepingRecent` in prune.ts).
-const LOCK_FILE = '.decision-log.lock';
-const LOCK_WAIT_MS = 5000;
-const LOCK_STALE_MS = 10000;
-const LOCK_POLL_MS = 25;
-/** True when a pid refers to a live process (or we lack permission to tell). */
-function processAlive(pid) {
-    if (!Number.isInteger(pid) || pid <= 0)
-        return false;
-    try {
-        process.kill(pid, 0);
-        return true;
-    }
-    catch (err) {
-        return err.code === 'EPERM';
-    }
-}
-/** Synchronous busy-wait sleep (Atomics.wait is a reliable sleep in Node). */
-function sleepSync(ms) {
-    const sab = new Int32Array(new SharedArrayBuffer(4));
-    Atomics.wait(sab, 0, 0, ms);
-}
+/** Lock name shared with the prune rewrite (→ `.iterate/.decision-log.lock`). */
+const LOG_LOCK_NAME = 'decision-log';
 /**
  * Acquire the decision-log lock for `projectRoot`.
  * Returns a release function (always callable; a no-op when the lock could
  * not be taken — never wedge an append behind a vanished holder).
  *
- * `options.waitMs` / `options.staleMs` override the defaults (tests use short
- * waits so a live-holder timeout is exercised in milliseconds, not 5s).
+ * `options.waitMs` / `options.staleMs` override the shared defaults (tests use
+ * short waits so a live-holder timeout is exercised in milliseconds, not 5s).
  */
 export function acquireLogLock(projectRoot, options = {}) {
     return acquireLogLockChecked(projectRoot, options).release;
@@ -57,76 +38,15 @@ export function acquireLogLock(projectRoot, options = {}) {
  * audit line must not be lost to a wedged append), but the rewrite renames the
  * log under any unlocked concurrent appender — it must refuse to run without
  * the mutex rather than silently dropping an audit line.
+ *
+ * Delegates to the shared `acquireProjectLockChecked` with lock name
+ * `decision-log`: the decision-log mutex IS that generic project lock. This
+ * module used to hand-roll an identical copy of the acquire/steal/wait logic,
+ * and the two stale/wait parameter sets could drift apart — one implementation,
+ * one set of defaults, one ownership-checked release.
  */
 export function acquireLogLockChecked(projectRoot, options = {}) {
-    const waitMs = Number.isFinite(options.waitMs) && (options.waitMs ?? 0) >= 0
-        ? options.waitMs
-        : LOCK_WAIT_MS;
-    const staleMs = Number.isFinite(options.staleMs) && (options.staleMs ?? 0) >= 0
-        ? options.staleMs
-        : LOCK_STALE_MS;
-    const dir = join(projectRoot, LOG_DIR);
-    if (!existsSync(dir)) {
-        try {
-            mkdirSync(dir, { recursive: true });
-        }
-        catch {
-            return { acquired: false, release: () => { } };
-        }
-    }
-    const lockPath = join(dir, LOCK_FILE);
-    const start = Date.now();
-    for (;;) {
-        let fd = null;
-        try {
-            fd = openSync(lockPath, 'wx');
-        }
-        catch (err) {
-            if (err.code !== 'EEXIST')
-                return { acquired: false, release: () => { } };
-            // Lock exists — steal it when the owner is gone or the lock is ancient.
-            let stale = false;
-            try {
-                const st = statSync(lockPath);
-                if (Date.now() - st.mtimeMs > staleMs)
-                    stale = true;
-                else {
-                    const pid = Number(readFileSync(lockPath, 'utf-8'));
-                    if (!processAlive(pid))
-                        stale = true;
-                }
-            }
-            catch {
-                stale = true; // unreadable/vanishing lock → retry as stale
-            }
-            if (stale) {
-                try {
-                    unlinkSync(lockPath);
-                }
-                catch { /* another holder stole it */ }
-                continue;
-            }
-            if (Date.now() - start > waitMs)
-                return { acquired: false, release: () => { } };
-            sleepSync(LOCK_POLL_MS);
-            continue;
-        }
-        // Owned the lock: stamp the holder pid, then release once on return.
-        // The release is ownership-checked (see `makeLockRelease`): a lock stolen
-        // from this process after its owner went stale must not be unlinked by us.
-        try {
-            writeSync(fd, String(process.pid));
-        }
-        catch { /* pid stamp is advisory */ }
-        try {
-            closeSync(fd);
-        }
-        catch { /* best-effort */ }
-        return {
-            acquired: true,
-            release: makeLockRelease(lockPath),
-        };
-    }
+    return acquireProjectLockChecked(projectRoot, LOG_LOCK_NAME, options);
 }
 // ─── Entry-count cache (avoid an O(n) full re-read per append) ─────────────
 /**

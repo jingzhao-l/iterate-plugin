@@ -2466,10 +2466,10 @@ describe('serializeObservatoryExport extras (gap #11)', () => {
 describe('buildRoundComparison (gap #13)', () => {
   const report = {
     findings: [
-      { round: 1, severity: 'high', status: 'fixed' },
-      { round: 1, severity: 'critical', status: 'open' },
-      { round: 2, severity: 'high', status: 'fixed' },
-      { severity: 'low', status: 'open' }, // round 0 → dropped
+      { round: 1, severity: 'high' },
+      { round: 1, severity: 'critical' },
+      { round: 2, severity: 'high' },
+      { severity: 'low' }, // round 0 → dropped
     ],
   }
 
@@ -2477,10 +2477,31 @@ describe('buildRoundComparison (gap #13)', () => {
     const rows = buildRoundComparison(report, [])
     assert.deepEqual(rows.map((r) => r.round), [1, 2])
     assert.equal(rows[0]!.findings, 2)
-    assert.equal(rows[0]!.fixed, 1)
+    // Findings carry no `status` — `fixed` comes only from the fixes argument.
+    assert.equal(rows[0]!.fixed, 0)
     assert.deepEqual(rows[0]!.severities, { high: 1, critical: 1 })
     assert.deepEqual(rows[1]!.severities, { high: 1 })
     assert.deepEqual(rows[0]!.validations, [])
+  })
+
+  it('counts successful fixes per round from the fixes argument', () => {
+    const fixes = [
+      { round: 1, success: true },
+      { round: 1, success: false }, // failed fix does not count
+      { round: 2, success: true },
+      { round: 2, success: true },
+      { round: 9, success: true }, // a round with no findings still gets a row
+      null, // junk row dropped
+      { round: 'x', success: true }, // non-numeric round dropped
+    ]
+    const rows = buildRoundComparison(report, [], fixes)
+    const byRound = Object.fromEntries(rows.map((r) => [r.round, r]))
+    assert.equal(byRound[1]!.fixed, 1)
+    assert.equal(byRound[2]!.fixed, 2)
+    assert.equal(byRound[9]!.fixed, 1)
+    // No status-based fallback: a finding never contributes to `fixed`.
+    const noFixes = buildRoundComparison({ findings: [{ round: 1, status: 'fixed' }] }, [], [])
+    assert.equal(noFixes[0]!.fixed, 0)
   })
 
   it('merges validation rows into the matching round', () => {
@@ -2496,9 +2517,10 @@ describe('buildRoundComparison (gap #13)', () => {
     assert.equal(rows[2]!.fixed, 0)
   })
 
-  it('tolerates junk report / validations', () => {
+  it('tolerates junk report / validations / fixes', () => {
     assert.deepEqual(buildRoundComparison(null, null), [])
     assert.deepEqual(buildRoundComparison({}, 'x' as never), [])
+    assert.deepEqual(buildRoundComparison(null, null, 'x' as never), [])
     const rows = buildRoundComparison({ findings: [null, 42, 'x'] } as never, [null, 'y'] as never)
     // Junk findings still count (length semantics match the summary builder)
     // but no round>0 rows are produced without a usable round.

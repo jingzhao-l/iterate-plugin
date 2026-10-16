@@ -14,6 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { resolveProjectRootForExec } from '../config-loader.ts'
 import { writeJsonAtomic } from '../atomic-fs.ts'
+import { withProjectLock } from '../file-lock.ts'
 import { checkpointPath, iterateDir, transcriptPath } from '../paths.ts'
 import { readRegistry } from './fix.ts'
 import { readDecisionEntries } from './decision-log.ts'
@@ -322,22 +323,28 @@ export function registerCheckpointTool(ctx: { tools: { register: (def: ReturnTyp
         }
 
         if (args.operation === 'resume') {
-          const current = readCheckpoint(projectRoot)
-          if (!current) {
-            return { operation: 'resume', ok: false, error: 'no checkpoint to resume — run `save` first' }
-          }
-          const resumed: IterationCheckpoint = {
-            ...current,
-            resumeCount: (current.resumeCount ?? 0) + 1,
-            updatedAt: new Date().toISOString(),
-          }
-          try {
-            mkdirSync(iterateDir(projectRoot), { recursive: true })
-            writeJsonAtomic(checkpointPath(projectRoot), resumed)
-          } catch (err) {
-            return { operation: 'resume', ok: false, error: `failed to persist resumed checkpoint: ${String(err)}` }
-          }
-          return { operation: 'resume', ok: true, checkpoint: resumed as unknown as JsonValue }
+          // Read-modify-write across processes: a concurrent resume in a
+          // sibling process would read the same resumeCount and write it back,
+          // losing one increment. Serialize on a checkpoint lock (the same
+          // advisory pattern the config/triage/transcript writers use).
+          return withProjectLock(projectRoot, 'checkpoint', () => {
+            const current = readCheckpoint(projectRoot)
+            if (!current) {
+              return { operation: 'resume', ok: false, error: 'no checkpoint to resume — run `save` first' }
+            }
+            const resumed: IterationCheckpoint = {
+              ...current,
+              resumeCount: (current.resumeCount ?? 0) + 1,
+              updatedAt: new Date().toISOString(),
+            }
+            try {
+              mkdirSync(iterateDir(projectRoot), { recursive: true })
+              writeJsonAtomic(checkpointPath(projectRoot), resumed)
+            } catch (err) {
+              return { operation: 'resume', ok: false, error: `failed to persist resumed checkpoint: ${String(err)}` }
+            }
+            return { operation: 'resume', ok: true, checkpoint: resumed as unknown as JsonValue }
+          })
         }
 
         if (args.operation === 'clear') {

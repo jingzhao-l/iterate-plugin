@@ -320,7 +320,7 @@ export interface TranscriptEntry {
 
 /** Checkpoint summary surfaced for resume actions (F5). */
 export interface TranscriptCheckpoint {
-  mode: 'dry-run' | 'normal'
+  mode: 'dry-run' | 'normal' | null
   round: number
   maxRounds: number
   fixedCount: number

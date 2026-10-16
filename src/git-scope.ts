@@ -22,7 +22,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { lstatSync, realpathSync } from 'node:fs'
 import { join, sep } from 'node:path'
 
 /** A resolved changed-only scope result. */
@@ -113,6 +113,15 @@ export function parseChangedFiles(stdout: string): string[] {
  * Keep only entries that resolve to an existing regular file under `root`.
  * Traversal-safe: rejects absolute paths and any relative path that would
  * escape `root` via `..` (resolved against the root before stat).
+ *
+ * Symlink handling: `statSync` (and `existsSync`) FOLLOW symlinks, so a git
+ * entry that is a link to a file OUTSIDE the project would pass a path-only
+ * containment check and enter the changed-only scope. Such a file is then
+ * rejected by the evidence gate (realpath out of bounds → `file_not_found`),
+ * so every finding on it would fail closed as `EVIDENCE_VIOLATION` forever —
+ * a permanent false positive for repos with dotfile or shared-config links.
+ * `lstatSync` distinguishes the link itself; a link whose REAL target escapes
+ * `root` is dropped here instead.
  */
 export function filterExistingFiles(root: string, files: string[]): string[] {
   const out: string[] = []
@@ -122,7 +131,17 @@ export function filterExistingFiles(root: string, files: string[]): string[] {
     const candidate = join(root, rel)
     if (!candidate.startsWith(rootPrefix) && candidate !== root) continue
     try {
-      if (existsSync(candidate) && statSync(candidate).isFile()) out.push(rel)
+      const st = lstatSync(candidate)
+      if (st.isFile()) {
+        out.push(rel)
+        continue
+      }
+      if (!st.isSymbolicLink()) continue
+      // A link whose real target stays inside the project is a legitimate,
+      // reviewable file; one that escapes is excluded from scope (fail-closed
+      // at the source instead of as a permanent evidence violation).
+      const real = realpathSync(candidate)
+      if (real === root || real.startsWith(rootPrefix)) out.push(rel)
     } catch {
       // Unreadable entry (e.g. a broken symlink) is not a valid review target.
       continue

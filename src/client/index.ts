@@ -1054,9 +1054,22 @@ function ConvergenceDashboard(props: SlotProps) {
   }, [session])
   const report = latestReport(session)
 
+  // Mount-time suppression: opening a session that ALREADY has a report mounts
+  // this component with that report, and an effect keyed on the report hash
+  // fires immediately — popping a stale "Round X 完成" bubble for work that did
+  // not just complete. Track the first key this instance sees and skip it; only
+  // a subsequent round progression pulses.
+  const pulseSeenRef = React.useRef<string | null>(null)
   React.useEffect(() => {
     if (!report) return
     const cur = getCurrentRound(report)
+    const key = hashReport(report) + ':' + String(cur)
+    if (pulseSeenRef.current === null) {
+      pulseSeenRef.current = key
+      return
+    }
+    if (pulseSeenRef.current === key) return
+    pulseSeenRef.current = key
     const conv = report.convergence
     emitRoundPulse(cur, conv?.converged === true)
     setPulseKey((k) => k + 1)
@@ -1406,6 +1419,11 @@ function TriagePanel(props: SlotProps) {
   }
 
   // ── Keyboard shortcuts (y / n / a on the selected finding, ↑/↓ to move) ──
+  // Multi-instance scoping: every turn that has a report mounts its OWN triage
+  // panel. Keying off `document.querySelector('[data-iterate="triage"]')` would
+  // return only the FIRST one, so y/n/a/↑/↓ silently dead whenever focus sits
+  // in a later panel. A per-component ref points at THIS instance's root.
+  const rootRef = React.useRef<HTMLDivElement | null>(null)
   React.useEffect(() => {
     const doc = typeof document !== 'undefined' ? document : null
     if (!doc) return
@@ -1417,10 +1435,10 @@ function TriagePanel(props: SlotProps) {
       const t = ev.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
       if (t && typeof t.isContentEditable === 'boolean' && t.isContentEditable) return
-      // Only act when focus is INSIDE the triage panel. Everything else keeps
+      // Only act when focus is INSIDE THIS panel. Everything else keeps
       // standard behavior (↑/↓ page scroll, typing in the composer), so we do
       // not hijack document-level keys just because a report is mounted.
-      const rootEl = doc.querySelector('[data-iterate="triage"]')
+      const rootEl = rootRef.current
       if (!rootEl) return
       const activeEl = doc.activeElement as HTMLElement | null
       if (!activeEl) return
@@ -1584,7 +1602,7 @@ function TriagePanel(props: SlotProps) {
     )
   })
 
-  return React.createElement('div', { 'data-iterate-root': '', 'data-iterate': 'triage', className: 'iterate-triage' },
+  return React.createElement('div', { ref: rootRef, 'data-iterate-root': '', 'data-iterate': 'triage', className: 'iterate-triage' },
     React.createElement('div', { className: 'iterate-triage-head' },
       React.createElement('span', { role: 'heading', 'aria-level': 3 }, tf(`Iterate · Findings 分诊 ({a0}/{a1})`, { a0: filtered.length, a1: findings.length })),
       React.createElement('span', { className: 'iterate-triage-hint' }, t('y=修复 · n=跳过 · a=已知有意 · ↑/↓ 选择')),
@@ -2525,7 +2543,7 @@ function ObservatoryPanel(props: SlotProps) {
     // client has no filesystem access, so `iterate_history` aggregates have to
     // be echoed back into the session first).
     const report = latestReport(session)
-    const comparison = buildRoundComparison(report, manifest.validations || [])
+    const comparison = buildRoundComparison(report, manifest.validations || [], manifest.fixes || [])
     const comparisonTable = comparison.length === 0
       ? null
       : React.createElement('table', { className: 'iterate-obs-table' },
