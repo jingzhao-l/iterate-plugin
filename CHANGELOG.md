@@ -5,6 +5,54 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.1] - 2026-10-18
+
+Patch release: a full implementation audit of the plugin surfaced 11 concrete
+defects (concurrency, silent data loss, boundary handling, report correctness),
+all fixed here with a regression test each. No new user-facing feature.
+Tests: 1262 → **1280**.
+
+### Fixed
+
+- **The cross-process transcript lock was released before the read-modify-write
+  finished.** `iterate_transcript nudge` passed an `async` callback to the
+  *synchronous* `withProjectLock`, whose `finally` released the lock the moment
+  the callback returned its pending promise — i.e. at the first `await` — so two
+  processes could still overwrite each other's steering text. `withProjectLock`
+  now holds the lock until a promise-returning callback settles (sync callers
+  are unchanged).
+- **`nudge` / rollback re-persist silently erased the run's top-level findings,
+  phase breadcrumbs and round marker.** `rehydrateBuilder` rebuilt the per-round
+  threads but never the global findings list, `phases`, or a `round` that
+  outran the captured rows — so one nudge blanked the observatory findings tab
+  and the stage tracker. It now replays `phases`, refills the global findings
+  (new `ReviewTranscriptBuilder.restoreFindings`) and advances the round marker;
+  a `null` round/thread row is skipped instead of discarding the whole manifest.
+- **A freshly created lock could be stolen from its live holder.** The
+  create→stamp window left the lock file empty, and `Number('') === 0` read as a
+  dead owner, letting a contender unlink a live lock and enter the same critical
+  section. An unparseable pid stamp now falls back to the mtime staleness test
+  instead of an immediate steal.
+- **`runGit` rejected instead of degrading** when `execFile` threw
+  synchronously (e.g. a NUL byte in a config-supplied branch name); it now
+  resolves a structured failure so `iterate_review` cannot crash on it.
+- **Session-record hardening:** a future fractional record version (`1.9`) is no
+  longer floored down to the accepted current version, a failed/absent
+  `@deepseek-ai/dsh-session` import is no longer memoized for the whole process
+  (the next call retries), and the record's `qualityStatus` is now actually
+  populated from the current quality gate.
+- **Report correctness:** SARIF `executionSuccessful` no longer counts an
+  unknown (`null`) validation exit code as a failure; the Markdown report now
+  emits the location for line 1 and floors a fractional line (a valid SARIF
+  `startLine` instead of `1.5`); and a missing/empty transcript no longer renders
+  as a live "running" run.
+
+### Changed
+
+- Internal only: `withProjectLock` gained a promise-returning overload,
+  `ReviewTranscriptBuilder` gained `restoreFindings`, and `session-record.ts`
+  gained a test-only module-loader seam. Public tool surfaces are unchanged.
+
 ## [3.9.0] - 2026-10-18
 
 ### Added

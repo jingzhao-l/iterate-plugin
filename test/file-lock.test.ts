@@ -178,6 +178,76 @@ describe('file-lock', () => {
       cleanup()
     }
   })
+
+  it('holds the lock across awaits for an async callback', async () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = lockPathFor(dir, 'async-hold')
+      let heldDuringAwait = false
+      const out = await withProjectLock(dir, 'async-hold', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        heldDuringAwait = existsSync(path)
+        return 'async-ok'
+      })
+      assert.equal(out, 'async-ok')
+      assert.ok(heldDuringAwait, 'the lock must still be held after the callback awaited')
+      assert.ok(!existsSync(path), 'released once the async callback settled')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('releases the lock when the async callback rejects', async () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      const path = lockPathFor(dir, 'async-reject')
+      await assert.rejects(
+        withProjectLock(dir, 'async-reject', async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          throw new Error('async-boom')
+        }),
+        /async-boom/,
+      )
+      assert.ok(!existsSync(path), 'released on the async error path')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('does NOT steal a freshly created lock whose pid stamp has not landed yet', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      // The create→stamp window: the holder made the file with `wx` but has not
+      // written its pid. `Number('') === 0` must never be read as a dead owner,
+      // or a contender would steal a LIVE lock and enter the same section.
+      writeFileSync(lockPathFor(dir, 'mid-create'), '', 'utf-8')
+      const started = Date.now()
+      const release = acquireProjectLock(dir, 'mid-create', { waitMs: 80, staleMs: 60_000 })
+      const waited = Date.now() - started
+      assert.ok(waited >= 50, `waited ${waited}ms (empty stamp is held, not dead)`)
+      release()
+      assert.ok(existsSync(lockPathFor(dir, 'mid-create')), 'the live lock file must survive')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('does not steal a lock whose stamp is garbled (non-numeric)', () => {
+    const { dir, cleanup } = tempDir()
+    try {
+      mkdirSync(join(dir, '.iterate'), { recursive: true })
+      writeFileSync(lockPathFor(dir, 'garbled'), 'not-a-pid', 'utf-8')
+      const started = Date.now()
+      const release = acquireProjectLock(dir, 'garbled', { waitMs: 80, staleMs: 60_000 })
+      const waited = Date.now() - started
+      assert.ok(waited >= 50, `waited ${waited}ms (garbled stamp is held, not dead)`)
+      release()
+      assert.ok(existsSync(lockPathFor(dir, 'garbled')), 'the lock file must survive')
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 describe('ownership-checked release', () => {

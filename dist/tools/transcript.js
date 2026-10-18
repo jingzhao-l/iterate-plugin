@@ -29,6 +29,7 @@ import { loadEffectiveConfig, resolveProjectRootForExec, } from "../config-loade
 import { transcriptPath } from "../paths.js";
 import { ReviewTranscriptBuilder, MAX_TIMELINE, MAX_ROUNDS, normalizeManifestBounds } from "../transcript.js";
 import { readDecisionLogDetailed } from "./decision-log.js";
+import { readQualityGate } from "./quality-store.js";
 import { readLive } from "../live.js";
 import { buildRunRecord, appendRunRecord, readRunRecords, sessionOf, } from "../session-record.js";
 /** Severity tally over a manifest's (globally deduped) findings. */
@@ -656,7 +657,18 @@ export function registerTranscriptTool(ctx) {
             // session. Best-effort — a link failure is reported, never fatal (the
             // on-disk capture above already succeeded).
             let sessionRecord;
-            const linkSession = await appendRunRecord(sessionOf(exec), runRecordFromManifest(manifest));
+            // Snapshot the CURRENT quality-gate verdict into the record so a
+            // recovered run keeps its PASS/FAIL badge. An absent gate reads as the
+            // store's default (`pending`); a corrupt/throwing read degrades to
+            // `null` and never fails the capture.
+            let qualityStatus = null;
+            try {
+                qualityStatus = readQualityGate(projectRoot).overallStatus ?? null;
+            }
+            catch {
+                qualityStatus = null;
+            }
+            const linkSession = await appendRunRecord(sessionOf(exec), runRecordFromManifest(manifest, qualityStatus));
             sessionRecord = (linkSession.ok
                 ? { linked: true, seq: linkSession.seq }
                 : { linked: false, supported: linkSession.supported, reason: linkSession.error });
@@ -682,6 +694,12 @@ function rehydrateBuilder(manifest, approval) {
         goal: manifest.goal,
         maxRounds: manifest.maxRounds,
     });
+    // Phase breadcrumbs are part of the run narrative the F1 stage tracker shows;
+    // replay them before the rounds so an edit round-trip keeps the stage order.
+    for (const p of Array.isArray(manifest.phases) ? manifest.phases : []) {
+        if (typeof p === 'string')
+            builder.phase(p);
+    }
     for (const r of Array.isArray(manifest.rounds) ? manifest.rounds : []) {
         // A malformed/null round row must be skipped, never a throw (the caller
         // wraps rehydrate in a fallback, but preserving sibling rows is better).
@@ -689,6 +707,10 @@ function rehydrateBuilder(manifest, approval) {
             continue;
         builder.roundStart(r.round, manifest.maxRounds);
         for (const t of Array.isArray(r.threads) ? r.threads : []) {
+            // A null/garbled thread row must be skipped too: reading `t.dimension`
+            // off it would throw and cost the WHOLE manifest its history.
+            if (!t || typeof t !== 'object')
+                continue;
             // restoreThread (not reviewerStart + reviewerMessage(join)) preserves the
             // message ARRAY boundaries and the thread's own dimension: rehydration
             // previously collapsed each thread's messages into one string and, once a
@@ -708,6 +730,15 @@ function rehydrateBuilder(manifest, approval) {
         if (typeof n === 'number' && n >= 0)
             builder.snapshotConvergence(idx + 1, n);
     }
+    // Top-level findings live in the global newest-wins list (the F3 panel reads
+    // `manifest.findings`); restoreThread only rebuilds the per-round threads, so
+    // without this a nudge/rollback re-persist blanked the findings panel.
+    if (Array.isArray(manifest.findings))
+        builder.restoreFindings(manifest.findings);
+    // Move the round marker forward past the captured rows: `roundStart` reopens
+    // rows, but a manifest whose `round` outruns its rows (advanceRound semantics)
+    // would otherwise rewind the reported round.
+    builder.advanceRound(manifest.round, manifest.maxRounds);
     if (manifest.checkpoint)
         builder.recordCheckpoint(manifest.checkpoint);
     if (Array.isArray(manifest.fixes))

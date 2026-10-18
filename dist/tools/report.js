@@ -4,8 +4,8 @@
  *   iterate_report — render the current iterate run into a portable report.
  *
  * Two formats, one normalized data model (shared with the client export
- * buttons via `lib/parse.js`, so the on-screen export and this tool can never
- * drift):
+ * buttons via `src/report-render.ts`, so the on-screen export and this tool
+ * can never drift):
  *
  *   - `markdown` — a PR-pasteable run report: header (mode/round/status), the
  *                  quality-gate table, the findings table, the fixes table,

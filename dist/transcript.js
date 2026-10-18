@@ -428,6 +428,24 @@ export class ReviewTranscriptBuilder {
         }
         this.touch();
     }
+    /**
+     * Re-insert top-level findings when rehydrating a persisted manifest (the
+     * nudge / rollback edit round-trip). `restoreThread` already rebuilds the
+     * per-round thread copy of each finding but never the global list, so an edit
+     * that only rewrites steering text used to blank `manifest.findings` and the
+     * F3 findings panel. This refills the global newest-wins list (and its dedupe
+     * set), mirroring `reviewerFindings` without needing a live thread.
+     */
+    restoreFindings(findings) {
+        if (Array.isArray(findings)) {
+            for (const raw of findings) {
+                const f = normalizeFinding(raw);
+                if (f)
+                    this.addGlobal(f);
+            }
+        }
+        this.touch();
+    }
     // ─── Convergence (F2) ───────────────────────────────────────────────────
     /** Record a round's new-finding count for the convergence series. */
     snapshotConvergence(round, newCount) {

@@ -172,16 +172,31 @@ export function decideScope(changedFiles) {
  */
 export function runGit(args, cwd, opts = {}) {
     return new Promise((resolve) => {
-        execFile('git', args, {
-            cwd,
-            timeout: 30_000,
-            maxBuffer: 10 * 1024 * 1024,
-            env: { ...process.env, PAGER: 'cat' },
-            signal: opts.signal,
-        }, (error, stdout, stderr) => {
-            const exitCode = error ? (typeof error.code === 'number' ? error.code : 1) : 0;
-            resolve({ ok: exitCode === 0, stdout: stdout ?? '', stderr: stderr ?? '', exitCode });
-        });
+        // execFile can THROW SYNCHRONOUSLY (rather than call back with an error)
+        // when an argument cannot be encoded — e.g. a NUL or lone surrogate in the
+        // config-supplied target branch. Without this guard that throw escapes the
+        // promise executor, rejecting `runGit` and propagating out of the tool call
+        // instead of degrading to the documented full-scope fallback.
+        try {
+            execFile('git', args, {
+                cwd,
+                timeout: 30_000,
+                maxBuffer: 10 * 1024 * 1024,
+                env: { ...process.env, PAGER: 'cat' },
+                signal: opts.signal,
+            }, (error, stdout, stderr) => {
+                const exitCode = error ? (typeof error.code === 'number' ? error.code : 1) : 0;
+                resolve({ ok: exitCode === 0, stdout: stdout ?? '', stderr: stderr ?? '', exitCode });
+            });
+        }
+        catch (err) {
+            resolve({
+                ok: false,
+                stdout: '',
+                stderr: err instanceof Error ? err.message : String(err),
+                exitCode: 1,
+            });
+        }
     });
 }
 /**

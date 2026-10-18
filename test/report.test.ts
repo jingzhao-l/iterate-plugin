@@ -277,3 +277,62 @@ describe('iterate_report tool', () => {
     }
   })
 })
+
+describe('run report edge normalization', () => {
+  it('treats an absent `active` as NOT running (empty manifest)', () => {
+    const data = buildRunReportData({}, {})
+    assert.equal(data.active, false)
+    const md = renderRunReportMarkdown({}, {}, { lang: 'en' })
+    assert.match(md, /\*\*Status\*\*: stopped/)
+    assert.doesNotMatch(md, /running/)
+  })
+
+  it('renders line 1 in both markdown and SARIF locations', () => {
+    const manifest = {
+      findings: [{ dimension: 'correctness', file: 'src/one.ts', line: 1, severity: 'high', summary: 'first line' }],
+    }
+    const md = renderRunReportMarkdown(manifest, {}, { lang: 'en' })
+    assert.match(md, /src\/one\.ts:1\b/)
+    const sarif = renderRunReportSarif(manifest, {}, {}) as never as {
+      runs: Array<{ results: Array<{ locations?: Array<{ physicalLocation: { region?: { startLine: number } } }> }> }>
+    }
+    assert.equal(sarif.runs[0]!.results[0]!.locations?.[0]?.physicalLocation.region?.startLine, 1)
+  })
+
+  it('floors a fractional line so SARIF startLine stays a valid integer', () => {
+    const manifest = {
+      findings: [{ dimension: 'correctness', file: 'src/a.ts', line: 1.5, severity: 'low', summary: 'x' }],
+    }
+    const md = renderRunReportMarkdown(manifest, {}, { lang: 'en' })
+    assert.match(md, /src\/a\.ts:1\b/)
+    assert.doesNotMatch(md, /1\.5/)
+    const sarif = renderRunReportSarif(manifest, {}, {}) as never as {
+      runs: Array<{ results: Array<{ locations?: Array<{ physicalLocation: { region?: { startLine: number } } }> }> }>
+    }
+    const startLine = sarif.runs[0]!.results[0]!.locations?.[0]?.physicalLocation.region?.startLine
+    assert.equal(Number.isInteger(startLine), true)
+    assert.equal(startLine, 1)
+  })
+
+  it('does not count an unknown (null) validation exit code as a failure', () => {
+    const manifest = {
+      findings: [],
+      validations: [{ round: 1, command: 'npm test', exitCode: null, allowed: true }],
+    }
+    const sarif = renderRunReportSarif(manifest, {}, {}) as never as {
+      runs: Array<{ invocations: Array<{ executionSuccessful: boolean }> }>
+    }
+    assert.equal(sarif.runs[0]!.invocations[0]!.executionSuccessful, true)
+  })
+
+  it('still counts a concrete non-zero exit code as a failure', () => {
+    const manifest = {
+      findings: [],
+      validations: [{ round: 1, command: 'npm test', exitCode: 1, allowed: true }],
+    }
+    const sarif = renderRunReportSarif(manifest, {}, {}) as never as {
+      runs: Array<{ invocations: Array<{ executionSuccessful: boolean }> }>
+    }
+    assert.equal(sarif.runs[0]!.invocations[0]!.executionSuccessful, false)
+  })
+})

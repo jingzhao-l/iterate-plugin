@@ -83,6 +83,49 @@ describe('iterate_transcript session linking', () => {
     }
   })
 
+  it('stamps the quality-gate verdict onto the linked record', async () => {
+    const session = newSession()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-ts-quality-'))
+    try {
+      const tool = toolWithExec(execWithSession(session, root))
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(join(root, '.iterate', 'quality-gate.json'), JSON.stringify({
+        overallStatus: 'pass',
+        overallScore: 95,
+        dimensions: [],
+      }), 'utf-8')
+      await tool({
+        operation: 'capture',
+        path: root,
+        roundsExecuted: 1,
+        findingsByRound: [0],
+        rounds: [],
+        stoppedReason: 'converged',
+      })
+      const res = (await tool({ operation: 'recall', path: root })) as Record<string, unknown>
+      const records = res.records as Array<{ qualityStatus: string | null }>
+      assert.equal(records[0]!.qualityStatus, 'pass')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records the default pending verdict when no gate snapshot exists', async () => {
+    const session = newSession()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-ts-quality-'))
+    try {
+      const tool = toolWithExec(execWithSession(session, root))
+      await tool({ operation: 'capture', path: root, roundsExecuted: 1, findingsByRound: [0], rounds: [] })
+      const res = (await tool({ operation: 'recall', path: root })) as Record<string, unknown>
+      const records = res.records as Array<{ qualityStatus: string | null }>
+      // The store's default snapshot is `pending` (undecided), never null: the
+      // field always mirrors the CURRENT gate state at write time.
+      assert.equal(records[0]!.qualityStatus, 'pending')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('recovers a summary manifest from the session when the file is gone', async () => {
     const session = newSession()
     const root = mkdtempSync(join(tmpdir(), 'iterate-ts-recover-'))

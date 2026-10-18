@@ -17,8 +17,10 @@ import {
   normalizeRunRecord,
   appendRunRecord,
   readRunRecords,
+  loadSessionRecordApi,
   sessionOf,
   setSessionRecordApiForTests,
+  setSessionRecordImporterForTests,
   type SessionRecordApi,
 } from '../src/session-record.ts'
 
@@ -103,6 +105,10 @@ describe('buildRunRecord / normalizeRunRecord', () => {
   it('rejects a payload with the wrong version (forward compatibility gate)', () => {
     assert.equal(normalizeRunRecord({ ...sampleRecord(), version: 999 }), null)
     assert.equal(normalizeRunRecord({ ...sampleRecord(), version: '1' }), null)
+    // A FUTURE fractional version must not be floored down to the current one.
+    assert.equal(normalizeRunRecord({ ...sampleRecord(), version: 1.9 }), null)
+    // …while a numerically-equal integer spelling still passes.
+    assert.ok(normalizeRunRecord({ ...sampleRecord(), version: 1.0 }))
   })
 
   it('rejects non-object payloads', () => {
@@ -275,5 +281,53 @@ describe('appendRunRecord / readRunRecords (REAL @deepseek-ai/dsh-session)', () 
     await appendRunRecord(session, buildRunRecord({ project: '/p', round: 2 }))
     const read = await readRunRecords(session)
     assert.deepEqual(read.records.map((r) => r.round), [1, 2])
+  })
+})
+
+describe('loadSessionRecordApi caching', () => {
+  afterEach(() => {
+    setSessionRecordImporterForTests(undefined)
+    setSessionRecordApiForTests(undefined)
+  })
+
+  it('resolves null when the module lacks the record API', async () => {
+    setSessionRecordImporterForTests(async () => ({ somethingElse: 1 }))
+    assert.equal(await loadSessionRecordApi(), null)
+  })
+
+  it('does NOT memoize a failed resolution — the next call retries', async () => {
+    let calls = 0
+    setSessionRecordImporterForTests(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('transient import failure')
+      return { appendPluginRecord() {}, pluginRecordOf() {} }
+    })
+    const first = await loadSessionRecordApi()
+    assert.equal(first, null, 'a transient import failure resolves to null')
+    const second = await loadSessionRecordApi()
+    assert.ok(second, 'the retry succeeds once the host exposes the module')
+    assert.equal(calls, 2)
+  })
+
+  it('memoizes a successful resolution (a single import)', async () => {
+    let calls = 0
+    const api = { appendPluginRecord() {}, pluginRecordOf() {} }
+    setSessionRecordImporterForTests(async () => {
+      calls += 1
+      return api
+    })
+    const a = await loadSessionRecordApi()
+    const b = await loadSessionRecordApi()
+    assert.equal(a, b)
+    assert.equal(calls, 1)
+  })
+
+  it('survives a loader that throws synchronously', async () => {
+    setSessionRecordImporterForTests(() => {
+      throw new Error('sync boom')
+    })
+    await assert.doesNotReject(async () => {
+      assert.equal(await loadSessionRecordApi(), null)
+    })
   })
 })

@@ -205,6 +205,11 @@ function asNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
+/** Non-negative integer (floors fractions); 0 for anything else. */
+function asInt(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+}
+
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
@@ -258,7 +263,7 @@ export function buildRunReportData(
   const findings: ReportFinding[] = asArray(get(src, 'findings')).map((f) => ({
     dimension: asString(get(f, 'dimension')),
     file: asString(get(f, 'file')),
-    line: asNumber(get(f, 'line')),
+    line: asInt(get(f, 'line')),
     severity: findingSeverity(f),
     summary: asString(get(f, 'summary')),
     failureScenario: asString(get(f, 'failure_scenario')),
@@ -284,7 +289,7 @@ export function buildRunReportData(
   const validations: ReportValidation[] = asArray(get(src, 'validations')).map((v) => ({
     round: asNumber(get(v, 'round')),
     command: asString(get(v, 'command')),
-    exitCode: typeof get(v, 'exitCode') === 'number' ? asNumber(get(v, 'exitCode')) : null,
+    exitCode: typeof get(v, 'exitCode') === 'number' ? asInt(get(v, 'exitCode')) : null,
     allowed: get(v, 'allowed') === true,
     rejectReason: asString(get(v, 'rejectReason')),
   }))
@@ -306,7 +311,11 @@ export function buildRunReportData(
     taskMode: taskMode === 'code' || taskMode === 'iterate' ? taskMode : null,
     round: asNumber(get(src, 'round')),
     maxRounds: asNumber(get(src, 'maxRounds')),
-    active: get(src, 'active') !== false,
+    // An ABSENT `active` means "no run / unknown", not "running": a missing or
+    // empty transcript used to render a live, pulsing run at round 0. The
+    // transcript builder always writes an explicit boolean, so a strict `true`
+    // only ever loses the phantom run, never a real one.
+    active: get(src, 'active') === true,
     stoppedReason: typeof stoppedReason === 'string' && stoppedReason ? stoppedReason : null,
     updatedAt: asString(get(src, 'updatedAt')),
     convergence: asArray(get(src, 'convergence')).filter(
@@ -392,7 +401,7 @@ export function renderRunReportMarkdown(
     lines.push(`| ${labels.severity} | ${labels.dimension} | ${labels.location} | ${labels.summary} |`)
     lines.push('| --- | --- | --- | --- |')
     for (const f of data.findings) {
-      const loc = f.file ? `${f.file}${f.line > 1 ? `:${f.line}` : ''}` : ''
+      const loc = f.file ? `${f.file}${f.line > 0 ? `:${f.line}` : ''}` : ''
       lines.push(`| ${mdCell(f.severity)} | ${mdCell(f.dimension)} | ${mdCell(loc)} | ${mdCell(f.summary)} |`)
     }
   }
@@ -513,7 +522,9 @@ export function renderRunReportSarif(
     if (f.suggestedFix) result.fixes = [{ description: { text: f.suggestedFix } }]
     return result
   })
-  const failedValidations = data.validations.filter((v) => v.exitCode !== 0).length
+  // `exitCode: null` is the documented "unknown / no exit code" value, not a
+  // failure: only a concrete non-zero code makes the run unsuccessful.
+  const failedValidations = data.validations.filter((v) => v.exitCode !== null && v.exitCode !== 0).length
   return {
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
     version: '2.1.0',

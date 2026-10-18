@@ -103,17 +103,23 @@ export function acquireProjectLockChecked(projectRoot, name, options = {}) {
         catch (err) {
             if (err.code !== 'EEXIST')
                 return { acquired: false, release: () => { } };
-            // Lock exists — steal it when the owner is gone or the lock is ancient.
+            // Lock exists — steal it when the owner is VERIFIABLY gone, or when the
+            // lock file is ancient. The stamp is read defensively: a lock is created
+            // empty (`openSync(..., 'wx')`) and the holder's pid lands a moment later,
+            // so an empty/garbled stamp means "just created, holder still writing" —
+            // treating `Number('') === 0` as a dead owner would let a contender steal
+            // a live lock and enter the same critical section. Only a parseable
+            // positive pid that is dead (or an ancient mtime) is stolen.
             let stale = false;
             try {
                 const st = statSync(lockPath);
-                if (Date.now() - st.mtimeMs > staleMs)
-                    stale = true;
-                else {
-                    const pid = Number(readFileSync(lockPath, 'utf-8'));
-                    if (!processAlive(pid))
-                        stale = true;
-                }
+                const ancient = Date.now() - st.mtimeMs > staleMs;
+                const raw = readFileSync(lockPath, 'utf-8').trim();
+                const pid = /^\d+$/.test(raw) ? Number(raw) : 0;
+                if (pid > 0)
+                    stale = !processAlive(pid) || ancient;
+                else
+                    stale = ancient;
             }
             catch {
                 stale = true; // unreadable/vanishing lock → retry as stale
@@ -238,17 +244,25 @@ export function makeLockRelease(lockPath, ino) {
         }
     };
 }
-/**
- * Run `fn` while holding the advisory lock named `name`.
- * The release is guaranteed via `finally`; `fn`'s value or error propagates
- * unchanged. Not reentrant for the same (projectRoot, name) — see header.
- */
 export function withProjectLock(projectRoot, name, fn, options = {}) {
     const release = acquireProjectLock(projectRoot, name, options);
+    let out;
     try {
-        return fn();
+        out = fn();
     }
-    finally {
+    catch (err) {
         release();
+        throw err;
     }
+    if (out && typeof out.then === 'function') {
+        return out.then((value) => {
+            release();
+            return value;
+        }, (err) => {
+            release();
+            throw err;
+        });
+    }
+    release();
+    return out;
 }

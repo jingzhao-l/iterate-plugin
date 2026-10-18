@@ -509,6 +509,74 @@ describe('iterate_transcript nudge execute', () => {
     }
   })
 
+  it('nudge round-trip preserves top-level findings, phases and the round marker', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      // A real manifest: two phases, one reviewer thread carrying one finding,
+      // and a round marker (2) that outruns the captured rows (1).
+      const b = new ReviewTranscriptBuilder({ project: root, mode: 'normal', now: fixedClock() })
+      b.begin('audit auth', 3)
+      b.phase('plan')
+      b.phase('review')
+      b.roundStart(1, 3)
+      b.reviewerStart('correctness')
+      b.reviewerFindings([finding({ file: 'src/a.ts', summary: 'guard the input' })])
+      b.advanceRound(2, 3)
+      const before = b.serialize() as unknown as Record<string, unknown>
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify(before), 'utf-8')
+
+      const res = (await tool({ operation: 'nudge', path: root, text: 'focus on auth' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const after = res.transcript as Record<string, unknown>
+
+      assert.deepEqual(after.phases, before.phases, 'phase breadcrumbs survive a nudge')
+      const afterFindings = after.findings as Array<Record<string, unknown>>
+      assert.equal(afterFindings.length, (before.findings as unknown[]).length, 'top-level findings survive')
+      assert.equal(afterFindings[0]?.summary, 'guard the input')
+      assert.equal(after.round, 2, 'the round marker must not rewind to the captured rows')
+      assert.equal(after.maxRounds, 3)
+      const rounds = after.rounds as Array<{ threads: Array<{ dimension: string; findings: unknown[] }> }>
+      assert.equal(rounds[0]?.threads[0]?.dimension, 'correctness')
+      assert.equal(rounds[0]?.threads[0]?.findings.length, 1, 'per-thread findings survive too')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('nudge skips a null thread row without losing the rest of the manifest', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-nudge-'))
+    try {
+      mkdirSync(join(root, '.iterate'), { recursive: true })
+      writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify({
+        version: 1,
+        mode: 'normal',
+        goal: 'audit',
+        maxRounds: 2,
+        round: 1,
+        active: true,
+        phases: ['plan', 'review'],
+        findings: [finding({ file: 'src/a.ts', summary: 'keep me' })],
+        rounds: [{ round: 1, threads: [null, { dimension: 'correctness', findings: [] }] }],
+        convergence: [],
+        fixes: [],
+      }), 'utf-8')
+
+      const res = (await tool({ operation: 'nudge', path: root, text: 'keep going' })) as Record<string, unknown>
+      assert.equal(res.updated, true)
+      const after = res.transcript as Record<string, unknown>
+      // The surviving sibling thread and the top-level findings must both be
+      // preserved rather than the whole rehydrate falling back to a fresh run.
+      const rounds = after.rounds as Array<{ threads: Array<{ dimension: string }> }>
+      assert.equal(rounds[0]?.threads[0]?.dimension, 'correctness')
+      assert.equal((after.findings as Array<Record<string, unknown>>)[0]?.summary, 'keep me')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('capture records an explicit stoppedReason and closes the run', async () => {
     const tool = captureTranscriptTool()
     const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-capture-'))

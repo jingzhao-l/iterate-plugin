@@ -100,7 +100,9 @@ export function normalizeRunRecord(data) {
     const d = data;
     // A record written by a future/incompatible build is skipped rather than
     // coerced: the version gate is the contract that lets the payload evolve.
-    if (nonNegInt(d.version) !== ITERATE_RUN_RECORD_VERSION)
+    // The check is exact (an integer compare, not a floor) so a payload stamped
+    // `1.9` by a future build is rejected instead of rounded down to `1`.
+    if (!Number.isInteger(d.version) || d.version !== ITERATE_RUN_RECORD_VERSION)
         return null;
     const findings = (d.findings && typeof d.findings === 'object' && !Array.isArray(d.findings)
         ? d.findings
@@ -132,12 +134,17 @@ export function normalizeRunRecord(data) {
 let cachedApi;
 /** Test override; when set (including `null`) the dynamic import is bypassed. */
 let testApiOverride;
+/** Module loader; replaceable for tests to exercise import failure/late availability. */
+let moduleImporter = () => import('@deepseek-ai/dsh-session');
 /** Resolve the `@deepseek-ai/dsh-session` record API, or `null` when absent. */
 export function loadSessionRecordApi() {
     if (testApiOverride !== undefined)
         return Promise.resolve(testApiOverride);
     if (cachedApi === undefined) {
-        cachedApi = import('@deepseek-ai/dsh-session')
+        // `Promise.resolve().then(...)` (not a bare call) so a loader that throws
+        // SYNCHRONOUSLY still lands in the `.catch` instead of escaping.
+        cachedApi = Promise.resolve()
+            .then(() => moduleImporter())
             .then((mod) => {
             const m = mod;
             if (typeof m.appendPluginRecord !== 'function' || typeof m.pluginRecordOf !== 'function') {
@@ -149,8 +156,23 @@ export function loadSessionRecordApi() {
             };
         })
             .catch(() => null);
+        // A `null` resolution (module/API absent, or a transient import failure) is
+        // NOT memoized: it is cleared so the next call retries. Otherwise one
+        // unlucky first import would disable session linking for the whole process.
+        void cachedApi.then((api) => {
+            if (!api)
+                cachedApi = undefined;
+        });
     }
     return cachedApi;
+}
+/**
+ * Replace the module loader for tests (to exercise the import-failure and
+ * late-availability paths). Pass `undefined` to restore the real dynamic import.
+ */
+export function setSessionRecordImporterForTests(loader) {
+    moduleImporter = loader ?? (() => import('@deepseek-ai/dsh-session'));
+    cachedApi = undefined;
 }
 /**
  * Override the session-record API for tests. Pass `undefined` to restore the

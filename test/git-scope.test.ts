@@ -219,4 +219,17 @@ describe('runGit', () => {
     assert.equal(result.ok, false)
     assert.ok(result.exitCode !== 0, 'usage error must be a non-zero exit code')
   })
+
+  it('resolves a structured failure when execFile throws synchronously', async () => {
+    // A NUL byte in an argument makes Node's execFile throw SYNCHRONOUSLY
+    // (ERR_INVALID_ARG_VALUE) rather than calling back with an error. The
+    // promise must still RESOLVE as a failure — never reject — so a
+    // config-supplied branch name can never crash the iterate_review tool.
+    await assert.doesNotReject(async () => {
+      const result = await runGit(['log', '\u0000bad'], process.cwd())
+      assert.equal(result.ok, false)
+      assert.ok(result.exitCode !== 0)
+      assert.match(result.stderr, /null bytes|invalid/i)
+    })
+  })
 })
