@@ -35,10 +35,88 @@ import { transcriptPath } from '../paths.ts'
 import { ReviewTranscriptBuilder, MAX_TIMELINE, MAX_ROUNDS, normalizeManifestBounds } from '../transcript.ts'
 import { readDecisionLogDetailed } from './decision-log.ts'
 import { readLive } from '../live.ts'
+import {
+  buildRunRecord,
+  appendRunRecord,
+  readRunRecords,
+  sessionOf,
+  type IterateRunRecord,
+  type StoredRunRecord,
+} from '../session-record.ts'
 import type {
   TranscriptManifest,
   TranscriptFix,
 } from '../types.ts'
+
+/** Severity tally over a manifest's (globally deduped) findings. */
+function severityCounts(findings: unknown): IterateRunRecord['findings'] {
+  const counts = { total: 0, critical: 0, high: 0, medium: 0, low: 0 }
+  if (!Array.isArray(findings)) return counts
+  for (const f of findings) {
+    if (!f || typeof f !== 'object') continue
+    const sev = (f as { severity?: unknown }).severity
+    counts.total++
+    if (sev === 'critical') counts.critical++
+    else if (sev === 'high') counts.high++
+    else if (sev === 'medium') counts.medium++
+    else counts.low++
+  }
+  return counts
+}
+
+/** Build the compact session-linked record from a finished manifest. */
+function runRecordFromManifest(
+  manifest: TranscriptManifest,
+  qualityStatus: 'pass' | 'fail' | 'pending' | null = null,
+): IterateRunRecord {
+  return buildRunRecord({
+    project: manifest.project,
+    goal: manifest.goal,
+    mode: manifest.mode,
+    taskMode: manifest.taskMode,
+    round: manifest.round,
+    maxRounds: manifest.maxRounds,
+    active: manifest.active,
+    stoppedReason: manifest.stoppedReason,
+    convergence: manifest.convergence,
+    counts: severityCounts(manifest.findings),
+    fixedCount: Array.isArray(manifest.fixes) ? manifest.fixes.filter((f) => f.success !== false).length : 0,
+    qualityStatus,
+  })
+}
+
+/**
+ * Rebuild a (summary-only) transcript manifest from a session-linked record.
+ *
+ * Degraded by design: the record carries the run SUMMARY (mode / goal / round /
+ * max-rounds / end state / convergence series), not the per-finding detail, so
+ * the recovered manifest has an empty `findings`/`fixes`/`timeline`. It exists
+ * so the observatory shows the real run header + trend after `.iterate/` is
+ * lost, instead of a blank panel. Round rows stay empty because the record has
+ * no per-thread narration.
+ */
+export function recoverManifestFromRecord(
+  record: IterateRunRecord,
+  fallbackProject: string,
+  approval: 'ask' | 'deny' | 'allow',
+): TranscriptManifest {
+  const builder = new ReviewTranscriptBuilder({
+    project: record.project || fallbackProject,
+    mode: record.mode,
+    taskMode: record.taskMode,
+    approval,
+    goal: record.goal,
+    maxRounds: record.maxRounds,
+  })
+  const series = Array.isArray(record.convergence) ? record.convergence : []
+  for (let i = 0; i < Math.min(series.length, MAX_ROUNDS); i += 1) {
+    const n = series[i]
+    if (typeof n === 'number' && Number.isFinite(n) && n >= 0) builder.snapshotConvergence(i + 1, n)
+  }
+  if (record.round > 0) builder.advanceRound(record.round, record.maxRounds)
+  if (!record.active) builder.finish(record.stoppedReason ?? undefined)
+  return builder.serialize()
+}
 
 /** Build per-dimension threads for one round from its (dimension-tagged) findings. */
 function captureRound(builder: ReviewTranscriptBuilder, round: unknown): void {
@@ -158,27 +236,37 @@ export function registerTranscriptTool(ctx: {
   ctx.tools.register(
     defineTool({
       name: 'iterate_transcript',
-      // `read` never writes; `capture`/`nudge` persist transcript state → only
-      // read joins a parallel dispatch group.
-      isConcurrencySafe: (args) => (args as { operation?: unknown }).operation === 'read',
+      // `read`/`recall` never write; `capture`/`nudge` persist transcript state
+      // → only the read shapes join a parallel dispatch group.
+      isConcurrencySafe: (args) => {
+        const op = (args as { operation?: unknown }).operation
+        return op === 'read' || op === 'recall'
+      },
       description:
         'Runtime-observatory transcript for the iterate workflow. ' +
         '`read` returns the current persisted transcript manifest (per-reviewer threads, ' +
         'convergence series, findings, fixes, checkpoint, timeline, and any steering nudge ' +
         'written for the next round) — or, when the file is missing/malformed, a structured ' +
-        'empty view (`found:false` plus a blank manifest). ' +
+        'empty view (`found:false` plus a blank manifest). When the on-disk file is gone but the ' +
+        'session carries a linked run record (dsh ≥ 0.2.1-rc.1), `read` RECOVERS a summary manifest ' +
+        'from that record and sets `recovered:true`. ' +
         '`capture` builds a fresh transcript from the review `rounds` + `report`, folds in the ' +
         'decision-log timeline, and persists it (call once after the final aggregate so the UI ' +
         'reflects the run; skipped when `observatory.capture` is disabled). Round validation outcomes ' +
         'can be carried on capture via `validations` ({round, command, exitCode, allowed, rejectReason?}). ' +
+        'On a successful capture the tool ALSO appends a compact run record onto the dsh session log ' +
+        '(best-effort; reported as `sessionRecord`) so the run survives `.iterate/` loss and travels with ' +
+        'the session. ' +
+        '`recall` lists the session-linked run records (newest first) — useful to audit a run after ' +
+        'restart or to confirm the write took. ' +
         '`nudge` sets (text) or clears (text:null or an empty string) steering text the next round\'s reviewers read. ' +
         'Purely local and deterministic — never touches source files.',
       parameters: {
         operation: {
           type: 'string',
           required: true,
-          description: '"read" to fetch the manifest, "capture" to persist one, "nudge" to set steering text.',
-          enum: ['read', 'capture', 'nudge'],
+          description: '"read" to fetch the manifest, "capture" to persist one, "recall" to list session-linked run records, "nudge" to set steering text.',
+          enum: ['read', 'capture', 'recall', 'nudge'],
         },
         rounds: {
           type: 'json',
@@ -261,6 +349,19 @@ export function registerTranscriptTool(ctx: {
               description: 'For `capture`: true when nothing was persisted because `observatory.capture` is disabled.',
             },
             reason: { type: 'string', description: 'For a skipped `capture`: why persistence was skipped.' },
+            recovered: {
+              type: 'boolean',
+              description: 'For `read`: true when the manifest was rebuilt from a session-linked run record because the on-disk file was missing or unreadable.',
+            },
+            supported: {
+              type: 'boolean',
+              description: 'For `recall`: whether the host exposes the dsh session state-record API (dsh ≥ 0.2.1-rc.1).',
+            },
+            records: { type: 'json', description: 'For `recall`: session-linked run records, newest first.' },
+            sessionRecord: {
+              type: 'json',
+              description: 'For `capture`/`read`: the session-link outcome/position (`{linked, seq}` on capture, `{seq, updatedAt}` on a recovery).',
+            },
             error: { type: 'string' },
           },
         },
@@ -296,11 +397,59 @@ export function registerTranscriptTool(ctx: {
               approval,
             }).serialize() as unknown as JsonValue,
           })
-          if (!existsSync(file)) return emptyView()
+          // Recovery (dsh ≥ 0.2.1-rc.1): when the on-disk manifest is gone
+          // but the SESSION that produced the run carries a linked run record,
+          // rebuild a summary manifest so the observatory shows the real run
+          // header + trend instead of a blank panel. Best-effort: no session,
+          // no API, or no record all fall back to `emptyView()`.
+          const recover = async ():
+            | Promise<{ transcript: JsonValue; sessionRecord: JsonValue } | null> => {
+            const session = sessionOf(exec)
+            if (!session) return null
+            const { supported, records } = await readRunRecords(session)
+            if (!supported || records.length === 0) return null
+            const latest = records[records.length - 1] as StoredRunRecord
+            return {
+              transcript: normalizeManifestBounds(
+                recoverManifestFromRecord(latest, projectRoot, approval),
+              ) as unknown as JsonValue,
+              sessionRecord: {
+                seq: latest.seq,
+                time: latest.time,
+                updatedAt: latest.updatedAt,
+              } as unknown as JsonValue,
+            }
+          }
+          if (!existsSync(file)) {
+            const recovered = await recover()
+            if (recovered) {
+              return {
+                operation: 'read',
+                found: true,
+                recovered: true,
+                live: live as unknown as JsonValue,
+                transcript: recovered.transcript,
+                sessionRecord: recovered.sessionRecord,
+              }
+            }
+            return emptyView()
+          }
           let parsed: unknown
           try {
             parsed = JSON.parse(await readFile(file, 'utf-8'))
           } catch (err) {
+            const recovered = await recover()
+            if (recovered) {
+              return {
+                operation: 'read',
+                found: true,
+                recovered: true,
+                live: live as unknown as JsonValue,
+                transcript: recovered.transcript,
+                sessionRecord: recovered.sessionRecord,
+                error: `Recovered a summary from the session log; on-disk transcript was unreadable (${err instanceof Error ? err.message : String(err)}).`,
+              }
+            }
             return {
               ...emptyView(),
               error: `Failed to read transcript: ${err instanceof Error ? err.message : String(err)}`,
@@ -310,6 +459,18 @@ export function registerTranscriptTool(ctx: {
             // `JSON.parse` happily accepts `null`, `[]` and `{}` — values that
             // are parseable but carry no manifest. Surfacing them as
             // `found:true` made the observatory render junk panels.
+            const recovered = await recover()
+            if (recovered) {
+              return {
+                operation: 'read',
+                found: true,
+                recovered: true,
+                live: live as unknown as JsonValue,
+                transcript: recovered.transcript,
+                sessionRecord: recovered.sessionRecord,
+                error: 'Recovered a summary from the session log; on-disk file is not a valid manifest.',
+              }
+            }
             return {
               ...emptyView(),
               error: 'Transcript file is not a valid manifest; returning an empty view.',
@@ -323,6 +484,22 @@ export function registerTranscriptTool(ctx: {
             // so a hand-edited/hostile manifest is never handed to the client
             // raw — same normalizers/caps the builder applies at capture time.
             transcript: normalizeManifestBounds(parsed) as unknown as JsonValue,
+          }
+        }
+
+        if (args.operation === 'recall') {
+          // New capability: list the run records this plugin appended onto the
+          // dsh session log (dsh ≥ 0.2.1-rc.1). Read-only; degrades to
+          // `supported:false` on a host without the API.
+          const session = sessionOf(exec)
+          const { supported, records, error } = await readRunRecords(session)
+          const newestFirst = [...records].reverse()
+          return {
+            operation: 'recall',
+            found: newestFirst.length > 0,
+            supported,
+            records: newestFirst as unknown as JsonValue,
+            ...(error ? { error } : {}),
           }
         }
 
@@ -498,17 +675,30 @@ export function registerTranscriptTool(ctx: {
         else if (convergence.length > 0 && last === 0) builder.finish('converged')
         else if (roundsExecuted > 0) builder.finish('max_rounds_reached')
 
-        const persisted = await persistChecked(file, builder.serialize())
+        const manifest = builder.serialize()
+        const persisted = await persistChecked(file, manifest)
         if (!persisted.ok) {
           return { operation: 'capture', found: true, updated: false, error: persisted.error }
         }
+        // Session link (dsh ≥ 0.2.1-rc.1): append a compact run record onto the
+        // session log so the run survives `.iterate/` loss and travels with the
+        // session. Best-effort — a link failure is reported, never fatal (the
+        // on-disk capture above already succeeded).
+        let sessionRecord: JsonValue
+        const linkSession = await appendRunRecord(sessionOf(exec), runRecordFromManifest(manifest))
+        sessionRecord = (
+          linkSession.ok
+            ? { linked: true, seq: linkSession.seq }
+            : { linked: false, supported: linkSession.supported, reason: linkSession.error }
+        ) as unknown as JsonValue
         const live = await readLive(projectRoot)
         return {
           operation: 'capture',
           found: true,
           updated: true,
           live: live as unknown as JsonValue,
-          transcript: builder.serialize() as unknown as JsonValue,
+          transcript: manifest as unknown as JsonValue,
+          sessionRecord,
         }
       },
     }),

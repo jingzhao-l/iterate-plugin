@@ -108,6 +108,13 @@ import {
   configValueByPath, // #8b: current value of the selected dotted key
   DISK_SNAPSHOT_SOURCES, // #4/#3: read-side tools listed by the pull instruction
 } from '../../lib/parse.js'
+// v3.9: report export — shared with the `iterate_report` tool so the button
+// and the tool can never produce different reports.
+import {
+  renderRunReportMarkdown, // Markdown run report (PR-pasteable)
+  renderRunReportSarif, // SARIF 2.1.0 log (CI / Code Scanning)
+  runReportFilename, // deterministic download filename
+} from '../report-render.ts'
 import {
   configureLangStorage,
   detectLang,
@@ -2408,6 +2415,30 @@ function ObservatoryPanel(props: SlotProps) {
     })
   }
 
+  /** v3.9: export the run as a portable report — Markdown (PR-pasteable) or
+   *  SARIF 2.1.0 (CI / GitHub Code Scanning). Rendered from the SAME shared
+   *  data model as the `iterate_report` tool, so the button and the tool can
+   *  never disagree. Download-first with a copy fallback, like `exportObservatory`. */
+  const exportReport = (format: 'markdown' | 'sarif') => {
+    if (!manifest) return
+    const extra = { qualityGate, experienceBank, defenseEvents }
+    const content = format === 'sarif'
+      ? JSON.stringify(renderRunReportSarif(manifest, extra), null, 2)
+      : renderRunReportMarkdown(manifest, extra, { lang: getLang() })
+    const filename = runReportFilename(format)
+    const key = `report-${format}`
+    const flash = () => {
+      setCopiedKey(key)
+      if (copyTimer.current) clearTimeout(copyTimer.current)
+      copyTimer.current = setTimeout(() => setCopiedKey((cur) => (cur === key ? null : cur)), 1600)
+    }
+    if (downloadTextFile(filename, content)) { flash(); return }
+    copyText(content).then((ok) => {
+      if (!ok) { setCopyFailText(content); return }
+      flash()
+    })
+  }
+
   /** Force every thread open (or closed) and drop per-thread state. */
   const setAllThreads = (mode: 'all' | 'none') => {
     setThreadMode(mode)
@@ -3449,6 +3480,19 @@ function ObservatoryPanel(props: SlotProps) {
               onClick: exportObservatory,
               title: t('将观测台全部数据导出为 JSON（优先下载，失败则复制）'),
             }, copiedKey === 'export' ? t('已导出') : t('导出 JSON')),
+            // v3.9: portable report export — Markdown for a PR body, SARIF for
+            // CI / GitHub Code Scanning. Rendered from the same data model as
+            // the `iterate_report` tool.
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'report-markdown' ? '' : undefined,
+              onClick: () => exportReport('markdown'),
+              title: t('导出可粘贴进 PR 的 Markdown 运行报告（优先下载，失败则复制）'),
+            }, copiedKey === 'report-markdown' ? t('已导出') : t('导出报告')),
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'report-sarif' ? '' : undefined,
+              onClick: () => exportReport('sarif'),
+              title: t('导出 SARIF 2.1.0（供 CI / GitHub Code Scanning 消费）'),
+            }, copiedKey === 'report-sarif' ? t('已导出') : t('导出 SARIF')),
             // Gap #4: `.iterate/` artifacts are unreachable from the browser;
             // this copies the one instruction that makes the model echo them
             // into the session stream (which is what every panel scans).

@@ -8,7 +8,7 @@ import { START_INSTRUCTIONS } from '../lib/parse.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** The 17 tools `apply()` is allowed to register (source of truth below). */
+/** The 18 tools `apply()` is allowed to register (source of truth below). */
 const REGISTERED_TOOLS = [
   'iterate_config',
   'iterate_validate',
@@ -27,6 +27,7 @@ const REGISTERED_TOOLS = [
   'iterate_experience',
   'iterate_quality_gate',
   'iterate_defense_events',
+  'iterate_report',
 ]
 
 describe('apply() bootstrap', () => {
@@ -35,7 +36,7 @@ describe('apply() bootstrap', () => {
     assert.deepEqual(inject, ['tools', 'systemPrompt'])
   })
 
-  it('registers all 17 tools and injects the skill prompt section', () => {
+  it('registers all 18 tools and injects the skill prompt section', () => {
     const registered: string[] = []
     const sections: Array<{ name: string; order: number; text?: string }> = []
     const ctxMock = {
@@ -88,7 +89,7 @@ describe('apply() bootstrap', () => {
   })
 
   it('wires the gate BEFORE any tool registration (partial load fails closed)', () => {
-    // Regression: the hooks used to be registered AFTER the 17 tools, so a
+    // Regression: the hooks used to be registered AFTER the 18 tools, so a
     // failure mid-list left the already-registered tools running with NO
     // pre-execute approval gate. The gate must be first — a partial load may
     // only err toward MORE gating, never less.
@@ -115,7 +116,7 @@ describe('apply() bootstrap', () => {
     assert.equal(order[order.length - 1], 'section')
   })
 
-  it('isolates a failing tool registration: the other 16 still load', () => {
+  it('isolates a failing tool registration: the other 17 still load', () => {
     const registered: string[] = []
     const sections: string[] = []
     const ctxMock = {
@@ -131,7 +132,7 @@ describe('apply() bootstrap', () => {
 
     const warnings = withSilencedWarns(() => apply(ctxMock as never))
 
-    assert.equal(registered.length, 16, `registered: ${registered.join(', ')}`)
+    assert.equal(registered.length, 17, `registered: ${registered.join(', ')}`)
     assert.ok(!registered.includes('iterate_review'))
     // The failure is logged, not swallowed silently.
     assert.ok(
@@ -158,7 +159,7 @@ describe('apply() bootstrap', () => {
 
     withSilencedWarns(() => apply(ctxMock as never))
 
-    assert.equal(registered.length, 17)
+    assert.equal(registered.length, 18)
     assert.ok(events.includes('tools/pre-execute'), 'the approval gate must survive a prompt failure')
   })
 })
@@ -232,7 +233,7 @@ describe('client copy text ∈ registered command/instruction set (gap #1)', () 
     assert.ok(bundle.includes('iterate_triage'), 'bundle must carry the apply instruction')
   })
 
-  it('every iterate_* tool the client names is one of the 17 registered tools', () => {
+  it('every iterate_* tool the client names is one of the 18 registered tools', () => {
     const referenced = new Set([...clientSource.matchAll(/\biterate_[a-z_]+\b/g)].map((m) => m[0]!))
     // localStorage key fixture, not a tool.
     referenced.delete('iterate_storage_test__')

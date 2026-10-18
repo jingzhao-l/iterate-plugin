@@ -253,6 +253,12 @@ export const EN: Record<string, string> = {
     'Export every observatory panel as JSON (downloads first, falls back to copying)',
   已导出: 'Exported',
   '导出 JSON': 'Export JSON',
+  '导出报告': 'Export report',
+  '导出可粘贴进 PR 的 Markdown 运行报告（优先下载，失败则复制）':
+    'Export a PR-pasteable Markdown run report (download first, copy on failure)',
+  '导出 SARIF': 'Export SARIF',
+  '导出 SARIF 2.1.0（供 CI / GitHub Code Scanning 消费）':
+    'Export SARIF 2.1.0 for CI / GitHub Code Scanning',
   '观测台页签（快捷键 1-9 / 0 / -）': 'Observatory tabs (keys 1-9 / 0 / -)',
   '{a0}（按 {a1} 切换）': '{a0} (press {a1})',
   '{a0}（按 - 切换）': '{a0} (press -)',

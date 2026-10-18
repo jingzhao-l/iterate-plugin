@@ -5,6 +5,45 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.0] - 2026-10-18
+
+### Added
+
+- **Session-linked run records** (`iterate_transcript` `recall`). Adopted the
+  dsh `0.2.1-rc.1` **Session state-record API** (`appendPluginRecord` /
+  `pluginRecordOf` from `@deepseek-ai/dsh-session`):
+  - `capture` appends a compact, ignorable `plugin:iterate/run` record to the
+    dsh session log and returns `sessionRecord` (the session-linked copy of the
+    run's converged state);
+  - `recall` lists this session's run records (newest first) so a run stays
+    traceable after `.iterate/` is wiped;
+  - `read` **recovers a summary manifest** (`recovered:true`) from the newest
+    run record when `.iterate/transcript.json` is missing or malformed.
+  - Fail-safe by construction: lazy dynamic `import()`, structural typing, and
+    a `supported:false` degradation on hosts without the API; a best-effort
+    record write never fails a capture.
+- **`iterate_report` tool + observatory report export.** One shared,
+  dependency-free data model (`src/report-render.ts`, imported by both the tool
+  and the client bundle so they can never drift) renders:
+  - `format:"markdown"` — a PR-pasteable run report (header, quality gate,
+    findings, fixes, validations, defense events, experience bank);
+  - `format:"sarif"` — a SARIF 2.1.0 log for CI / GitHub Code Scanning (one
+    rule per review dimension, severity → error/warning/note, file+line
+    locations, suggested fix attached).
+  New observatory buttons **导出报告** (Markdown) and **导出 SARIF**
+  (download-first, copy fallback) render the same model.
+
+### Changed
+
+- **Upgraded upstream dsh to `0.2.1-rc.2`** — devDependencies pinned to
+  `0.2.1-rc.2` and `@deepseek-ai/cordis` to the stable `4.0.5` (the `~4.0.5`
+  peer required by every `0.2.1-rc.2` package). `dsh.compatibility.dshReleases`
+  now also declares `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2`
+  (24 releases, mirrored verbatim in both READMEs). `engines.dsh` is unchanged
+  (`>=0.1.1-rc.1`).
+- Added `@deepseek-ai/dsh-session` as an **optional** peer dependency (the
+  session-record API), so installs on older hosts are unaffected.
+
 ## [3.8.0] - 2026-10-16
 
 ### Changed

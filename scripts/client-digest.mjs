@@ -32,7 +32,11 @@ export const clientSourceFiles = (root) => {
       else if (/\.(ts|tsx|css)$/.test(entry.name)) rels.push(`src/client/${rel}`)
     }
   }
-  return [...rels.sort(), 'lib/parse.js']
+  // `lib/parse.js` is the pure client helper module; `src/report-render.ts` is
+  // the shared report renderer (imported by both the client bundle and the
+  // server-side `iterate_report` tool). Both are inlined into `lib/client.js`,
+  // so both must be part of the digest.
+  return [...rels.sort(), 'lib/parse.js', 'src/report-render.ts']
 }
 
 /** Marker the built bundle carries so tests can extract the recorded digest. */
