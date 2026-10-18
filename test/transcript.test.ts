@@ -418,6 +418,29 @@ describe('markFixRolledBackInTranscript', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('serializes the rollback write on the shared transcript lock', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-mark-'))
+    try {
+      const b = new ReviewTranscriptBuilder({ project: root, now: fixedClock() })
+      b.fix({ id: 'f1', file: 'src/a.ts', round: 1, summary: 'add guard' })
+      persistManifest(root, b.serialize())
+      // A live foreign holder of the transcript lock (any live pid). Without the
+      // lock this call returns instantly; with it, the bounded wait runs first
+      // and the write then degrades to proceed-unlocked (documented fallback).
+      writeFileSync(join(root, '.iterate', '.transcript.lock'), String(process.pid), 'utf-8')
+      const started = Date.now()
+      const updated = await markFixRolledBackInTranscript(root, 'f1')
+      const waited = Date.now() - started
+      assert.equal(updated, true)
+      assert.ok(waited >= 100, `waited ${waited}ms — the rollback acquired the transcript lock`)
+      // The lock we did not own is left untouched, and the flag still landed.
+      const after = JSON.parse(readFileSync(join(root, '.iterate', 'transcript.json'), 'utf-8'))
+      assert.equal(after.fixes.find((f: { id: string }) => f.id === 'f1').success, false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('iterate_transcript nudge execute', () => {

@@ -815,17 +815,25 @@ export async function markFixRolledBackInTranscript(
 ): Promise<boolean> {
   const file = transcriptPath(projectRoot)
   if (!existsSync(file)) return false
-  try {
-    const parsed = JSON.parse(await readFile(file, 'utf-8')) as unknown as TranscriptManifest
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.fixes)) return false
-    const { config } = loadEffectiveConfig(projectRoot)
-    const approval = config.observatory?.approval ?? 'ask'
-    const builder = rehydrateBuilder(parsed, approval)
-    builder.markFixRolledBack(id)
-    await persist(file, builder.serialize())
-    return true
-  } catch {
-    // Never let the secondary transcript write break the rollback flow.
-    return false
-  }
+  // Cross-process read-modify-write: serialize on the shared transcript lock
+  // (the same lock `nudge` takes), otherwise two concurrent rollbacks each read
+  // the same base and the second write silently discards the first's flag. The
+  // lock is held across the awaits because `withProjectLock` awaits a
+  // promise-returning callback. Kept fail-safe: any error still returns false.
+  return withProjectLock(projectRoot, 'transcript', async () => {
+    if (!existsSync(file)) return false
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf-8')) as unknown as TranscriptManifest
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.fixes)) return false
+      const { config } = loadEffectiveConfig(projectRoot)
+      const approval = config.observatory?.approval ?? 'ask'
+      const builder = rehydrateBuilder(parsed, approval)
+      builder.markFixRolledBack(id)
+      await persist(file, builder.serialize())
+      return true
+    } catch {
+      // Never let the secondary transcript write break the rollback flow.
+      return false
+    }
+  })
 }

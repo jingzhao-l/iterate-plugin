@@ -5,6 +5,22 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.2] - 2026-10-18
+
+Patch release: completing the unlocked read-modify-write sweep. Tests: 1280 → **1281**.
+
+### Fixed
+
+- **`markFixRolledBackInTranscript` performed an unlocked read-modify-write.**
+  A rollback re-read `.iterate/transcript.json`, rehydrated it and wrote it back
+  with no cross-process lock — the same class of lost update fixed for
+  `iterate_transcript nudge` in 3.9.1 (two concurrent rollbacks each read the
+  same base and the second write silently discarded the first's flag). It now
+  takes the shared `transcript` lock, held across the awaits. `appendLive`'s
+  byte-capped activity feed remains deliberately lock-free: it is an
+  append-only, self-healing projection where a per-event cross-process lock
+  would risk a bounded-wait stall on the tool-call hot path.
+
 ## [3.9.1] - 2026-10-18
 
 Patch release: a full implementation audit of the plugin surfaced 11 concrete
