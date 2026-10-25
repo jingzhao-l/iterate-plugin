@@ -5,6 +5,42 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.0] - 2026-10-25
+
+写侧翻转（双向集成场景③的 TS 半边）。这一批改了**落盘格式**并新增一个运行时依赖，
+按语义化版本是一次 minor，不是补丁。
+
+### Changed
+
+- **`.iterate/decision-log.jsonl` 写出去的就是内核的哈希链条目**，不再是本插件的私有形状。
+  行的字节即条目的规范形式，`prevEntryHash = sha256(上一行)`，创世为空串；可选字段**缺席而不是
+  null**（一个 `"dimension": null` 会改字节、改摘要，两个生态就会把同一段历史迁成两条不同的链）。
+- **kind 的合法性改成内核的语法**（`DECISION_KIND_PATTERN` 从 `iterate-kernel/decision-log-entry`
+  **导入**而不是重述）。本插件原来的 10 项固定清单与 Python 侧的 8 项清单之争到此结束：
+  `KNOWN_DECISION_KINDS` 现在只出现在说明文字里，不再裁决任何一次写入。
+- **`prune` 不再重编号。** 一条哈希链不能"整理"：删一行或改 `sequence` 会作废其后每一行的
+  `prevEntryHash`。旧的改写路径被移除，并点名两条合法动作；链开始之后混进 legacy 行＝
+  **contested**，由 `archive` 走人工选择的归档重启（重命名为 `…contested-<stamp>.jsonl`，0600）。
+- 新增运行时依赖 `iterate-kernel@0.1.9`（精确版本，与 `js-yaml` 同一条纪律），`package-lock.json`
+  随之；`dist/` 与 `src/` 同步重建。
+- **peer 兼容性追到 `@deepseek-ai/*@0.2.1-rc.3`**（上游 10-23 发布：新增左/右栏「更多」菜单、
+  会话切换不再丢未发送草稿、DeepSeek API Key 适配器对齐账号登录的模型列表更新方式）。
+  全部是宿主侧 UI 与流程修正，无插件面 API 变动；`dshReleases` 表同步登记 rc.3。
+
+### Fixed
+
+- **一条原本不可能失败的对照**：`archive-and-restart … at 0600` 断的是归档文件的模式，而被重命名
+  的那份台账本来就是 0600——那句 `chmodSync(archive, 0o600)` 没有任何测试驱动它。测试里先把台账
+  建成 0644 再归档；主代理独立复算过因果：摘掉那句 chmod，**这条具名用例变红**，装回后 86/86。
+- 补上"可选字段缺席而不是 null"此前**零覆盖**的一条，同时钉住 payload 里那个非法 dimension id
+  不会被升级成条目级字段。
+
+测试：套件 **1314 passed / 0 failed / 0 skipped**（`npm test`，`tsx --test`；此前 1281），
+`test/decision-log.test.ts` 45 条，`npx tsc --noEmit` 与 `npm run typecheck` 干净。
+变异电池（每条都必须让**具名**用例变红，之后按 sha256 核回源文件）：创世 prevHash 改成常量、
+contested 判定恒 null、kind 截到 32、pattern 本地重述成 `{0,63}`、归档不 chmod、备份写成 0644、
+`.iterate` 建成 0755、draft 带显式 null。
+
 ## [3.9.2] - 2026-10-18
 
 Patch release: completing the unlocked read-modify-write sweep. Tests: 1280 → **1281**.

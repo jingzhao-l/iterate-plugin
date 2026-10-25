@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterate.dev/run-plan-0.1.json",
+  "title": "RunPlan",
+  "description": "Which review dimensions a run intends to cover, in planned order (5.7 R40 scenario 2: dimension-aware context compression needs a plan to be aware of). Whoever configures the run produces this; whoever renders coverage reads it. Nothing in the kernel reads a config file to make one. NOTE ON SOURCE OF TRUTH: the id/label/focus constraints are duplicated from `src/dimension-context.ts`, which has no JSON Schema of its own — until that gap is closed, the zod side is the definition and this file mirrors it. ID-LEVEL UNIQUENESS IS ENFORCED BY ZOD ONLY: `uniqueItems` compares whole objects, so two entries with the same id but different focus pass this schema and are refused by `RunPlanSchema`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "dimensions"],
+  "properties": {
+    "schemaVersion": {
+      "const": "iterate.run-plan/0.1"
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/plannedDimension"
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["config", "recipe", "session", "manual"]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  },
+  "$defs": {
+    "plannedDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "maxLength": 64
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "focus": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    }
+  }
+}

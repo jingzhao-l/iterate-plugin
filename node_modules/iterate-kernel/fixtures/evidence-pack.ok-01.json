@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "glasspane.evidence/0.1",
+  "operationId": "op_0123456789ABCDEFGHJKMNPQRS",
+  "createdAt": "2026-09-14T12:34:56.789Z",
+  "attribution": {
+    "level": "soft",
+    "contaminated": false
+  },
+  "circuitBreaker": {
+    "level": 0
+  },
+  "signals": {
+    "act": {
+      "selector": {
+        "role": "button",
+        "title": "Submit"
+      },
+      "action": "press",
+      "actConfirmed": true
+    },
+    "axEvent": {
+      "treeDigestBefore": "00112233445566778899aabbccddeeff",
+      "treeDigestAfter": "ffeeddccbbaa99887766554433221100",
+      "nodeCount": 128,
+      "axChanged": true,
+      "latencyMs": 42
+    },
+    "handlerProbe": null,
+    "stateDiff": null,
+    "pixelDiff": {
+      "changedPixelRatio": 0.023,
+      "bounds": {
+        "x": 100,
+        "y": 200,
+        "width": 80,
+        "height": 28
+      },
+      "windowId": 12
+    },
+    "responsiveness": {
+      "responsive": true,
+      "pingMs": 3
+    },
+    "crash": {
+      "processAliveBefore": true,
+      "processAliveAfter": true
+    }
+  },
+  "assertion": {
+    "kind": "element_property",
+    "selector": {
+      "role": "button",
+      "title": "Submit"
+    },
+    "property": "enabled",
+    "expected": true,
+    "actual": true,
+    "passed": true
+  },
+  "diagnosis": {
+    "class": "NO_ANOMALY",
+    "report": {
+      "path": "act.press -> ax-confirm -> tree-digest -> pixel-diff",
+      "anomaly": "none: operation confirmed, AX tree changed, pixels changed",
+      "evidence": "op_0123456789ABCDEFGHJKMNPQRS soft attribution; axChanged=true (digest 00112233445566778899aabbccddeeff -> ffeeddccbbaa99887766554433221100); changedPixelRatio=0.023; pingMs=3",
+      "next": "no action required; assertion passed"
+    }
+  }
+}

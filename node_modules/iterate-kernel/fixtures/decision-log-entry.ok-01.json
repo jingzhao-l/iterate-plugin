@@ -1,0 +1,9 @@
+{
+  "entryId": "dl_0123456789ABCDEFGHJKMNPQRS",
+  "sequence": 0,
+  "prevEntryHash": "",
+  "operationId": "op_0123456789ABCDEFGHJKMNPQRS",
+  "summary": "act press on button 'Submit' (op_0123456789ABCDEFGHJKMNPQRS): actConfirmed=true, axChanged=true, assertion enabled=true passed",
+  "outcome": "pass",
+  "createdAt": "2026-09-14T12:34:56.789Z"
+}

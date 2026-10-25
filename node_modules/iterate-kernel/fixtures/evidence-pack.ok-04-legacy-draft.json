@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "glasspane.evidence/0.1-draft",
+  "operationId": "op_04DRAFTPACK000000000000000",
+  "createdAt": "2026-09-17T13:33:39.275Z",
+  "attribution": {
+    "level": "soft",
+    "contaminated": false
+  },
+  "circuitBreaker": {
+    "level": 0
+  },
+  "signals": {
+    "act": {
+      "selector": {
+        "role": "AXButton",
+        "title": "Submit"
+      },
+      "action": "press",
+      "actConfirmed": true
+    },
+    "axEvent": {
+      "treeDigestBefore": "f84988c2d9a2edf3972aa9a247279fce",
+      "treeDigestAfter": "0b7d3f1a5c8e2946d1a70c5e8b342f61",
+      "nodeCount": 4,
+      "axChanged": true,
+      "latencyMs": 18.7
+    },
+    "handlerProbe": null,
+    "stateDiff": null,
+    "pixelDiff": {
+      "changedPixelRatio": 0.018,
+      "bounds": {
+        "x": 512,
+        "y": 344,
+        "width": 168,
+        "height": 32
+      },
+      "windowId": 12
+    },
+    "responsiveness": {
+      "responsive": true,
+      "pingMs": 3
+    },
+    "crash": {
+      "processAliveBefore": true,
+      "processAliveAfter": true
+    }
+  },
+  "assertion": null,
+  "diagnosis": {
+    "class": "NO_ANOMALY",
+    "report": {
+      "path": "act.press -> ax-digest -> pixel-diff",
+      "anomaly": "none: operation confirmed, AX tree changed, pixels changed",
+      "evidence": "op_04DRAFTPACK000000000000000 soft attribution; axChanged=true; changedPixelRatio=0.018; pingMs=3",
+      "next": "no action required; continue the recipe"
+    }
+  }
+}

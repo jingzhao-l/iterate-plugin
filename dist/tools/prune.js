@@ -6,7 +6,6 @@
  *                   actually delete.
  *
  * Artifacts managed:
- *   - Decision-log entries older than `retainDays` (default 30, via since).
  *   - Stale checkpoint files (checkpoint.json).
  *   - Fix backups left over from old rounds (backups whose fix-id no longer
  *     appears in the registry).
@@ -18,6 +17,14 @@
  *   - Defense events older than `retainDays` (stale iteration streams that
  *     were never cleared).
  *
+ * Artifacts NOT managed (deliberately):
+ *   - The decision ledger (`.iterate/decision-log.jsonl`). It is a hash CHAIN since the
+ *     kernel flip: every entry's `prevEntryHash` is the sha256 of the previous line's
+ *     bytes, so dropping or renumbering one line invalidates every later one. Prune
+ *     therefore never rewrites it — `pruneDecisionLog` reports what a cutoff WOULD have
+ *     removed and names the two legal moves instead. The renumbering rewrite that used to
+ *     live here is deleted, not hidden behind a flag.
+ *
  * Security model:
  *   - Only operates under the resolved project `.iterate/` directory.
  *   - dryRun=true by default — the caller must explicitly opt into deletion.
@@ -28,14 +35,14 @@ import { existsSync, readdirSync, readFileSync, rmSync, unlinkSync, statSync } f
 import { join } from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { resolveProjectRootForExec } from "../config-loader.js";
-import { writeTextAtomic, writeJsonAtomic } from "../atomic-fs.js";
+import { writeJsonAtomic } from "../atomic-fs.js";
 import { withProjectLock } from "../file-lock.js";
-import { readDecisionEntries, appendDecisionEntry, acquireLogLockChecked, invalidateLogCountCache } from "./decision-log.js";
+import { readDecisionEntries, appendDecisionEntry, decisionLogContestedLine } from "./decision-log.js";
 import { readRegistry, recomputeRoundCounts } from "./fix.js";
 import { readExperienceBank, writeExperienceBank } from "./experience-store.js";
 import { readDefenseEvents, writeDefenseEvents } from "./defense-store.js";
 import { iterateDir, fixesDir, checkpointPath, fixRegistryPath } from "../paths.js";
-/** Default retention for decision-log entries (in days). */
+/** Retention window for the age-based artifacts (checkpoints, defense events). */
 const DEFAULT_RETAIN_DAYS = 30;
 const MIN_RETAIN_DAYS = 1;
 const MAX_RETAIN_DAYS = 365;
@@ -46,8 +53,6 @@ const MAX_RETAIN_DAYS = 365;
  * (never recent learning).
  */
 export const MAX_EXPERIENCE_ENTRIES = 2000;
-/** How many compare-and-append retries bound the decision-log rewrite race. */
-const MAX_LOG_REWRITE_RETRIES = 3;
 /** Clamp retainDays to a sane range. */
 export function clampRetainDays(days) {
     if (typeof days !== 'number' || !Number.isInteger(days) || days <= 0) {
@@ -150,9 +155,12 @@ function computeDefenseCounts(events) {
  */
 export function inspectPrune(projectRoot, retainDays) {
     const cutoff = cutoffTimestamp(retainDays);
-    // 1. Decision-log entries older than retainDays.
+    // 1. Decision-log entries older than retainDays — REPORTED, never removed: the ledger
+    // is a hash chain (see `pruneDecisionLog`). `contestedLogLine` is the one ledger
+    // condition a human has to settle, so the dry-run preview surfaces it.
     const entries = readDecisionEntries(projectRoot);
     const oldLogEntries = entries.filter((e) => e.timestamp < cutoff).length;
+    const contestedLogLine = decisionLogContestedLine(projectRoot);
     // 2. Checkpoint presence. A checkpoint is only STALE once it is older than
     // retainDays — a fresh checkpoint means a run was interrupted recently and
     // may still be resumed, so `hasCheckpoint` is kept as pure existence while
@@ -250,6 +258,7 @@ export function inspectPrune(projectRoot, retainDays) {
     const sweptDefense = sweepDefenseEvents(defenseStream, cutoff);
     return {
         oldLogEntries,
+        contestedLogLine,
         hasCheckpoint,
         checkpointStale,
         staleBackups,
@@ -269,89 +278,56 @@ export function inspectPrune(projectRoot, retainDays) {
  * Returns a detailed report of what was deleted.
  */
 /**
- * Rewrite the decision log to the entries younger than `cutoff`.
+ * What a cutoff WOULD have removed from the decision ledger — and why nothing is removed.
  *
- * The read-before-rewrite is a TOCTOU hot spot: a concurrent worker can append
- * a fresh audit line between our read and our atomic rewrite, and an atomic
- * rename would silently discard it. So instead of a single read+write we take
- * the cross-process log mutex for the whole loop AND keep a bounded
- * compare-and-append loop behind it — after each rewrite we re-read the log and
- * retry whenever the file grew (a concurrent append slipped in). The loop
- * terminates when the file is stable or after `MAX_LOG_REWRITE_RETRIES`, and a
- * failure here is surfaced as a structured error instead of truncating the log.
+ * THE RENUMBERING REWRITE IS GONE, NOT HIDDEN BEHIND A FLAG. It used to filter the log to
+ * the entries younger than `cutoff` and rewrite the whole file (temp + atomic rename, a
+ * bounded retry loop, the cross-process lock). Against the kernel's hash chain that is not
+ * a destructive-but-honest trim, it is forgery: entry i+1's `prevEntryHash` is the sha256
+ * of entry i's BYTES, so dropping line 3 makes every later line's recorded link wrong —
+ * and re-emitting the survivors with renumbered `sequence` and recomputed hashes produces
+ * a chain that verifies while proving nothing, because it now claims "these decisions were
+ * contiguous" about a file somebody deleted the middle of.
  *
- * Lock required: when the mutex cannot be taken (another process is appending
- * and does not release within the wait budget) the rewrite is REFUSED with a
- * structured error rather than proceeding unlocked — an unlocked rename can
- * drop a concurrent appender's audit line (its fd points at the pre-rename
- * inode) with no way to detect the loss afterwards.
+ * So prune reads, reports, and touches nothing. The two legal moves belong to the ledger
+ * itself and both are named in the remedy:
  *
- * `deleted` is the TOTAL across every attempt: attempt 1 may already have
- * removed entries before a retry is needed, and reporting only the final
- * attempt's slice would under-count the audit entry (the pre-fix code returned
- * `deleted: 0` on the exhaustion path even after real deletions).
+ *   1. keep appending — an all-legacy log migrates onto the chain on its next write
+ *      (verified before the swap, the original kept beside it at mode 0600) and a healthy
+ *      chain simply grows; a line is bounded by PAYLOAD_MAX_CANONICAL_LENGTH, not by age;
+ *   2. settle a CONTESTED ledger by CHOOSING archive-and-restart
+ *      (`iterate_decision_log({operation:"archive"})` / `archiveContestedDecisionLog`),
+ *      which renames the file to `…contested-<stamp>.jsonl` at mode 0600 and lets the next
+ *      append start a fresh chain. It refuses a healthy or an all-legacy ledger, so it can
+ *      never become a way to erase continuity by accident.
  *
- * @param options.afterRewrite test hook run after each successful rewrite —
- * simulates a concurrent appender landing lines mid-loop (production passes
- * no hook).
- * @param options.lock lock wait/stale budgets (tests pass short waits so the
- * lock-unavailable refusal is exercised in milliseconds, not 5s).
- * @returns the number of entries removed across all attempts, or 0 with an
- *  `error` when nothing needed removing or the rewrite was refused/failed.
+ * `cutoff` stays in the signature because the REPORT needs it: `retained` is exactly the
+ * number of lines the old code would have deleted, which is what a human weighs when
+ * deciding whether a ledger is worth settling.
  */
-export function rewriteDecisionLogKeepingRecent(projectRoot, cutoff, options = {}) {
-    const logPath = join(iterateDir(projectRoot), 'decision-log.jsonl');
-    // Take the cross-process log lock for the ENTIRE loop: with the mutex held,
-    // no concurrent appender can slip a fresh line into the read-before-rewrite
-    // window, so the first attempt is nearly always the only one. (The retry
-    // loop stays as defense-in-depth for a line landing via the afterRewrite
-    // hook or an already-running appender's buffered write.)
-    const { acquired, release } = acquireLogLockChecked(projectRoot, options.lock);
-    if (!acquired) {
-        return {
-            deleted: 0,
-            error: 'failed to acquire the decision-log lock — refusing to rewrite the log unlocked ' +
-                '(a concurrent appender could lose an audit line). Retry after the other operation finishes.',
-        };
-    }
-    try {
-        let deletedTotal = 0;
-        for (let attempt = 0; attempt < MAX_LOG_REWRITE_RETRIES; attempt++) {
-            try {
-                const entries = readDecisionEntries(projectRoot);
-                const kept = entries.filter((e) => e.timestamp >= cutoff);
-                const deleted = entries.length - kept.length;
-                if (deleted === 0)
-                    return { deleted: deletedTotal };
-                writeTextAtomic(logPath, kept.map((e) => JSON.stringify(e)).join('\n') + '\n');
-                // The append-side entry-count cache is keyed by path and assumes "same
-                // byte size ⇒ same count"; the rename above replaced the file with a
-                // different number of entries, so drop the stale cache or the next
-                // append can report a wrong entryCount when the sizes coincidentally
-                // match.
-                invalidateLogCountCache(logPath);
-                // Accumulate THIS attempt's deletions before the re-read: whatever the
-                // later attempts (or the exhaustion path) report, these entries are
-                // already gone from disk and must count toward the audit total.
-                deletedTotal += deleted;
-                options.afterRewrite?.();
-                // A concurrent appender (cross-process, lock-unavailable path) may have
-                // landed new lines after our read. If the log grew during the write
-                // window, re-read and prune again instead of accepting a lost audit trail.
-                const after = readDecisionEntries(projectRoot);
-                if (after.length <= kept.length)
-                    return { deleted: deletedTotal };
-            }
-            catch (err) {
-                return { deleted: deletedTotal, error: `failed to rewrite decision log: ${String(err)}` };
-            }
-        }
-        return { deleted: deletedTotal, error: `failed to rewrite decision log after ${MAX_LOG_REWRITE_RETRIES} attempts` };
-    }
-    finally {
-        release();
-    }
+export function pruneDecisionLog(projectRoot, cutoff) {
+    const entries = readDecisionEntries(projectRoot);
+    const retained = entries.filter((e) => e.timestamp < cutoff).length;
+    const contestedLine = decisionLogContestedLine(projectRoot);
+    return {
+        deleted: 0,
+        retained,
+        contestedLine,
+        code: 'ITERATE_E_DECISION_LOG_IMMUTABLE',
+        error: `the decision ledger is a hash chain: ${retained} ` +
+            `entr${retained === 1 ? 'y' : 'ies'} older than ${cutoff} are RETAINED, not rewritten`,
+        remedy: 'a chain cannot be trimmed in place — every later line links to the bytes of the line before it, ' +
+            'so deleting or renumbering one forges the rest. Two legal moves: (1) keep appending: an all-legacy ' +
+            'ledger migrates onto the chain on its next write and a healthy one just grows; (2) if an append ' +
+            'reports ITERATE_E_DECISION_LOG_INTERLEAVED, a human settles it with archive-and-restart — ' +
+            'iterate_decision_log({operation:"archive"}) moves the contested ledger aside losslessly (mode 0600) ' +
+            'and the next append starts a clean chain. Prune never deletes a ledger line.',
+    };
 }
+/**
+ * Actually prune the runtime artifacts (only called when dryRun=false).
+ * Returns a detailed report of what was deleted.
+ */
 /**
  * Execute the prune: apply every cleanable item reported by `inspectPrune`.
  * Every step is individually hedged so a single disk failure degrades to a
@@ -359,8 +335,13 @@ export function rewriteDecisionLogKeepingRecent(projectRoot, cutoff, options = {
  */
 export function executePrune(projectRoot, retainDays, report) {
     const cutoff = cutoffTimestamp(retainDays);
+    const ledger = pruneDecisionLog(projectRoot, cutoff);
     const result = {
+        // Always 0: a ledger line is never deleted by prune. The field stays because the
+        // prune summary (and the audit entry it logs) has always carried it.
         deletedLogEntries: 0,
+        retainedLogEntries: ledger.retained,
+        decisionLog: { code: ledger.code, error: ledger.error, remedy: ledger.remedy },
         deletedCheckpoint: false,
         deletedBackups: [],
         deletedTemps: [],
@@ -369,16 +350,13 @@ export function executePrune(projectRoot, retainDays, report) {
         deletedDefenseEvents: 0,
         errors: [],
     };
-    // 1. Rewrite the decision log, keeping only recent entries. Atomic
-    // (temp + rename) under the cross-process log mutex — REFUSED with a
-    // structured error when the lock cannot be taken (an unlocked rename could
-    // drop a concurrent appender's audit line); the bounded compare-and-append
-    // loop behind it guards the remaining read-before-rewrite window.
-    {
-        const { deleted, error } = rewriteDecisionLogKeepingRecent(projectRoot, cutoff);
-        result.deletedLogEntries = deleted;
-        if (error)
-            result.errors.push(error);
+    // 1. The decision ledger is READ-ONLY here: nothing is deleted, nothing is rewritten
+    // (see `pruneDecisionLog`). The refusal is always reported; a CONTESTED ledger is
+    // additionally escalated into `errors`, because that is a broken state only a human can
+    // settle — archive-and-restart is offered, never taken.
+    if (ledger.contestedLine !== null) {
+        result.errors.push(`line ${ledger.contestedLine} of the decision ledger is a legacy record appended after the chain ` +
+            `began (ITERATE_E_DECISION_LOG_INTERLEAVED). ${ledger.remedy}`);
     }
     // 2. Remove checkpoint — ONLY when it is actually stale (older than
     // retainDays). A fresh checkpoint is a live resume point for a recently
@@ -499,9 +477,12 @@ export function registerPruneTool(ctx) {
         },
         description: 'Inspect or clean up old iterate runtime artifacts (.iterate/). ' +
             'Defaults to dry-run (report-only, no deletion). Pass `dryRun: false` to actually prune. ' +
-            'Manages: old decision-log entries, stale checkpoints, orphaned fix backups, empty fix rounds, ' +
+            'Manages: stale checkpoints, orphaned fix backups, empty fix rounds, ' +
             'stray temp files left by crashed atomic writes, experience-bank entries beyond the entry cap, ' +
             'and stale defense events. ' +
+            'The decision ledger is NEVER trimmed: it is a hash chain, so a removed or renumbered line ' +
+            'would invalidate every later one. Prune reports how many lines a cutoff would have removed ' +
+            'and names the two legal moves (keep appending / human-chosen archive-and-restart). ' +
             'A non-dry-run appends ONE aggregate summary entry (counts per artifact class) to the decision log.',
         parameters: {
             dryRun: {
@@ -539,7 +520,10 @@ export function registerPruneTool(ctx) {
                     const registryError = report?.registryError;
                     const lines = [
                         `[dry-run] prune report (retainDays=${value.retainDays}):`,
-                        `  Decision-log entries to remove: ${report?.oldLogEntries ?? '?'} (of ${report?.totalLogEntries ?? '?'})`,
+                        `  Decision-log entries older than retainDays: ${report?.oldLogEntries ?? '?'} (of ${report?.totalLogEntries ?? '?'}) — RETAINED, a hash chain is never trimmed`,
+                        report?.contestedLogLine
+                            ? `  CONTESTED ledger: line ${report.contestedLogLine} is a legacy record after the chain — settle it with iterate_decision_log({operation:"archive"})`
+                            : '  Ledger continuity: no interleaved legacy records',
                         `  Checkpoint to delete: ${report?.checkpointStale ? 'yes (stale)' : report?.hasCheckpoint ? 'no (fresh — resume point, kept)' : 'none'}`,
                         registryError
                             ? `  Stale backups to delete: none — ${registryError}`
@@ -555,7 +539,7 @@ export function registerPruneTool(ctx) {
                 }
                 const lines = [
                     `Prune complete (retainDays=${value.retainDays}):`,
-                    `  Deleted ${result?.deletedLogEntries ?? 0} old log entries.`,
+                    `  Decision-log lines deleted: ${result?.deletedLogEntries ?? 0} — ${result?.retainedLogEntries ?? 0} older than the cutoff RETAINED (${result?.decisionLog?.code ?? 'hash chain'}: never renumbered).`,
                     `  Checkpoint deleted: ${result?.deletedCheckpoint ? 'yes' : 'no'}`,
                     `  Deleted ${result?.deletedBackups?.length ?? 0} stale backups.`,
                     `  Deleted ${result?.deletedTemps?.length ?? 0} stray temp files.`,
@@ -600,6 +584,10 @@ export function registerPruneTool(ctx) {
                     action: 'prune',
                     retainDays,
                     deletedLogEntries: result.deletedLogEntries,
+                    retainedLogEntries: result.retainedLogEntries,
+                    // The ledger itself was not touched; record WHY, so an audit reader can tell
+                    // "prune deleted nothing" apart from "prune was refused by an immutable chain".
+                    decisionLogRefusal: result.decisionLog.code,
                     deletedCheckpoint: result.deletedCheckpoint,
                     deletedBackups: result.deletedBackups.length,
                     trimmedEmptyRounds: result.trimmedEmptyRounds,

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   mkdtempSync,
   writeFileSync,
@@ -19,13 +20,19 @@ import {
   inspectPrune,
   executePrune,
   isPrunableTemp,
-  rewriteDecisionLogKeepingRecent,
+  pruneDecisionLog,
   registerPruneTool,
   sweepExperienceBank,
   sweepDefenseEvents,
   MAX_EXPERIENCE_ENTRIES,
 } from '../src/tools/prune.ts'
-import { appendDecisionEntry, readDecisionEntries } from '../src/tools/decision-log.ts'
+import * as pruneModule from '../src/tools/prune.ts'
+import {
+  appendDecisionEntry,
+  readDecisionEntries,
+  archiveContestedDecisionLog,
+  DECISION_LOG_ERROR_CODES,
+} from '../src/tools/decision-log.ts'
 import { emptyRegistry, upsertRecord } from '../src/tools/fix.ts'
 import { readExperienceBank, writeExperienceBank } from '../src/tools/experience-store.ts'
 import { readDefenseEvents, writeDefenseEvents } from '../src/tools/defense-store.ts'
@@ -223,7 +230,8 @@ describe('inspectPrune', () => {
 describe('executePrune', () => {
   it('deletes old log entries, stale checkpoint, stale backups', () => {
     const { dir, cleanup } = tempProject()
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+    const staleStamp = daysAgoISO(60)
+    appendDecisionEntry(dir, entry({ timestamp: staleStamp, type: 'decision', data: {} }))
     appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: {} }))
     mkdirSync(iterateDir(dir), { recursive: true })
     // A checkpoint is only pruned when STALE — age its mtime past retainDays so
@@ -240,10 +248,16 @@ describe('executePrune', () => {
     const report = inspectPrune(dir, 30)
     const result = executePrune(dir, 30, report)
 
-    assert.equal(result.deletedLogEntries, 1)
+    assert.equal(result.deletedLogEntries, 0, 'a hash-chained ledger line is never deleted by prune')
+    assert.equal(result.retainedLogEntries, 1, 'the stale line is REPORTED as retained')
     assert.equal(result.deletedCheckpoint, true)
     assert.deepEqual(result.deletedBackups, ['fix-dead_2026-08-17T00-00-00-000Z.bak'])
     assert.deepEqual(result.errors, [])
+    assert.equal(
+      readFileSync(join(iterateDir(dir), 'decision-log.jsonl'), 'utf-8').includes(staleStamp),
+      true,
+      'the 60-day-old entry is STILL ON DISK — the renumbering rewrite is gone',
+    )
 
     // Live backup survives, dead one is gone (registry.json also lives here).
     const remaining = readdirSync(fixesDir(dir)).filter((f) => f.endsWith('.bak'))
@@ -274,6 +288,7 @@ describe('executePrune', () => {
     // path whose parent does not exist.
     const report = {
       oldLogEntries: 0,
+      contestedLogLine: null,
       hasCheckpoint: false,
       checkpointStale: false,
       staleBackups: ['nope/fix-dead_2026-08-17T00-00-00-000Z.bak'],
@@ -461,34 +476,41 @@ describe('iterate_prune tool', () => {
     cleanup()
   })
 
-  it('dryRun:false actually prunes and logs', async () => {
+  it('dryRun:false prunes the deletable artifacts and RETAINS the ledger', async () => {
     const { dir, cleanup } = tempProject()
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+    const staleStamp = daysAgoISO(60)
+    appendDecisionEntry(dir, entry({ timestamp: staleStamp, type: 'decision', data: {} }))
     const tool = captureTool()
     const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
     assert.equal(out.ok, true)
     assert.equal(out.dryRun, false)
-    assert.equal((out.result as { deletedLogEntries: number }).deletedLogEntries, 1)
-    const content = readFileSync(join(iterateDir(dir), 'decision-log.jsonl'), 'utf-8')
-    assert.ok(!content.includes(daysAgoISO(60)))
+    const result = out.result as { deletedLogEntries: number; retainedLogEntries: number; decisionLog: { code: string } }
+    assert.equal(result.deletedLogEntries, 0)
+    assert.equal(result.retainedLogEntries, 1)
+    assert.equal(result.decisionLog.code, 'ITERATE_E_DECISION_LOG_IMMUTABLE')
+    const lines = readFileSync(join(iterateDir(dir), 'decision-log.jsonl'), 'utf-8').trim().split('\n')
+    // The stale line survives (the old rewrite deleted it) and prune's own audit line
+    // was APPENDED to the chain rather than replacing it.
+    assert.equal(lines.length, 2, 'one retained line + prune\'s audit line')
+    assert.equal(JSON.parse(lines[0]!).createdAt, staleStamp, 'the retained line kept its own instant')
+    const audit = JSON.parse(lines[1]!) as Record<string, unknown>
+    assert.equal(audit.sequence, 1, 'the audit entry continues the chain instead of renumbering it')
+    assert.equal(audit.prevEntryHash, createHash('sha256').update(lines[0]!, 'utf-8').digest('hex'))
     cleanup()
   })
 
-  it('the decision-log rewrite preserves concurrent FRESH entries (bounded retry guard)', async () => {
+  it('a stale line survives a real prune: nothing is renumbered or re-hashed', async () => {
     const { dir, cleanup } = tempProject()
     appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
-    // A fresh audit line lands "during" the prune — it must survive the
-    // read-before-rewrite window, never be silently dropped by the rewrite.
     appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(0), type: 'decision', data: { fresh: true } }))
-    const tool = captureTool()
-    const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
-    assert.equal(out.ok, true)
-    const result = out.result as { deletedLogEntries: number; errors: string[] }
-    assert.equal(result.deletedLogEntries, 1)
+    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+    const before = readFileSync(logPath, 'utf-8').trim().split('\n')
+    const result = executePrune(dir, 30, inspectPrune(dir, 30))
+    assert.equal(result.deletedLogEntries, 0)
     assert.deepEqual(result.errors, [])
-    const content = readFileSync(join(iterateDir(dir), 'decision-log.jsonl'), 'utf-8')
-    assert.ok(!content.includes(daysAgoISO(60)), 'stale entry removed')
-    assert.ok(content.includes('"fresh":true'), 'fresh entry survives the rewrite')
+    const after = readFileSync(logPath, 'utf-8').trim().split('\n')
+    assert.deepEqual(after, before, 'every line is BYTE-IDENTICAL: a rewritten chain could not be')
+    assert.equal(JSON.parse(after[1]!).payload.fresh, true, 'the fresh entry stays where it was, at line 2')
     cleanup()
   })
 
@@ -504,7 +526,7 @@ describe('iterate_prune tool', () => {
     cleanup()
   })
 
-  it('concurrent-appender lock is stolen when its holder is dead, so prune still runs', async () => {
+  it('a lock left by a dead process is stolen, so prune\'s own audit append still lands', async () => {
     const { dir, cleanup } = tempProject()
     appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
     // Simulate a crashed second process that left its lock behind (dead pid).
@@ -513,9 +535,9 @@ describe('iterate_prune tool', () => {
     const out = (await tool.execute({ path: dir, dryRun: false })) as Record<string, unknown>
     assert.equal(out.ok, true)
     const result = out.result as { deletedLogEntries: number; errors: string[] }
-    assert.equal(result.deletedLogEntries, 1)
+    assert.equal(result.deletedLogEntries, 0, 'prune never deletes a ledger line')
     assert.deepEqual(result.errors, [])
-    // The lock is gone (released by the rewrite) and no stale lock is left sweeping.
+    // The lock is gone (released by the audit append) and no stale lock is left sweeping.
     assert.equal(existsSync(join(iterateDir(dir), '.decision-log.lock')), false)
     cleanup()
   })
@@ -598,74 +620,142 @@ describe('decision-log lock', () => {
   })
 })
 
-// ─── decision-log rewrite accumulation (F6) ─────────────────────────────────
+// ─── the decision ledger is NOT prunable (the renumber rewrite is gone) ──────
 
-describe('rewriteDecisionLogKeepingRecent', () => {
-  const logLine = (iso: string): string =>
-    JSON.stringify(entry({ timestamp: iso, type: 'decision', data: { tag: iso } })) + '\n'
-
-  it('accumulates deletions across the concurrent-appender retry loop', () => {
-    const { dir, cleanup } = tempProject()
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: { fresh: true } }))
-    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
-
-    // Simulate a concurrent appender landing one MORE stale line right after
-    // the first rewrite: the loop must re-prune AND report 1 + 1 = 2 removed,
-    // not just the final attempt's slice (nor 0, as the exhaustion path used to).
-    let appended = false
-    const res = rewriteDecisionLogKeepingRecent(dir, cutoffTimestamp(30), {
-      afterRewrite: () => {
-        if (appended) return
-        appended = true
-        appendFileSync(logPath, logLine(daysAgoISO(45)), 'utf-8')
-      },
-    })
-
-    assert.equal(res.error, undefined)
-    assert.equal(res.deleted, 2, 'deletions must accumulate across retries')
-    const remaining = readDecisionEntries(dir)
-    assert.equal(remaining.length, 1)
-    assert.equal(remaining[0]!.timestamp >= cutoffTimestamp(30), true)
-    cleanup()
+describe('pruneDecisionLog — a hash chain cannot be trimmed', () => {
+  it('the old renumbering export is GONE, not hidden behind a flag', () => {
+    const exports = Object.keys(pruneModule)
+    assert.equal(
+      exports.includes('rewriteDecisionLogKeepingRecent'),
+      false,
+      `rewriteDecisionLogKeepingRecent must not exist any more, got: ${exports.join(', ')}`,
+    )
+    assert.equal(exports.includes('pruneDecisionLog'), true, 'the honest replacement is exported')
   })
 
-  it('reports the accumulated total when the bounded retry budget is exhausted', () => {
+  it('reports what the cutoff WOULD have removed and changes zero bytes', () => {
     const { dir, cleanup } = tempProject()
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: { fresh: true } }))
-    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+    try {
+      appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+      appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: { fresh: true } }))
+      const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+      const before = readFileSync(logPath, 'utf-8')
 
-    // Append after EVERY attempt: the loop never stabilizes within its bounded
-    // budget, so it must give up with an error — but still count what it did.
-    const res = rewriteDecisionLogKeepingRecent(dir, cutoffTimestamp(30), {
-      afterRewrite: () => {
-        appendFileSync(logPath, logLine(daysAgoISO(50)), 'utf-8')
-      },
-    })
-
-    assert.match(res.error ?? '', /after 3 attempts/)
-    assert.equal(res.deleted, 3, 'every attempt removed an entry; the total must not reset to 0')
-    cleanup()
+      const res = pruneDecisionLog(dir, cutoffTimestamp(30))
+      assert.equal(res.deleted, 0, 'prune deletes NO ledger line')
+      assert.equal(res.retained, 1, 'one line is older than the cutoff, and it stays')
+      assert.equal(res.code, 'ITERATE_E_DECISION_LOG_IMMUTABLE')
+      assert.equal(res.contestedLine, null)
+      assert.match(res.error, /RETAINED/)
+      // The remedy must name BOTH legal moves, or the refusal is a dead end.
+      assert.match(res.remedy, /keep appending|migrates onto the chain/)
+      assert.match(res.remedy, /archive-and-restart|operation:"archive"/)
+      assert.match(res.remedy, /ITERATE_E_DECISION_LOG_INTERLEAVED/)
+      assert.equal(readFileSync(logPath, 'utf-8'), before, 'the ledger is byte-identical')
+      assert.equal(readDecisionEntries(dir).length, 2, 'both lines are still readable')
+      assert.equal(
+        readdirSync(iterateDir(dir)).some((n) => n.includes('.contested-')),
+        false,
+        'prune never archives on its own',
+      )
+    } finally {
+      cleanup()
+    }
   })
 
-  it('refuses to rewrite when the cross-process log lock cannot be taken', () => {
+  it('a real prune leaves the stale line and the chain intact', () => {
     const { dir, cleanup } = tempProject()
-    appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
-    const logPath = join(iterateDir(dir), 'decision-log.jsonl')
-    const before = readFileSync(logPath, 'utf-8')
-    // A LIVE holder: our own pid is alive and the file is fresh, so it cannot
-    // be stolen — the rewrite must refuse rather than rename unlocked (an
-    // unlocked rename can drop a concurrent appender's audit line silently).
-    writeFileSync(join(iterateDir(dir), '.decision-log.lock'), String(process.pid), 'utf-8')
+    try {
+      appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(60), type: 'decision', data: {} }))
+      appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: {} }))
+      const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+      const before = readFileSync(logPath, 'utf-8')
 
-    const res = rewriteDecisionLogKeepingRecent(dir, cutoffTimestamp(30), { lock: { waitMs: 50 } })
+      const result = executePrune(dir, 30, inspectPrune(dir, 30))
+      assert.equal(result.deletedLogEntries, 0)
+      assert.equal(result.retainedLogEntries, 1)
+      assert.equal(result.decisionLog.code, 'ITERATE_E_DECISION_LOG_IMMUTABLE')
+      assert.match(result.decisionLog.remedy, /keep appending|migrates onto the chain/)
+      assert.match(result.decisionLog.remedy, /archive/)
+      assert.deepEqual(result.errors, [], 'a healthy chain is not an error, only a refusal')
+      // `executePrune` itself never writes to the ledger — the audit line is the TOOL's
+      // append (see the end-to-end test), so the file must be byte-for-byte what it was.
+      assert.equal(readFileSync(logPath, 'utf-8'), before, 'executePrune left the chain untouched')
+      const lines = before.trim().split('\n')
+      assert.equal(lines.length, 2)
+      const second = JSON.parse(lines[1]!) as Record<string, unknown>
+      assert.equal(
+        second.prevEntryHash,
+        createHash('sha256').update(lines[0]!, 'utf-8').digest('hex'),
+        'the link prune could not have kept by rewriting is still there',
+      )
+    } finally {
+      cleanup()
+    }
+  })
 
-    assert.match(res.error ?? '', /decision-log lock/)
-    assert.equal(res.deleted, 0)
-    assert.equal(readFileSync(logPath, 'utf-8'), before, 'the log must be untouched after a refusal')
-    rmSync(join(iterateDir(dir), '.decision-log.lock'), { force: true })
-    cleanup()
+  it('escalates a CONTESTED ledger into errors and still touches nothing', () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      appendDecisionEntry(dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: {} }))
+      const logPath = join(iterateDir(dir), 'decision-log.jsonl')
+      appendFileSync(
+        logPath,
+        `${JSON.stringify({ timestamp: daysAgoISO(2), round: 1, type: 'decision', data: {} })}\n`,
+        'utf-8',
+      )
+      const before = readFileSync(logPath, 'utf-8')
+
+      const report = inspectPrune(dir, 30)
+      assert.equal(report.contestedLogLine, 2, 'the dry-run preview sees the contested line')
+
+      const result = executePrune(dir, 30, report)
+      assert.equal(result.deletedLogEntries, 0)
+      assert.equal(result.errors.length, 1)
+      assert.match(result.errors[0]!, /INTERLEAVED/)
+      assert.match(result.errors[0]!, /archive/)
+      assert.equal(readFileSync(logPath, 'utf-8'), before, 'even a contested ledger is left byte-for-byte')
+      assert.equal(
+        readdirSync(iterateDir(dir)).some((n) => n.includes('.contested-')),
+        false,
+        'archive-and-restart is a HUMAN choice, never a side effect of prune',
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('archive-and-restart refuses a healthy ledger and an all-legacy one', () => {
+    const healthy = tempProject()
+    const legacy = tempProject()
+    try {
+      appendDecisionEntry(healthy.dir, entry({ timestamp: daysAgoISO(1), type: 'decision', data: {} }))
+      const healthyBefore = readFileSync(join(iterateDir(healthy.dir), 'decision-log.jsonl'), 'utf-8')
+      assert.throws(
+        () => archiveContestedDecisionLog(healthy.dir),
+        (err: unknown) => {
+          const e = err as { code?: string; remedy?: string }
+          return e.code === DECISION_LOG_ERROR_CODES.interleaved &&
+            /healthy ledger would lose its continuity/.test(String(e.remedy))
+        },
+      )
+      assert.equal(readFileSync(join(iterateDir(healthy.dir), 'decision-log.jsonl'), 'utf-8'), healthyBefore)
+
+      mkdirSync(iterateDir(legacy.dir), { recursive: true })
+      const legacyBody = `${JSON.stringify({ timestamp: daysAgoISO(9), round: 1, type: 'decision', data: {} })}\n`
+      writeFileSync(join(iterateDir(legacy.dir), 'decision-log.jsonl'), legacyBody, 'utf-8')
+      assert.throws(
+        () => archiveContestedDecisionLog(legacy.dir),
+        (err: unknown) => {
+          const e = err as { code?: string; remedy?: string }
+          return e.code === DECISION_LOG_ERROR_CODES.interleaved && /ALL legacy records/.test(String(e.remedy))
+        },
+      )
+      assert.equal(readFileSync(join(iterateDir(legacy.dir), 'decision-log.jsonl'), 'utf-8'), legacyBody)
+    } finally {
+      healthy.cleanup()
+      legacy.cleanup()
+    }
   })
 })
 

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "glasspane.evidence/0.1",
+  "operationId": "op_112233445566778899AABBCCDD",
+  "createdAt": "2026-09-14T12:35:00.001Z",
+  "attribution": {
+    "level": "soft",
+    "contaminated": false
+  },
+  "circuitBreaker": {
+    "level": 1,
+    "reason": "screen-recording-denied"
+  },
+  "signals": {
+    "act": {
+      "selector": {
+        "role": "checkBox",
+        "identifier": "agree-checkbox"
+      },
+      "action": "confirm",
+      "actConfirmed": true
+    },
+    "axEvent": {
+      "treeDigestBefore": "00000000000000000000000000000001",
+      "treeDigestAfter": "00000000000000000000000000000002",
+      "nodeCount": 57,
+      "axChanged": true,
+      "latencyMs": 12.5
+    },
+    "handlerProbe": null,
+    "stateDiff": null
+  },
+  "assertion": null,
+  "diagnosis": null
+}

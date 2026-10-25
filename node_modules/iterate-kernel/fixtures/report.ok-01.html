@@ -1,0 +1,33 @@
+<div class="gp-evidence" id="op_0PAAAABBBBCCCCDDDDEEEEFFFF">
+<h1>op_0PAAAABBBBCCCCDDDDEEEEFFFF · NO_ANOMALY · normal</h1>
+<dl class="gp-summary">
+<dt>operationId</dt><dd>op_0PAAAABBBBCCCCDDDDEEEEFFFF</dd>
+<dt>createdAt</dt><dd>2026-09-19T09:41:02.500Z</dd>
+<dt>schemaVersion</dt><dd>glasspane.evidence/0.1</dd>
+<dt class="gp-line">·</dt><dd>attribution: strong | contaminated=false</dd>
+<dt class="gp-line">·</dt><dd>circuitBreaker: level 0 (normal)</dd>
+<dt class="gp-line">·</dt><dd>act press AXButton &quot;OK Press&quot; #ok-press: confirmed</dd>
+<dt class="gp-line">·</dt><dd>axEvent: changed=true nodes=24 latencyMs=1234.57</dd>
+<dt class="gp-line">·</dt><dd>handlerProbe: probeVersion=gp-probe/0.1.0 hitCount=3 late=1 handlers=[probe-demo/ProbeDemoApp.swift:64, probe-demo/ProbeDemoApp.swift:65]</dd>
+<dt class="gp-line">·</dt><dd>stateDiff: source=z3-kvc changed=true entries=[demo.count &quot;0&quot; -&gt; &quot;1&quot;, demo.label &quot;idle&quot; -&gt; &quot;pressed&quot;]</dd>
+<dt class="gp-line">·</dt><dd>pixelDiff: changedRatio=0.123457 windowId=4210 bounds=12,34,96,28</dd>
+<dt class="gp-line">·</dt><dd>responsiveness: responsive=true pingMs=2.1</dd>
+<dt class="gp-line">·</dt><dd>crash: aliveBefore=true aliveAfter=true</dd>
+</dl>
+<section class="gp-section">
+<h2>PATH</h2>
+<p>act.press -&gt; probe-window -&gt; handler/state -&gt; ax-digest -&gt; pixel-diff</p>
+</section>
+<section class="gp-section">
+<h2>ANOMALY</h2>
+<p>none: operation confirmed, AX tree changed and pixels changed</p>
+</section>
+<section class="gp-section">
+<h2>EVIDENCE</h2>
+<p>op_0PAAAABBBBCCCCDDDDEEEEFFFF strong attribution; actConfirmed=true</p>
+</section>
+<section class="gp-section">
+<h2>NEXT</h2>
+<p>no action required; continue the recipe</p>
+</section>
+</div>

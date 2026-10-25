@@ -119,8 +119,10 @@ export function registerHistoryTool(ctx) {
         parameters: {
             type: {
                 type: 'string',
-                description: 'Optional entry-type filter: round_start, review_result, atomic_fix, architectural_fix, ' +
-                    'revert, round_failed, validation, decision, report, resume.',
+                description: 'Optional entry-type (decision kind) filter. This plugin emits round_start, review_result, ' +
+                    'atomic_fix, architectural_fix, revert, round_failed, validation, decision, report, resume — ' +
+                    'a LABEL list, not a closed set: any kind matching the kernel grammar ' +
+                    '(`^[a-z][a-z0-9_]{0,31}$`) can be recorded and filtered here.',
             },
             since: {
                 type: 'string',

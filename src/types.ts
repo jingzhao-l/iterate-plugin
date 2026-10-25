@@ -53,21 +53,50 @@ export interface IterateConfig {
   personalization?: Record<string, unknown>
 }
 
-/** One entry in the append-only decision log */
+/**
+ * The decision kinds THIS plugin's own producers write.
+ *
+ * DISPLAY AND DOCUMENTATION ONLY — never a validity rule. Membership in this list
+ * used to be the gate on `iterate_decision_log` appends, and it disagreed with the
+ * Python harness's own list (which rejected `round_failed` and `resume` outright):
+ * two shells, two closed sets, one shared ledger. The disagreement WAS the bug.
+ * Validity is now the kernel's kind GRAMMAR (`DECISION_KIND_PATTERN`,
+ * `^[a-z][a-z0-9_]{0,31}$`) — see `src/tools/decision-log.ts` `isDecisionKind` —
+ * deliberately open so adding a kind does not need a kernel release, and so a kind
+ * produced by either shell is readable by the other.
+ */
+export const KNOWN_DECISION_KINDS = [
+  'round_start',
+  'review_result',
+  'atomic_fix',
+  'architectural_fix',
+  'revert',
+  'validation',
+  'decision',
+  'report',
+  'round_failed',
+  'resume',
+] as const
+
+/** One of the kinds this plugin emits itself (a label, not an exhaustive set). */
+export type KnownDecisionKind = (typeof KNOWN_DECISION_KINDS)[number]
+
+/**
+ * One entry in the append-only decision log — the loop's RECORD shape.
+ *
+ * This is what a producer hands to `appendDecisionEntry` and what every reader sees
+ * back. It is NOT the shape on disk: the ledger stores the kernel's canonical
+ * hash-chained entry, and `decision-log.ts` transcribes on the way in
+ * (`type`→`kind`, `data`→`payload`, `timestamp`→`createdAt`) and projects back out
+ * on the way read (`projectDecisionRecord`).
+ *
+ * `type` is an open string (kernel grammar) — see {@link KNOWN_DECISION_KINDS} for
+ * what this plugin actually emits.
+ */
 export interface DecisionLogEntry {
   timestamp: string
   round: number
-  type:
-    | 'round_start'
-    | 'review_result'
-    | 'atomic_fix'
-    | 'architectural_fix'
-    | 'revert'
-    | 'validation'
-    | 'decision'
-    | 'report'
-    | 'round_failed'
-    | 'resume'
+  type: string
   data: Record<string, unknown>
 }
 

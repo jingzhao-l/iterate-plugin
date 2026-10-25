@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "glasspane.evidence/0.1",
+  "operationId": "op_05AXTREEMAP000000000000000",
+  "createdAt": "2026-09-21T07:12:44.500Z",
+  "attribution": {
+    "level": "strong",
+    "contaminated": false
+  },
+  "circuitBreaker": {
+    "level": 0
+  },
+  "signals": {
+    "act": {
+      "selector": {
+        "role": "AXButton",
+        "title": "Toggle"
+      },
+      "action": "press",
+      "actConfirmed": true
+    },
+    "axEvent": {
+      "treeDigestBefore": "9f2c6a04d81b3e57c206af9d4b7e1358",
+      "treeDigestAfter": "9f2c6a04d81b3e57c206af9d4b7e1358",
+      "nodeCount": 6,
+      "axChanged": false,
+      "latencyMs": 2.4
+    },
+    "handlerProbe": null,
+    "stateDiff": null,
+    "pixelDiff": {
+      "changedPixelRatio": 0,
+      "windowId": 12
+    },
+    "responsiveness": {
+      "responsive": true,
+      "pingMs": 4
+    },
+    "crash": {
+      "processAliveBefore": true,
+      "processAliveAfter": true
+    }
+  },
+  "assertion": null,
+  "diagnosis": {
+    "class": "T2",
+    "report": {
+      "path": "act.press -> ax-digest -> pixel-diff",
+      "anomaly": "act confirmed but neither the AX tree nor the pixels changed",
+      "evidence": "op_05AXTREEMAP000000000000000 strong attribution; axChanged=false; changedPixelRatio=0",
+      "next": "verify the selector targets a live element; run observe before retrying"
+    }
+  }
+}

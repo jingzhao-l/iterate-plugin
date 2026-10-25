@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterate.dev/recipe-config-0.1-draft.json",
+  "title": "RecipeConfig",
+  "description": "Recipe configuration contract (P0 landing of the shared recipe validator, R35). A recipe is a named ordered sequence of engine primitives; step params are validated by the corresponding tool contracts, not by this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "name", "steps"],
+  "properties": {
+    "schemaVersion": {
+      "const": "glasspane.recipe/0.1-draft"
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "params"],
+        "properties": {
+          "kind": {
+            "enum": ["act", "observe", "assert", "diagnose"]
+          },
+          "params": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

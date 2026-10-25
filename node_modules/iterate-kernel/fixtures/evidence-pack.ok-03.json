@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "glasspane.evidence/0.1",
+  "operationId": "op_0PAAAABBBBCCCCDDDDEEEEFFFF",
+  "createdAt": "2026-09-19T09:41:02.500Z",
+  "attribution": {
+    "level": "strong",
+    "contaminated": false
+  },
+  "circuitBreaker": {
+    "level": 0
+  },
+  "signals": {
+    "act": {
+      "selector": {
+        "role": "AXButton",
+        "title": "OK Press",
+        "identifier": "ok-press"
+      },
+      "action": "press",
+      "actConfirmed": true
+    },
+    "axEvent": {
+      "treeDigestBefore": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "treeDigestAfter": "00112233445566778899aabbccddeeff",
+      "nodeCount": 24,
+      "axChanged": true,
+      "latencyMs": 21.4
+    },
+    "handlerProbe": {
+      "probeVersion": "gp-probe/0.1.0",
+      "hitCount": 3,
+      "handlers": [
+        { "file": "probe-demo/ProbeDemoApp.swift", "line": 64 },
+        { "file": "probe-demo/ProbeDemoApp.swift", "line": 65 }
+      ],
+      "lateCount": 0
+    },
+    "stateDiff": {
+      "source": "z3-kvc",
+      "changed": true,
+      "entries": [
+        { "key": "demo.count", "before": "0", "after": "1" }
+      ]
+    },
+    "pixelDiff": {
+      "changedPixelRatio": 0.014,
+      "bounds": { "x": 12, "y": 34, "width": 96, "height": 28 },
+      "windowId": 4210
+    },
+    "responsiveness": {
+      "responsive": true,
+      "pingMs": 2.1
+    },
+    "crash": {
+      "processAliveBefore": true,
+      "processAliveAfter": true
+    }
+  },
+  "assertion": null,
+  "diagnosis": {
+    "class": "NO_ANOMALY",
+    "report": {
+      "path": "act.press -> probe-window -> handler/state -> ax-digest -> pixel-diff",
+      "anomaly": "none: operation confirmed, AX tree changed and pixels changed",
+      "evidence": "op_0PAAAABBBBCCCCDDDDEEEEFFFF strong attribution; actConfirmed=true",
+      "next": "no action required; continue the recipe"
+    }
+  }
+}

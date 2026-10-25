@@ -344,14 +344,15 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.6-alpha.1`, `0.1.6-alpha.2`,
   `0.1.7-alpha.1`, `0.1.7-alpha.2`, `0.1.7-rc.1`, `0.1.7-rc.2`, `0.2.0-rc.1`,
   `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`,
-  `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2` (24 releases,
+  `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2`,
+   `0.2.1-rc.3` (25 releases,
   `0.1.1-rc.1` …
-  `0.2.1-rc.2`).
+  `0.2.1-rc.3`).
   The plugin is built against `@deepseek-ai/dsh-tools` /
-  `@deepseek-ai/dsh-util-values` `0.2.1-rc.2` and uses only public contracts
+  `@deepseek-ai/dsh-util-values` `0.2.1-rc.3` and uses only public contracts
   (tool registration, client slots + theme, bundle patch, and — since v3.9 —
   the session state-record API for session-linked run records).
-  It also declares `engines.dsh` (`>=0.1.1-rc.1`) so the dsh ≥ 0.2.1-rc.2
+  It also declares `engines.dsh` (`>=0.1.1-rc.1`) so the dsh ≥ 0.2.1-rc.3
   runtime evaluates compatibility from that single range (earlier runtimes fall
   back to the `@deepseek-ai/dsh-*` peer versions listed in `package.json`).
 - **Disposable-Profile evidence (real, `dsh` CLI `0.1.1-rc.1`)**: on a temp

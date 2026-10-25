@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterate.dev/invariant-report-0.1.json",
+  "title": "InvariantReport",
+  "description": "What the invariant runner observed when it checked a recipe's invariants (5.7 R40 scenario 1: the failure that has to reach the other harness). Whoever runs the checks produces this; whoever decides whether to re-verify reads it. A check kind of `refused` means the runner declined to execute a configured command because it carries shell metacharacters or is empty — it is a violation, so a report whose only failing check was refused is `fail`, never `error`. NOTE ON SOURCE OF TRUTH: the check-name and detail constraints are duplicated from `src/invariant-report.ts`, which is the definition; this file mirrors it. The outcome-vs-checks rule IS expressible here and is expressed twice on purpose: the `allOf` branches below and the zod `superRefine` must refuse the same reports, so a second implementation that only validates JSON Schema still cannot carry a pass over a failed check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "outcome", "checks"],
+  "properties": {
+    "schemaVersion": {
+      "const": "iterate.invariant-report/0.1"
+    },
+    "outcome": {
+      "enum": ["pass", "fail", "error"]
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/invariantCheck"
+      }
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "durationMs": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "pass"
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "items": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": ["ok"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "fail"
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "contains": {
+              "properties": {
+                "ok": {
+                  "const": false
+                }
+              },
+              "required": ["ok"]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "invariantCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "ok"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "kind": {
+          "enum": ["ensure", "command", "refused"]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    }
+  }
+}
