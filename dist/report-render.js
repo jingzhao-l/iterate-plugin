@@ -20,9 +20,14 @@
  *   - **sarif**    — SARIF 2.1.0 for CI / GitHub Code Scanning (ruleId =
  *     review dimension, severity → error | warning | note, file+line
  *     locations, suggested fix attached).
+ *   - **json**     — the complete normalized run model (see {@link RunReportData})
+ *     as a machine-readable JSON document. This is the ONLY format that carries
+ *     the full model (findings + fixes + validations + quality gate + experience
+ *     bank + defense events) without lossy projection, so CI dashboards and PR
+ *     bots can consume the exact same facts the human report shows.
  */
 /** Report formats accepted by the tool and the export buttons. */
-export const REPORT_FORMATS = ['markdown', 'sarif'];
+export const REPORT_FORMATS = ['markdown', 'sarif', 'json'];
 /** Severity ordering (lowest index = most severe). */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low'];
 /** Human labels for the report, keyed by language. */
@@ -442,6 +447,30 @@ export function renderRunReportSarif(manifest, extra, opts) {
         ],
     };
 }
+/** Render a JSON document from the same normalized data. */
+export function renderRunReportJson(manifest, extra) {
+    const data = buildRunReportData(manifest, extra);
+    return {
+        $schema: 'iterate-run-report/1',
+        project: data.project,
+        goal: data.goal,
+        mode: data.mode,
+        taskMode: data.taskMode,
+        round: data.round,
+        maxRounds: data.maxRounds,
+        active: data.active,
+        stoppedReason: data.stoppedReason,
+        updatedAt: data.updatedAt,
+        convergence: data.convergence,
+        severityCounts: data.severityCounts,
+        findings: data.findings,
+        fixes: data.fixes,
+        validations: data.validations,
+        qualityGate: data.qualityGate,
+        experienceBank: data.experienceBank,
+        defenseEvents: data.defenseEvents,
+    };
+}
 /**
  * Render a report in the requested format. Unknown formats fall back to
  * Markdown (the tool's default).
@@ -449,6 +478,8 @@ export function renderRunReportSarif(manifest, extra, opts) {
 export function renderRunReport(format, manifest, extra, opts) {
     if (format === 'sarif')
         return renderRunReportSarif(manifest, extra, opts);
+    if (format === 'json')
+        return renderRunReportJson(manifest, extra);
     return renderRunReportMarkdown(manifest, extra, opts);
 }
 /**
@@ -456,7 +487,7 @@ export function renderRunReport(format, manifest, extra, opts) {
  * `iterate-report-2026-10-18T01-02-03-000Z.md`.
  */
 export function runReportFilename(format, opts) {
-    const ext = format === 'sarif' ? 'sarif' : 'md';
+    const ext = format === 'sarif' ? 'sarif' : format === 'json' ? 'json' : 'md';
     const stamp = opts?.now && opts.now ? opts.now.replace(/[:.]/g, '-') : new Date().toISOString().replace(/[:.]/g, '-');
     return `iterate-report-${stamp}.${ext}`;
 }

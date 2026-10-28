@@ -15,6 +15,7 @@ import {
   buildRunReportData,
   renderRunReportMarkdown,
   renderRunReportSarif,
+  renderRunReportJson,
   renderRunReport,
   runReportFilename,
   sarifLevel,
@@ -127,7 +128,54 @@ describe('renderRunReportMarkdown', () => {
   })
 
   it('is registered in REPORT_FORMATS', () => {
-    assert.deepEqual(REPORT_FORMATS, ['markdown', 'sarif'])
+    assert.deepEqual(REPORT_FORMATS, ['markdown', 'sarif', 'json'])
+  })
+})
+
+describe('renderRunReportJson', () => {
+  it('emits the complete normalized run model (lossless)', () => {
+    const json = renderRunReportJson(sampleManifest(), sampleExtra())
+    assert.equal(json.$schema, 'iterate-run-report/1')
+    assert.equal(json.project, '/proj')
+    assert.equal(json.mode, 'normal')
+    assert.equal(json.taskMode, 'iterate')
+    assert.equal(json.round, 2)
+    assert.equal(json.maxRounds, 5)
+    assert.equal(json.active, false)
+    assert.equal(json.stoppedReason, 'converged')
+    assert.equal(json.updatedAt.length > 0, true)
+    // every section is present as structured data, not a human projection
+    assert.equal(json.findings.length, 2)
+    assert.equal(json.fixes.length, 1)
+    assert.equal(json.validations.length, 2)
+    assert.deepEqual(json.convergence, [2, 0])
+    assert.deepEqual(json.severityCounts, { critical: 1, high: 1, medium: 0, low: 0 })
+    // the quality gate / experience bank / defense events ride along in full
+    assert.equal(json.qualityGate?.overallStatus, 'fail')
+    assert.equal(json.experienceBank?.totalHits, 2)
+    assert.equal((json.defenseEvents?.counts as { rollback?: number } | undefined)?.rollback, 1)
+    // JSON round-trip: exactly the facts the human report shows
+    const roundTripped = JSON.parse(JSON.stringify(json))
+    assert.deepEqual(roundTripped, json)
+  })
+
+  it('carries finding evidence fields into the machine model', () => {
+    const json = renderRunReportJson(sampleManifest(), sampleExtra())
+    const correctness = json.findings.find((f) => f.dimension === 'correctness')!
+    assert.equal(correctness.file, 'src/a.ts')
+    assert.equal(correctness.line, 12)
+    assert.equal(correctness.severity, 'high')
+    assert.equal(correctness.suggestedFix, 'add a check')
+    assert.equal(correctness.isAtomic, true)
+  })
+
+  it('always returns a valid document for junk input', () => {
+    const json = renderRunReportJson(null, null)
+    assert.equal(json.$schema, 'iterate-run-report/1')
+    assert.deepEqual(json.findings, [])
+    assert.deepEqual(json.convergence, [])
+    assert.deepEqual(json.severityCounts, { critical: 0, high: 0, medium: 0, low: 0 })
+    assert.equal(json.qualityGate, null)
   })
 })
 
@@ -169,6 +217,7 @@ describe('renderRunReportSarif', () => {
 describe('renderRunReport / runReportFilename', () => {
   it('dispatches by format and defaults to markdown', () => {
     assert.equal(typeof renderRunReport('sarif', sampleManifest(), {}), 'object')
+    assert.equal(typeof renderRunReport('json', sampleManifest(), {}), 'object')
     assert.equal(typeof renderRunReport('markdown', sampleManifest(), {}), 'string')
     assert.equal(typeof renderRunReport('bogus', sampleManifest(), {}), 'string')
   })
@@ -176,6 +225,7 @@ describe('renderRunReport / runReportFilename', () => {
   it('builds deterministic filenames', () => {
     assert.equal(runReportFilename('markdown', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.md')
     assert.equal(runReportFilename('sarif', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.sarif')
+    assert.equal(runReportFilename('json', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.json')
   })
 })
 
@@ -218,6 +268,43 @@ describe('iterate_report tool', () => {
       assert.equal(sarif.version, '2.1.0')
       assert.equal(sarif.runs[0]!.results.length, 2)
       assert.match(String(res.content), /"version": "2.1.0"/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('renders the full normalized model as JSON (lossless)', async () => {
+    const tool = captureReportTool()
+    const root = seedProject()
+    try {
+      const res = (await tool({ format: 'json', path: root })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.format, 'json')
+      const json = res.json as { $schema: string; findings: unknown[]; qualityGate: { overallStatus: string } | null }
+      assert.equal(json.$schema, 'iterate-run-report/1')
+      assert.equal(json.findings.length, 2)
+      assert.equal(json.qualityGate?.overallStatus, 'fail')
+      // content is the same document, pretty-printed
+      assert.match(String(res.content), /"iterate-run-report\/1"/)
+      assert.match(String(res.content), /"findings": \[/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persists the JSON report under .iterate/report.json when write:true', async () => {
+    const tool = captureReportTool()
+    const root = seedProject()
+    try {
+      const res = (await tool({ format: 'json', write: true, path: root })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.written, true)
+      const reportPath = String(res.reportPath)
+      assert.match(reportPath, /\.iterate\/report\.json$/)
+      assert.equal(existsSync(reportPath), true)
+      const onDisk = JSON.parse(readFileSync(reportPath, 'utf-8')) as { $schema: string; findings: unknown[] }
+      assert.equal(onDisk.$schema, 'iterate-run-report/1')
+      assert.equal(onDisk.findings.length, 2)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

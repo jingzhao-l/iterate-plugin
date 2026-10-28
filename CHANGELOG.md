@@ -5,6 +5,41 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.0] - 2026-10-28
+
+无损报告 JSON + 上游兼容追到 `0.2.2-alpha.2`。新增一个用户可感知的导出格式
+（v3.9 的 Markdown / SARIF 之外补上**机器可读的完整归一化模型**），按语义化版本是一次 minor。
+
+### Added
+
+- **`iterate_report` 新增 `format:"json"`** —— 产出**完整归一化运行模型**（`RunReportJson`，
+  `$schema: "iterate-run-report/1"`）：项目、目标、模式、轮次、收敛率、严重度分布、发现、
+  修复、验证、质量门禁、经验银行、防御事件，全部是结构化数据。这是**唯一无损格式**：
+  Markdown 是给人看的投影，SARIF 只携带发现（作为 code-scanning 结果），JSON 把人类报告
+  展示的每一条事实原样交给 CI 仪表盘 / PR 机器人，无需反解析人类报告。缺失或中断的运行
+  依然产出合法文档（空数组、null 存储）——导出永不因运行中断而失败。
+- **观测台新增「导出 JSON 报告」按钮**（F8 报告区，与导出报告 / 导出 SARIF 并列），
+  与 `iterate_report` 工具共用同一份数据模型，优先下载、失败回退复制。
+- **peer 兼容性追到 `@deepseek-ai/*@0.2.1-rc.4` 与 `@deepseek-ai/*@0.2.2-alpha.2`**。
+  rc.4（上游 10-28 发布）只修 ACP 模式下诊断输出混入 stdout，无插件面 API 变动；
+  0.2.2-alpha.2（同日发布）是 0.2.2 系列首个 alpha，含若干**插件面破坏性变更**
+  （`tools.resolve/executable` 与提示词组装接口迁移、会话投影句柄改异步、`agent/request`
+  不再允许改路由、Cordis Timer 返回值适配、DSH 最低 Node 提升至 24.9），但本插件只从
+  `dsh-tools` 导入 `defineTool`、从 `dsh-jobs` 导入类型，**不触及其任何被迁移的接口**，
+  因此按现状声明 `compatible` 并在 `devDependencies` 钉到 `0.2.2-alpha.2` 实测
+  （typecheck + 1314 测试全绿，仅 package-contract 表因 dshReleases 登记而先行更新）。
+  `dshReleases` 表 25 → 27 个版本；`@deepseek-ai/cordis` peer 扩为
+  `^4.0.5-alpha.2 || ~4.0.6-alpha.1`（0.2.2-alpha.2 要求 `~4.0.6-alpha.1`）。
+
+### Fixed
+
+- （无；本批为纯新增 + 兼容性维护。）
+
+测试：套件 **1314 passed / 0 failed / 0 skipped**（`npm test`，`tsx --test`）；
+`test/report.test.ts` 新增 5 条 JSON 用例（完整模型、发现证据字段、junk 输入容错、
+工具层 `json` 渲染、`.iterate/report.json` 持久化）；`npx tsc --noEmit` 与
+`npm run typecheck` 干净；`npm run build` / `build:client` 同步重建 `dist/` 与 `lib/client.js`。
+
 ## [3.10.0] - 2026-10-25
 
 写侧翻转（双向集成场景③的 TS 半边）。这一批改了**落盘格式**并新增一个运行时依赖，

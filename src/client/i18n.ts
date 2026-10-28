@@ -259,6 +259,9 @@ export const EN: Record<string, string> = {
   '导出 SARIF': 'Export SARIF',
   '导出 SARIF 2.1.0（供 CI / GitHub Code Scanning 消费）':
     'Export SARIF 2.1.0 for CI / GitHub Code Scanning',
+  '导出 JSON 报告': 'Export JSON report',
+  '导出完整运行模型的 JSON（供 CI 仪表盘 / PR 机器人消费，无损格式）':
+    'Export the complete run model as JSON (lossless, for CI dashboards / PR bots)',
   '观测台页签（快捷键 1-9 / 0 / -）': 'Observatory tabs (keys 1-9 / 0 / -)',
   '{a0}（按 {a1} 切换）': '{a0} (press {a1})',
   '{a0}（按 - 切换）': '{a0} (press -)',

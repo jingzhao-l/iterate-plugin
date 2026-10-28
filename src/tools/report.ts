@@ -31,7 +31,7 @@ import { readQualityGate } from './quality-store.ts'
 import { readExperienceBank } from './experience-store.ts'
 import { readDefenseEvents } from './defense-store.ts'
 import { resultHeadline } from './present.ts'
-import { renderRunReportMarkdown, renderRunReportSarif, REPORT_FORMATS } from '../report-render.ts'
+import { renderRunReportMarkdown, renderRunReportSarif, renderRunReportJson, REPORT_FORMATS } from '../report-render.ts'
 
 /** Formats accepted by the tool (kept in sync with the shared renderer). */
 const FORMATS: ReadonlySet<string> = new Set(REPORT_FORMATS)
@@ -73,19 +73,21 @@ export function registerReportTool(ctx: { tools: { register: (def: ReturnType<ty
         'quality-gate table, findings table, fixes table, per-round validations, defense events, and the ' +
         'experience bank. `format:"sarif"` renders a SARIF 2.1.0 log for CI / GitHub Code Scanning ' +
         '(one rule per review dimension; finding severity maps to error/warning/note; findings carry ' +
-        'file + line locations and the suggested fix). ' +
+        'file + line locations and the suggested fix). `format:"json"` renders the COMPLETE normalized run ' +
+        'model as machine-readable JSON (findings, fixes, validations, convergence, quality gate, ' +
+        'experience bank, defense events) — the lossless format for CI dashboards and PR bots. ' +
         'Set `write:true` to also persist the report under `.iterate/report.md` / `.iterate/report.sarif` ' +
-        'and get the path back. `lang` selects the report language (zh | en). ' +
+        '/ `.iterate/report.json` and get the path back. `lang` selects the report language (zh | en). ' +
         'Read-only apart from the optional report file; never touches source files.',
       parameters: {
         format: {
           type: 'string',
-          description: 'Report format: "markdown" (default) or "sarif".',
-          enum: ['markdown', 'sarif'],
+          description: 'Report format: "markdown" (default), "sarif", or "json".',
+          enum: ['markdown', 'sarif', 'json'],
         },
         write: {
           type: 'boolean',
-          description: 'When true, persist the report to `.iterate/report.md` / `.iterate/report.sarif` and return its path. Default: false.',
+          description: 'When true, persist the report to `.iterate/report.md` / `.iterate/report.sarif` / `.iterate/report.json` and return its path. Default: false.',
         },
         lang: {
           type: 'string',
@@ -106,10 +108,12 @@ export function registerReportTool(ctx: { tools: { register: (def: ReturnType<ty
             ok: { type: 'boolean', required: true },
             kind: { type: 'string' },
             format: { type: 'string' },
-            /** The rendered report text (Markdown, or pretty-printed SARIF JSON). */
+            /** The rendered report text (Markdown, or pretty-printed SARIF/JSON). */
             content: { type: 'string' },
             /** The SARIF log object, when format is "sarif". */
             sarif: { type: 'json' },
+            /** The full normalized run model, when format is "json". */
+            json: { type: 'json' },
             /** Whether a source transcript manifest was found on disk. */
             source: { type: 'string' },
             written: { type: 'boolean' },
@@ -161,6 +165,7 @@ export function registerReportTool(ctx: { tools: { register: (def: ReturnType<ty
         const extra = { qualityGate, experienceBank, defenseEvents }
         let content: string
         let sarif: JsonValue | undefined
+        let json: JsonValue | undefined
         let findings = 0
         try {
           if (format === 'sarif') {
@@ -170,6 +175,11 @@ export function registerReportTool(ctx: { tools: { register: (def: ReturnType<ty
             sarif = doc as unknown as JsonValue
             content = JSON.stringify(doc, null, 2)
             findings = Array.isArray(doc?.runs?.[0]?.results) ? (doc.runs[0].results as unknown[]).length : 0
+          } else if (format === 'json') {
+            const doc = renderRunReportJson(manifest, extra)
+            json = doc as unknown as JsonValue
+            content = JSON.stringify(doc, null, 2)
+            findings = doc.findings.length
           } else {
             content = renderRunReportMarkdown(manifest, extra, { lang }) as unknown as string
             findings = countMarkdownFindings(content)
@@ -189,7 +199,7 @@ export function registerReportTool(ctx: { tools: { register: (def: ReturnType<ty
           try {
             const dir = iterateDir(projectRoot)
             mkdirSync(dir, { recursive: true })
-            reportPath = `${dir}/report.${format === 'sarif' ? 'sarif' : 'md'}`
+            reportPath = `${dir}/report.${format === 'sarif' ? 'sarif' : format === 'json' ? 'json' : 'md'}`
             writeFileSync(reportPath, content, 'utf-8')
             written = true
           } catch (err) {
@@ -208,6 +218,7 @@ export function registerReportTool(ctx: { tools: { register: (def: ReturnType<ty
           format,
           content,
           ...(sarif !== undefined ? { sarif } : {}),
+          ...(json !== undefined ? { json } : {}),
           source,
           written,
           ...(reportPath ? { reportPath } : {}),

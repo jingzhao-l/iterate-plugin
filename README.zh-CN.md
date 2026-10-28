@@ -106,7 +106,7 @@ dsh plugin --profile web add iterate-plugin
 ### UI 层（客户端免构建槽位，v3.7：11 个页签，双语）
 
 - **收敛看板 `ConvergenceDashboard`**（`conversation.input.dock`）— 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图；normal 模式另显示修复计数徽章；还有运行阶段芯片（当前工作流阶段 + 运行中/已结束）与 **task_mode 指示器（code / iterate）**。运行期间看板切换为"运行中"状态（显示轮次与阶段），并隐藏启动按钮。
-- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十一个页签**运行时观测台：**实时活动流**（默认页，支持按活动类型筛选）+ **F1** 审查线程（全部展开/全部收起）、**F2** 收敛趋势（含跨轮对比表：每轮 findings / fixed / 严重度分布 / 验证结果）、**F3** 发现定位（按严重度/维度/关键词筛选）、**F4** 修复与回滚、**F5** 断点恢复、**F6** 运行控制台、**F7** 决策时间线（按类型/轮次筛选与关键词搜索）、**F8** 质量门禁、**F9** 经验银行、**F10** 防御事件。数字键快捷键：`1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。**F8/F9/F10 为实时数据**——扫描会话流中最近一次 `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` 结果并渲染真实数据（PASS/FAIL 徽章 + 分维度评分条、经验条目（含采纳按钮 + 客户端搜索）、防御类型计数芯片 + 筛选后的事件流）；会话流中没有数据时区分"磁盘无数据"与"尚未拉取"，并提供**拉取磁盘快照**指令（让模型调用只读工具、把 `.iterate/` 产物回显进会话流）。一键导出全部观测数据为 JSON——manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report`（优先下载，失败回退复制）。**v3.9 新增两个报告导出按钮**（导出报告 / 导出 SARIF），与 `iterate_report` 工具共用同一份数据模型——分别产出可直接粘贴进 PR 的 Markdown 运行报告，与供 CI / GitHub Code Scanning 消费的 SARIF 2.1.0 日志。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
+- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十一个页签**运行时观测台：**实时活动流**（默认页，支持按活动类型筛选）+ **F1** 审查线程（全部展开/全部收起）、**F2** 收敛趋势（含跨轮对比表：每轮 findings / fixed / 严重度分布 / 验证结果）、**F3** 发现定位（按严重度/维度/关键词筛选）、**F4** 修复与回滚、**F5** 断点恢复、**F6** 运行控制台、**F7** 决策时间线（按类型/轮次筛选与关键词搜索）、**F8** 质量门禁、**F9** 经验银行、**F10** 防御事件。数字键快捷键：`1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。**F8/F9/F10 为实时数据**——扫描会话流中最近一次 `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` 结果并渲染真实数据（PASS/FAIL 徽章 + 分维度评分条、经验条目（含采纳按钮 + 客户端搜索）、防御类型计数芯片 + 筛选后的事件流）；会话流中没有数据时区分"磁盘无数据"与"尚未拉取"，并提供**拉取磁盘快照**指令（让模型调用只读工具、把 `.iterate/` 产物回显进会话流）。一键导出全部观测数据为 JSON——manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report`（优先下载，失败回退复制）。**v3.9 新增报告导出按钮**（导出报告 / 导出 SARIF，**v3.11 新增导出 JSON 报告**），与 `iterate_report` 工具共用同一份数据模型——分别产出可直接粘贴进 PR 的 Markdown 运行报告、供 CI / GitHub Code Scanning 消费的 SARIF 2.1.0 日志，以及（v3.11）完整的归一化运行模型 JSON（无损格式）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
 - **Findings 分诊面板 `TriagePanel`**（`conversation.chat.turnTail`）— 逐条分诊，键盘快捷键 `y`（保留→修复）、`n`（跳过）、`a`（已知有意）与 `↑`/`↓` 移动（焦点守卫：仅面板内焦点时生效），支持筛选、批量（含一键全选所有 findings）、localStorage 持久化。**写回闭环**：主按钮复制已标记条目的 `iterate_triage apply` 指令（工具负责校验、去重、备份、失败回滚）；次按钮复制裸 `known_intentional` YAML；**回读已写入条目**复制 `iterate_triage list` 指令核对实际落盘内容。复制载荷与目标工具 schema 对齐。**v3.2：原生命令按钮**（批准架构修复、触发新一轮、回滚到断点）。
 - **收敛统计卡片 `StatsCard`**（`conversation.chat.turnTail`）— 无 findings 时显示收敛统计、历史轮次、趋势图、完成摘要。
 - **iterate 主题皮肤**（`theme.overrideTokens`）— 暖琥珀配色的 13 个 `--dsw-*` token 覆盖，明暗双模式，可在设置页开关。
@@ -306,7 +306,7 @@ validation:
 - `iterate_experience` — **v3.2** 查询经验银行（list / search / get），或 `add` 一条新的已验证修复：重复添加同一 pattern + dimension 累加命中次数而非重复写入。**v3.5 新增 `remove`：按 `id` 删除过时或错误的经验条目**。持久化到 `.iterate/experience.json`
 - `iterate_quality_gate` — **v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率。**v3.5 新增 `clear`：删除持久化的质量凭证**，用于新一轮迭代前重置陈旧的门禁
 - `iterate_defense_events` — **v3.2** 查询防御事件（list / counts），`record` 记录一条新事件，或 **v3.5.3 `clear` 清除持久化事件流**，让新一轮迭代不带陈旧防御数据起跑。可读标签跟随项目语言（en / zh）
-- `iterate_report` — **v3.9** 把本次运行导出为可移植报告。`format:"markdown"`（默认）产出可直接粘贴进 PR 的报告（运行头部、质量门禁、发现、修复、验证、防御事件、经验银行）；`format:"sarif"` 产出 SARIF 2.1.0 日志供 CI / GitHub Code Scanning 消费（每个审查维度一条规则，严重度 → error/warning/note，携带文件+行号位置与建议修复）。`write:true` 持久化到 `.iterate/report.md` / `.iterate/report.sarif`；`lang`（zh | en）选择报告语言。除可选的报告文件外均为只读
+- `iterate_report` — **v3.9** 把本次运行导出为可移植报告。`format:"markdown"`（默认）产出可直接粘贴进 PR 的报告（运行头部、质量门禁、发现、修复、验证、防御事件、经验银行）；`format:"sarif"` 产出 SARIF 2.1.0 日志供 CI / GitHub Code Scanning 消费（每个审查维度一条规则，严重度 → error/warning/note，携带文件+行号位置与建议修复）。**v3.11：`format:"json"` 产出完整归一化运行模型为机器可读 JSON**（发现、修复、验证、收敛率、质量门禁、经验银行、防御事件——供 CI 仪表盘 / PR 机器人消费的无损格式）。`write:true` 持久化到 `.iterate/report.md` / `.iterate/report.sarif` / `.iterate/report.json`；`lang`（zh | en）选择报告语言。除可选的报告文件外均为只读
 
 ---
 
@@ -335,7 +335,7 @@ validation:
 ### Node.js / DSH 兼容范围
 
 - **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
-- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.1-rc.3`（共 25 个版本，`0.1.1-rc.1` … `0.2.1-rc.3`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.1-rc.3` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch，以及 v3.9 起的会话状态记录接口）。插件同时声明 `engines.dsh`（`>=0.1.1-rc.1`），使 dsh ≥ 0.2.1-rc.3 运行时只依据该范围判断兼容性（更早的运行时仍回退校验 `package.json` 中列出的 `@deepseek-ai/dsh-*` peer 版本）。
+- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.2-alpha.2`（共 27 个版本，`0.1.1-rc.1` … `0.2.2-alpha.2`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.2-alpha.2` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch，以及 v3.9 起的会话状态记录接口）。插件同时声明 `engines.dsh`（`>=0.1.1-rc.1`），使 dsh ≥ 0.2.2-alpha.2 运行时只依据该范围判断兼容性（更早的运行时仍回退校验 `package.json` 中列出的 `@deepseek-ai/dsh-*` peer 版本）。
 - **一次性 Profile 证据（真实，`dsh` CLI `0.1.1-rc.1`）**：在临时 `$DSH_HOME` 下
   `dsh plugin --profile <p> add <本仓库>` 约 449ms 完成安装；`dsh --profile <p>
   --dump-config` 正确合成 `iterate-plugin` bundle patch；`dsh plugin --profile <p>
@@ -445,7 +445,7 @@ npm test
 所有测试通过：
 
 - **全量单元测试 + 类型检查通过**（`npm test`、`npm run typecheck`——此处刻意不写具体数量以根除文档漂移，各版本量级见 `CHANGELOG.md`）
-- 覆盖：去重、过滤、排序、多轮收敛、meta-review 审计、路径安全、超时钳制、配置读写与回滚、triage 合并、diff 计算、checkpoint 校验、修复注册表、历史读取与过滤、prune 清理报告与 dry-run 语义、UI 纯函数（select-all 键、运行时状态指引）、**v3.2：经验银行、质量门禁、防御事件、审批门禁 fail-open 路径**等
+- 覆盖：去重、过滤、排序、多轮收敛、meta-review 审计、路径安全、超时钳制、配置读写与回滚、triage 合并、diff 计算、checkpoint 校验、修复注册表、历史读取与过滤、prune 清理报告与 dry-run 语义、UI 纯函数（select-all 键、运行时状态指引）、**v3.2：经验银行、质量门禁、防御事件、审批门禁 fail-open 路径**、**v3.9：可移植报告（markdown + SARIF）**、**v3.11：无损 JSON 报告（完整归一化运行模型 + `.iterate/report.json` 持久化）**等
 
 ---
 

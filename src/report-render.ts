@@ -20,10 +20,15 @@
  *   - **sarif**    — SARIF 2.1.0 for CI / GitHub Code Scanning (ruleId =
  *     review dimension, severity → error | warning | note, file+line
  *     locations, suggested fix attached).
+ *   - **json**     — the complete normalized run model (see {@link RunReportData})
+ *     as a machine-readable JSON document. This is the ONLY format that carries
+ *     the full model (findings + fixes + validations + quality gate + experience
+ *     bank + defense events) without lossy projection, so CI dashboards and PR
+ *     bots can consume the exact same facts the human report shows.
  */
 
 /** Report formats accepted by the tool and the export buttons. */
-export const REPORT_FORMATS = ['markdown', 'sarif'] as const
+export const REPORT_FORMATS = ['markdown', 'sarif', 'json'] as const
 
 /** Severity ordering (lowest index = most severe). */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low'] as const
@@ -564,6 +569,66 @@ export function renderRunReportSarif(
 }
 
 /**
+ * Render the complete normalized run model as a JSON document.
+ *
+ * This is the lossless format: unlike Markdown (human projection) and SARIF
+ * (findings-only code-scanning log), the JSON carries EVERY fact the run
+ * recorded — findings, fixes, validations, convergence, the quality gate, the
+ * experience bank, and defense events — as structured data. CI dashboards and
+ * PR bots can consume it without re-parsing a human report. A missing or
+ * partial transcript still yields a valid document (empty arrays, null stores),
+ * so an export never fails because a run was interrupted.
+ */
+export interface RunReportJson {
+  $schema: 'iterate-run-report/1'
+  project: string
+  goal: string
+  mode: string | null
+  taskMode: string | null
+  round: number
+  maxRounds: number
+  active: boolean
+  stoppedReason: string | null
+  updatedAt: string
+  convergence: number[]
+  severityCounts: { critical: number; high: number; medium: number; low: number }
+  findings: ReportFinding[]
+  fixes: ReportFix[]
+  validations: ReportValidation[]
+  qualityGate: Record<string, unknown> | null
+  experienceBank: Record<string, unknown> | null
+  defenseEvents: Record<string, unknown> | null
+}
+
+/** Render a JSON document from the same normalized data. */
+export function renderRunReportJson(
+  manifest: unknown,
+  extra?: { qualityGate?: unknown; experienceBank?: unknown; defenseEvents?: unknown } | null,
+): RunReportJson {
+  const data = buildRunReportData(manifest, extra)
+  return {
+    $schema: 'iterate-run-report/1',
+    project: data.project,
+    goal: data.goal,
+    mode: data.mode,
+    taskMode: data.taskMode,
+    round: data.round,
+    maxRounds: data.maxRounds,
+    active: data.active,
+    stoppedReason: data.stoppedReason,
+    updatedAt: data.updatedAt,
+    convergence: data.convergence,
+    severityCounts: data.severityCounts,
+    findings: data.findings,
+    fixes: data.fixes,
+    validations: data.validations,
+    qualityGate: data.qualityGate,
+    experienceBank: data.experienceBank,
+    defenseEvents: data.defenseEvents,
+  }
+}
+
+/**
  * Render a report in the requested format. Unknown formats fall back to
  * Markdown (the tool's default).
  */
@@ -572,8 +637,9 @@ export function renderRunReport(
   manifest: unknown,
   extra?: { qualityGate?: unknown; experienceBank?: unknown; defenseEvents?: unknown } | null,
   opts?: ReportRenderOptions,
-): string | SarifLog {
+): string | SarifLog | RunReportJson {
   if (format === 'sarif') return renderRunReportSarif(manifest, extra, opts)
+  if (format === 'json') return renderRunReportJson(manifest, extra)
   return renderRunReportMarkdown(manifest, extra, opts)
 }
 
@@ -582,7 +648,7 @@ export function renderRunReport(
  * `iterate-report-2026-10-18T01-02-03-000Z.md`.
  */
 export function runReportFilename(format: string, opts?: { now?: string }): string {
-  const ext = format === 'sarif' ? 'sarif' : 'md'
+  const ext = format === 'sarif' ? 'sarif' : format === 'json' ? 'json' : 'md'
   const stamp =
     opts?.now && opts.now ? opts.now.replace(/[:.]/g, '-') : new Date().toISOString().replace(/[:.]/g, '-')
   return `iterate-report-${stamp}.${ext}`

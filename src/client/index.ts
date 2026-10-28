@@ -113,6 +113,7 @@ import {
 import {
   renderRunReportMarkdown, // Markdown run report (PR-pasteable)
   renderRunReportSarif, // SARIF 2.1.0 log (CI / Code Scanning)
+  renderRunReportJson, // full normalized run model (CI dashboards / PR bots)
   runReportFilename, // deterministic download filename
 } from '../report-render.ts'
 import {
@@ -2419,12 +2420,14 @@ function ObservatoryPanel(props: SlotProps) {
    *  SARIF 2.1.0 (CI / GitHub Code Scanning). Rendered from the SAME shared
    *  data model as the `iterate_report` tool, so the button and the tool can
    *  never disagree. Download-first with a copy fallback, like `exportObservatory`. */
-  const exportReport = (format: 'markdown' | 'sarif') => {
+  const exportReport = (format: 'markdown' | 'sarif' | 'json') => {
     if (!manifest) return
     const extra = { qualityGate, experienceBank, defenseEvents }
     const content = format === 'sarif'
       ? JSON.stringify(renderRunReportSarif(manifest, extra), null, 2)
-      : renderRunReportMarkdown(manifest, extra, { lang: getLang() })
+      : format === 'json'
+        ? JSON.stringify(renderRunReportJson(manifest, extra), null, 2)
+        : renderRunReportMarkdown(manifest, extra, { lang: getLang() })
     const filename = runReportFilename(format)
     const key = `report-${format}`
     const flash = () => {
@@ -3481,8 +3484,8 @@ function ObservatoryPanel(props: SlotProps) {
               title: t('将观测台全部数据导出为 JSON（优先下载，失败则复制）'),
             }, copiedKey === 'export' ? t('已导出') : t('导出 JSON')),
             // v3.9: portable report export — Markdown for a PR body, SARIF for
-            // CI / GitHub Code Scanning. Rendered from the same data model as
-            // the `iterate_report` tool.
+            // CI / GitHub Code Scanning, JSON for CI dashboards / PR bots.
+            // Rendered from the same data model as the `iterate_report` tool.
             React.createElement('button', {
               className: 'iterate-btn', 'data-copied': copiedKey === 'report-markdown' ? '' : undefined,
               onClick: () => exportReport('markdown'),
@@ -3493,6 +3496,14 @@ function ObservatoryPanel(props: SlotProps) {
               onClick: () => exportReport('sarif'),
               title: t('导出 SARIF 2.1.0（供 CI / GitHub Code Scanning 消费）'),
             }, copiedKey === 'report-sarif' ? t('已导出') : t('导出 SARIF')),
+            // v3.11: lossless JSON export — the complete normalized run model
+            // (findings + fixes + validations + quality gate + experience bank
+            // + defense events) for CI dashboards and PR bots.
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'report-json' ? '' : undefined,
+              onClick: () => exportReport('json'),
+              title: t('导出完整运行模型的 JSON（供 CI 仪表盘 / PR 机器人消费，无损格式）'),
+            }, copiedKey === 'report-json' ? t('已导出') : t('导出 JSON 报告')),
             // Gap #4: `.iterate/` artifacts are unreachable from the browser;
             // this copies the one instruction that makes the model echo them
             // into the session stream (which is what every panel scans).
