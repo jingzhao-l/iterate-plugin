@@ -44,6 +44,7 @@ import { registerExperienceBankTool } from "./tools/experience-bank.js";
 import { registerQualityGateTool } from "./tools/quality-gate.js";
 import { registerDefenseEventsTool } from "./tools/defense-events.js";
 import { registerReportTool } from "./tools/report.js";
+import { registerPreflightTool } from "./tools/preflight.js";
 import { registerSessionHooks } from "./session-hooks.js";
 import { registerLiveCapture } from "./live.js";
 import { installWorkingDirectoryContext } from "./working-directory.js";
@@ -66,11 +67,11 @@ export function apply(ctx) {
     installWorkingDirectoryContext(ctx);
     registerSessionHooks(ctx);
     registerLiveCapture(ctx);
-    // 1. Register the 17 tools (14 original + 3 v3.0). Each registration is
-    //    isolated: one failing tool must not take down the other 16, the gate
-    //    above, or the prompt below (a partial plugin that still gates and
-    //    teaches the workflow beats an aborted `apply`). Failures are logged,
-    //    never swallowed silently.
+    // 1. Register the 19 tools (14 original + 3 v3.0 + report + preflight). Each
+    //    registration is isolated: one failing tool must not take down the other
+    //    18, the gate above, or the prompt below (a partial plugin that still
+    //    gates and teaches the workflow beats an aborted `apply`). Failures are
+    //    logged, never swallowed silently.
     const toolRegistrations = [
         ['iterate_config', () => registerConfigTool(ctx)],
         ['iterate_validate', () => registerValidateTool(ctx)],
@@ -92,6 +93,8 @@ export function apply(ctx) {
         ['iterate_defense_events', () => registerDefenseEventsTool(ctx)],
         // v3.9: PR-ready / CI-ready report export
         ['iterate_report', () => registerReportTool(ctx)],
+        // v3.12: pre-run readiness check (validation/git/stale-gate/interrupted)
+        ['iterate_preflight', () => registerPreflightTool(ctx)],
     ];
     for (const [toolName, register] of toolRegistrations) {
         try {

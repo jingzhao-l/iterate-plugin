@@ -5,6 +5,49 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.0] - 2026-10-29
+
+开跑预检（Preflight）。新增一个用户可感知的净功能：开始一轮迭代**之前**就把环境
+问题摆到桌面上并给出精确修复指令，而不是让模型花掉一轮才发现。按语义化版本是一次 minor。
+
+### Added
+
+- **`iterate_preflight`（新工具，第 19 个）** —— 只读开跑前预检。返回结构化清单：
+  - `validation`（**阻断项**）—— `validation.commands` 为空意味着本轮无法证明修复，
+    与产品 fail-closed 哲学一致，是唯一会 `blocking` 的检查；
+  - `git` —— 是否 Git 仓库（changed-only 范围与 `iterate_diff` 需要它）；
+  - `dirty-tree` —— 未提交/未跟踪文件数（git 不可用时降级为"未知"而非误报警告）；
+  - `stale-gate` —— 磁盘上残留 FAIL 质量门禁（开新轮前先清除）；
+  - `interrupted-checkpoint` —— 存在中断断点（恢复或清除后再开跑）。
+  每项都携带结构化事实（`{ id, status: pass|warn|fail, detail }`），`render` 只产出
+  model 面向的英文文本；绝不修改配置、文件或产物。
+- **观测台新增 F11「开跑预检」页签**（第 12 页，仅点击进入，数字键 1-9/0/- 映射不变）
+  —— 扫描会话流中最近一次 `iterate_preflight` 结果并渲染真实数据：就绪/未就绪徽章 +
+  阻断/警告计数 + 每项 PASS/WARN/FAIL 芯片。每个 warn/fail 行都给出**精确修复指令**
+  （配置 `validation.commands`、清除陈旧门禁、恢复断点），复制即用。空态区分
+  "尚未拉取"与"已拉取为空"；`ok:false` 渲染失败信息而非误导性的"就绪"摘要。
+  F8/F9/F10 已有的「拉取磁盘快照」模式保持一致，但预检是独立工具调用，不走快照。
+- **完成摘要修正** —— `buildCompletionSummary` 此前把一切未收敛的运行都描述为
+  "已达最大轮数"；现在读取真实的 `stoppedReason`（验证失败回滚 / 验证命令未白名单 /
+  轮次结论不明 / schema 失败 / 无可用审查输出分别给出准确措辞），未知原因降级为原值。
+
+### Changed
+
+- 工具总数 18 → 19；观测台 11 → 12 页签（README 中英双语文档同步）。
+- 无上游 dsh 新版本（最新仍为 `0.2.2-alpha.2`，已声明 compatible），本轮为插件自有
+  能力，未转化新 dsh 能力。
+
+### Tests
+
+- 新增 `test/preflight.test.ts`（12 例：纯函数决策 + 工具注册 + 真实临时目录的
+  execute，含 git init / 脏工作区 / 陈旧门禁 / 中断断点 / git 不可用降级）。
+- `test/parse.test.ts` 新增 `scanSessionForPreflight` / `normalizePreflightReport` /
+  `isPreflightReport` 共 5 例 + `buildCompletionSummary` stoppedReason 修正 1 例。
+- `test/client-render.test.ts` 新增 F11 渲染 3 例（真实清单、空态指令、失败态）。
+- `test/index.test.ts` / `test/package-contract.test.ts` 工具计数 18 → 19。
+- 全套 `npm run typecheck`（tsc ×3 程序）0 错误；`npm test` 1340 passed / 0 failed
+  （基线 1319 → 1340，+21）。
+
 ## [3.11.0] - 2026-10-28
 
 无损报告 JSON + 上游兼容追到 `0.2.2-alpha.2`。新增一个用户可感知的导出格式

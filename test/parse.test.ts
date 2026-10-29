@@ -49,6 +49,9 @@ import {
   scanSessionForQualityGate,
   scanSessionForExperienceBank,
   scanSessionForDefenseEvents,
+  scanSessionForPreflight,
+  normalizePreflightReport,
+  isPreflightReport,
   filterLiveEntries,
   filterTimelineEntries,
   serializeObservatoryExport,
@@ -769,6 +772,33 @@ describe('completion & guidance helpers', () => {
     assert.match(buildCompletionSummary(notConverged, 'en'), /reached the round limit 3/)
   })
 
+  it('buildCompletionSummary reports the real stopped reason, not a blanket "max rounds"', () => {
+    // A validation abort must NOT be described as reaching the round limit.
+    const aborted = normalizeReport({
+      convergence: { totalRounds: 3, converged: false, stoppedReason: 'aborted_by_validation' },
+      rounds: [{ round: 1, findings: [makeFinding()] }],
+      findings: [makeFinding()],
+    })
+    assert.match(buildCompletionSummary(aborted), /验证失败后回滚/)
+    assert.doesNotMatch(buildCompletionSummary(aborted), /已达最大轮数/)
+    assert.match(buildCompletionSummary(aborted, 'en'), /rolled back after a validation failure/)
+    assert.doesNotMatch(buildCompletionSummary(aborted, 'en'), /reached the round limit/)
+    // A config abort and a schema failure get distinct phrasing too.
+    const cfg = normalizeReport({
+      convergence: { totalRounds: 2, converged: false, stoppedReason: 'aborted_by_config' },
+      rounds: [{ round: 1, findings: [] }],
+      findings: [],
+    })
+    assert.match(buildCompletionSummary(cfg), /验证命令未在白名单/)
+    // An unknown reason degrades to its raw value instead of collapsing to max rounds.
+    const unknown = normalizeReport({
+      convergence: { totalRounds: 2, converged: false, stoppedReason: 'some_future_reason' },
+      rounds: [{ round: 1, findings: [] }],
+      findings: [],
+    })
+    assert.match(buildCompletionSummary(unknown), /some_future_reason/)
+  })
+
   it('buildConfigEditGuide lists the editable fields', () => {
     const guide = buildConfigEditGuide()
     assert.match(guide, /iterate.config.yaml/)
@@ -1266,6 +1296,80 @@ describe('transcript live bridge', () => {
     assert.equal(out.events.length, 1)
     assert.equal(out.events[0].id, 'def-42')
     assert.equal(out.counts.rollback, 2)
+  })
+
+  it('scanSessionForPreflight returns the latest normalized report (reverse chronological)', () => {
+    const report = (ready: boolean) => ({
+      ok: true,
+      ready,
+      blocking: ready ? 0 : 1,
+      warnings: 1,
+      checks: [
+        { id: 'validation', status: ready ? 'pass' : 'fail', detail: { commandCount: ready ? 2 : 0 } },
+        { id: 'dirty-tree', status: 'warn', detail: { changedFiles: 1 } },
+      ],
+    })
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_preflight', result: report(true) },
+        { tool: 'iterate_preflight', result: report(false) },
+      ],
+    }
+    const out = scanSessionForPreflight(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.ready, false) // latest call wins
+    assert.equal(out.blocking, 1)
+    assert.equal(out.checks.length, 2)
+    assert.equal(out.checks[0].id, 'validation')
+    assert.equal(out.checks[0].status, 'fail')
+    assert.deepEqual(out.checks[0].detail, { commandCount: 0 })
+  })
+
+  it('scanSessionForPreflight returns null when the session has no preflight result', () => {
+    assert.equal(scanSessionForPreflight({ toolCalls: [] }), null)
+    // A realistic quality-gate result (no ready/checks/blocking fields) must not
+    // be mistaken for a preflight report.
+    assert.equal(scanSessionForPreflight({ toolCalls: [{ tool: 'iterate_quality_gate', result: { ok: true, operation: 'read', snapshot: { overallStatus: 'pass', overallScore: 92, dimensions: [] } } }] }), null)
+    assert.equal(scanSessionForPreflight(null), null)
+  })
+
+  it('scanSessionForPreflight reads message.tool_calls results too', () => {
+    const session = {
+      messages: [
+        { role: 'assistant', tool_calls: [{ name: 'iterate_preflight', result: { ok: true, ready: true, blocking: 0, warnings: 1, checks: [{ id: 'git', status: 'warn', detail: { isRepo: false } }] } }] },
+        { role: 'assistant', content: '预检通过。' },
+      ],
+    }
+    const out = scanSessionForPreflight(session) as Record<string, any> | null
+    assert.ok(out)
+    assert.equal(out.ready, true)
+    assert.equal(out.checks[0].id, 'git')
+    assert.equal(out.checks[0].status, 'warn')
+    assert.equal(out.checks[0].detail.isRepo, false)
+  })
+
+  it('normalizePreflightReport is defensive against partial / hand-edited data', () => {
+    // Missing numeric fields degrade to 0; an unknown status degrades to warn;
+    // a non-object detail degrades to {}; the error shape still normalizes.
+    const out = normalizePreflightReport({ ok: true, checks: [{ id: 'stale-gate', status: 'BOGUS', detail: null }] })
+    assert.equal(out.ready, false)
+    assert.equal(out.blocking, 0)
+    assert.equal((out.checks as Array<Record<string, unknown>>).length, 1)
+    assert.equal((out.checks as Array<Record<string, unknown>>)[0]!.status, 'warn')
+    assert.deepEqual((out.checks as Array<Record<string, unknown>>)[0]!.detail, {})
+    const errorShape = normalizePreflightReport({ ok: false, ready: false, blocking: 0, warnings: 0, checks: [], error: 'root not found' })
+    assert.equal(errorShape.ok, false)
+    assert.equal(errorShape.error, 'root not found')
+  })
+
+  it('isPreflightReport discriminates the report shape without colliding with other objects', () => {
+    assert.equal(isPreflightReport({ ok: true, ready: true, blocking: 0, warnings: 0, checks: [] }), true)
+    // An error shape (empty checks) still matches so the panel renders failure.
+    assert.equal(isPreflightReport({ ok: false, ready: false, blocking: 0, warnings: 0, checks: [], error: 'x' }), true)
+    // A quality-gate snapshot is NOT a preflight report.
+    assert.equal(isPreflightReport(snap('pass')), false)
+    assert.equal(isPreflightReport(null), false)
+    assert.equal(isPreflightReport({ ready: 'yes', checks: [] }), false)
   })
 
   it('scanSessionForExperienceBank folds get/add single entries into the entries array', () => {

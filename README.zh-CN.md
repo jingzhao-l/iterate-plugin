@@ -60,7 +60,7 @@ dsh plugin --profile web add iterate-plugin
 
 **v3.2 质量指挥中心**：插件已从"被动观察面板"升级为"主动指挥中心 + 知识库"。新增质量门禁读取与可写计算（compute）、经验银行（检索 / 采纳 / 新增 add）、防御事件流（记录 + 中英双语标签）、原生命令按钮与 `task_mode` 指示器。
 
-除 17 个纯函数工具外，还内置一套**免构建的 Web UI 层**（收敛看板、分诊面板、统计卡片、11 页签运行时观测台——实时活动流 + F1–F10——、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（[技能](https://github.com/jingzhao-l/iterate-skill) / [无头引擎](https://github.com/jingzhao-l/iterate-harness)）完全一致，迁移零成本。
+除 19 个纯函数工具外，还内置一套**免构建的 Web UI 层**（收敛看板、分诊面板、统计卡片、12 页签运行时观测台——实时活动流 + F1–F11——、主题皮肤等），直接挂在 dsh 客户端的既有 UI 槽位上。配置方式（`iterate.config.yaml` 与审查维度）与迭代生态的另外两个组件（[技能](https://github.com/jingzhao-l/iterate-skill) / [无头引擎](https://github.com/jingzhao-l/iterate-harness)）完全一致，迁移零成本。
 
 ---
 
@@ -103,10 +103,10 @@ dsh plugin --profile web add iterate-plugin
 - 每轮修复后验证
 - 修复失败自动回滚
 
-### UI 层（客户端免构建槽位，v3.7：11 个页签，双语）
+### UI 层（客户端免构建槽位，v3.12：12 个页签，双语）
 
 - **收敛看板 `ConvergenceDashboard`**（`conversation.input.dock`）— 输入框上方实时显示轮次进度条、严重度统计、维度徽章、趋势迷你图；normal 模式另显示修复计数徽章；还有运行阶段芯片（当前工作流阶段 + 运行中/已结束）与 **task_mode 指示器（code / iterate）**。运行期间看板切换为"运行中"状态（显示轮次与阶段），并隐藏启动按钮。
-- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十一个页签**运行时观测台：**实时活动流**（默认页，支持按活动类型筛选）+ **F1** 审查线程（全部展开/全部收起）、**F2** 收敛趋势（含跨轮对比表：每轮 findings / fixed / 严重度分布 / 验证结果）、**F3** 发现定位（按严重度/维度/关键词筛选）、**F4** 修复与回滚、**F5** 断点恢复、**F6** 运行控制台、**F7** 决策时间线（按类型/轮次筛选与关键词搜索）、**F8** 质量门禁、**F9** 经验银行、**F10** 防御事件。数字键快捷键：`1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。**F8/F9/F10 为实时数据**——扫描会话流中最近一次 `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` 结果并渲染真实数据（PASS/FAIL 徽章 + 分维度评分条、经验条目（含采纳按钮 + 客户端搜索）、防御类型计数芯片 + 筛选后的事件流）；会话流中没有数据时区分"磁盘无数据"与"尚未拉取"，并提供**拉取磁盘快照**指令（让模型调用只读工具、把 `.iterate/` 产物回显进会话流）。一键导出全部观测数据为 JSON——manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report`（优先下载，失败回退复制）。**v3.9 新增报告导出按钮**（导出报告 / 导出 SARIF，**v3.11 新增导出 JSON 报告**），与 `iterate_report` 工具共用同一份数据模型——分别产出可直接粘贴进 PR 的 Markdown 运行报告、供 CI / GitHub Code Scanning 消费的 SARIF 2.1.0 日志，以及（v3.11）完整的归一化运行模型 JSON（无损格式）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。
+- **运行时观测台 `ObservatoryPanel`**（`conversation.input.dock`）— 输入框下方**十二个页签**运行时观测台：**实时活动流**（默认页，支持按活动类型筛选）+ **F1** 审查线程（全部展开/全部收起）、**F2** 收敛趋势（含跨轮对比表：每轮 findings / fixed / 严重度分布 / 验证结果）、**F3** 发现定位（按严重度/维度/关键词筛选）、**F4** 修复与回滚、**F5** 断点恢复、**F6** 运行控制台、**F7** 决策时间线（按类型/轮次筛选与关键词搜索）、**F8** 质量门禁、**F9** 经验银行、**F10** 防御事件、**F11** 开跑预检。数字键快捷键：`1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流（F11 仅点击进入）。**F8/F9/F10 为实时数据**——扫描会话流中最近一次 `iterate_quality_gate` / `iterate_experience` / `iterate_defense_events` 结果并渲染真实数据（PASS/FAIL 徽章 + 分维度评分条、经验条目（含采纳按钮 + 客户端搜索）、防御类型计数芯片 + 筛选后的事件流）；会话流中没有数据时区分"磁盘无数据"与"尚未拉取"，并提供**拉取磁盘快照**指令（让模型调用只读工具、把 `.iterate/` 产物回显进会话流）。一键导出全部观测数据为 JSON——manifest + live + `qualityGate` / `experienceBank` / `defenseEvents` / `report`（优先下载，失败回退复制）。**v3.9 新增报告导出按钮**（导出报告 / 导出 SARIF，**v3.11 新增导出 JSON 报告**），与 `iterate_report` 工具共用同一份数据模型——分别产出可直接粘贴进 PR 的 Markdown 运行报告、供 CI / GitHub Code Scanning 消费的 SARIF 2.1.0 日志，以及（v3.11）完整的归一化运行模型 JSON（无损格式）。**v3.5.3 新增重置操作**：F5 复制 `iterate_checkpoint clear`、F8 复制 `iterate_quality_gate clear`、F10 复制 `iterate_defense_events clear` 指令。**v3.12 新增开跑预检（Preflight）**——F11 渲染会话流中最近一次 `iterate_preflight` 清单（验证命令是否配置 / 是否 Git 仓库 / 脏工作区 / 陈旧 FAIL 门禁 / 中断断点），每个 warn/fail 行都给出精确的修复指令（配置 `validation.commands`、清除陈旧门禁、恢复断点），让环境在**花掉一轮之前**就被修好；空态提供**运行预检**指令（让模型调用 `iterate_preflight`）。
 - **Findings 分诊面板 `TriagePanel`**（`conversation.chat.turnTail`）— 逐条分诊，键盘快捷键 `y`（保留→修复）、`n`（跳过）、`a`（已知有意）与 `↑`/`↓` 移动（焦点守卫：仅面板内焦点时生效），支持筛选、批量（含一键全选所有 findings）、localStorage 持久化。**写回闭环**：主按钮复制已标记条目的 `iterate_triage apply` 指令（工具负责校验、去重、备份、失败回滚）；次按钮复制裸 `known_intentional` YAML；**回读已写入条目**复制 `iterate_triage list` 指令核对实际落盘内容。复制载荷与目标工具 schema 对齐。**v3.2：原生命令按钮**（批准架构修复、触发新一轮、回滚到断点）。
 - **收敛统计卡片 `StatsCard`**（`conversation.chat.turnTail`）— 无 findings 时显示收敛统计、历史轮次、趋势图、完成摘要。
 - **iterate 主题皮肤**（`theme.overrideTokens`）— 暖琥珀配色的 13 个 `--dsw-*` token 覆盖，明暗双模式，可在设置页开关。
@@ -118,7 +118,7 @@ UI 层为**防御式设计**：`slots` / `theme` / `React` 任一不可用时自
 
 ### 工具之外的闭环行为
 
-除 17 个注册工具（完整参考见下文）外，插件还端到端打通了几条关键闭环：
+除 19 个注册工具（完整参考见下文）外，插件还端到端打通了几条关键闭环：
 
 - **findings 分诊闭环** — 审查 → UI 分诊（y/n/a）→ `iterate_triage` 写回 `known_intentional` → 下一轮自动过滤
 - **结构化修复系统** — 每次修复先备份、写注册表、记录 diff，验证失败可 `iterate_rollback` 还原
@@ -195,9 +195,9 @@ pnpm add /path/to/iterate-skill/harness/iterate-plugin
 
 ### 观测台页签与快捷键
 
-输入框下方的观测台共 **11 个页签**：实时活动流（默认页）+ **F1–F10**：
+输入框下方的观测台共 **12 个页签**：实时活动流（默认页）+ **F1–F11**：
 
-`F1` 审查线程 · `F2` 收敛趋势（含跨轮对比）· `F3` 发现定位 · `F4` 修复与回滚 · `F5` 断点恢复 · `F6` 运行控制台 · `F7` 决策时间线 · `F8` 质量门禁 · `F9` 经验银行 · `F10` 防御事件
+`F1` 审查线程 · `F2` 收敛趋势（含跨轮对比）· `F3` 发现定位 · `F4` 修复与回滚 · `F5` 断点恢复 · `F6` 运行控制台 · `F7` 决策时间线 · `F8` 质量门禁 · `F9` 经验银行 · `F10` 防御事件 · `F11` 开跑预检
 
 按 `1`–`9` 跳到 F1–F9，`0` 到 F10，`-` 回实时活动流。
 
@@ -287,7 +287,7 @@ validation:
 
 ---
 
-## 🔧 注册工具（17 个）
+## 🔧 注册工具（19 个）
 
 - `iterate_config` — 读取 / 写入 `iterate.config.yaml`。`operation=read` 返回完整配置或指定 section；`operation=write` 做 schema 校验、备份后局部合并写入，失败自动回滚
 - `iterate_validate` — 运行白名单验证命令，返回结果
@@ -307,6 +307,7 @@ validation:
 - `iterate_quality_gate` — **v3.2** 读取质量凭证（`read`），或基于 findings、验证结果、`findingsByRound` 与 `fixedByDimension` 重新计算并持久化一份新凭证（`compute`）。真实的逐维度收敛率。**v3.5 新增 `clear`：删除持久化的质量凭证**，用于新一轮迭代前重置陈旧的门禁
 - `iterate_defense_events` — **v3.2** 查询防御事件（list / counts），`record` 记录一条新事件，或 **v3.5.3 `clear` 清除持久化事件流**，让新一轮迭代不带陈旧防御数据起跑。可读标签跟随项目语言（en / zh）
 - `iterate_report` — **v3.9** 把本次运行导出为可移植报告。`format:"markdown"`（默认）产出可直接粘贴进 PR 的报告（运行头部、质量门禁、发现、修复、验证、防御事件、经验银行）；`format:"sarif"` 产出 SARIF 2.1.0 日志供 CI / GitHub Code Scanning 消费（每个审查维度一条规则，严重度 → error/warning/note，携带文件+行号位置与建议修复）。**v3.11：`format:"json"` 产出完整归一化运行模型为机器可读 JSON**（发现、修复、验证、收敛率、质量门禁、经验银行、防御事件——供 CI 仪表盘 / PR 机器人消费的无损格式）。`write:true` 持久化到 `.iterate/report.md` / `.iterate/report.sarif` / `.iterate/report.json`；`lang`（zh | en）选择报告语言。除可选的报告文件外均为只读
+- `iterate_preflight` — **v3.12** 开跑前只读预检。返回结构化清单：`validation.commands` 是否已配置（为空意味着本轮无法证明修复——**阻断项**）、是否 Git 仓库、多少个未提交文件、磁盘上是否残留 FAIL 质量门禁、是否有中断断点在等待。每项都携带结构化事实（`{ id, status: pass|warn|fail, detail }`），观测台 F11 面板据此本地化为一句话并给出精确修复指令。绝不修改配置、文件或产物
 
 ---
 
@@ -423,7 +424,7 @@ validation:
 
 插件遵循 dsh "everything-is-a-plugin" 架构：
 
-- **只做两件事** — 注入系统 prompt 教模型写 iterate workflow + 注册 17 个纯函数工具
+- **只做两件事** — 注入系统 prompt 教模型写 iterate workflow + 注册 19 个纯函数工具
 - **所有 orchestration 通过 dsh 原生 `workflow` + `agent` + `parallel` 完成**
 - **核心逻辑全部纯函数**（去重 / 过滤 / 排序 / 收敛 / meta-audit / diff 计算 / 历史过滤 / 清理报告），可单元测试，无 I/O
 - **安全模型** — 文件写入限定在解析后的项目根目录内（路径遍历防护）；写文件前必备份，失败回滚；配置写入同样备份 + 回滚；`iterate_prune` 默认 dry-run、只清理 `.iterate/` 下产物、每次清理写日志；`iterate_fix` 对 content 设字符上限、`iterate_triage` 对 entries 设数量上限，防止异常超大负载

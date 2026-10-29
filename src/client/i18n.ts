@@ -446,11 +446,50 @@ export const EN: Record<string, string> = {
   '防线：{a0}': 'Defense: {a0}',
   没有匹配该类型的防御事件: 'No defense events of this type',
 
+  // ── F11 preflight ────────────────────────────────────────────────────────
+  开跑预检: 'Preflight',
+  待预检: 'Not run yet',
+  未就绪: 'Not ready',
+  '复制 iterate_preflight 预检指令（含 JSON 参数）':
+    'Copy the iterate_preflight readiness instruction (JSON arguments included)',
+  运行预检: 'Run preflight',
+  开跑预检清单: 'Preflight checklist',
+  预检结果: 'Preflight result',
+  '开跑前先预检：确认验证命令、Git、工作区、陈旧门禁与中断断点都已就绪，避免开跑后才发现环境问题。':
+    'Run preflight first: confirm validation commands, git, the working tree, a stale gate and an interrupted checkpoint are ready, so you do not discover an environment problem mid-run.',
+  复制预检指令: 'Copy preflight instruction',
+  验证命令: 'Validation commands',
+  '已配置 {a0} 条验证命令': '{a0} validation command(s) configured',
+  '未配置 validation.commands —— 本轮无法证明修复，属阻断项':
+    'validation.commands is not configured — the run cannot prove fixes (blocking)',
+  'Git 仓库': 'Git repository',
+  '已检测到 Git 仓库': 'Git repository detected',
+  '不是 Git 仓库 —— changed-only 范围与 iterate_diff 需要它':
+    'Not a git repository — changed-only scope and iterate_diff need one',
+  工作区: 'Working tree',
+  '未提交改动：未知': 'Uncommitted changes: unknown',
+  '{a0} 个未提交/未跟踪文件 —— 建议先 commit 或 stash':
+    '{a0} uncommitted/untracked file(s) — commit or stash first',
+  工作区干净: 'Working tree clean',
+  陈旧门禁: 'Stale gate',
+  '磁盘上残留 FAIL 质量门禁 —— 开新轮前先清除':
+    'A stale FAIL quality gate is persisted — clear it before a fresh run',
+  '质量门禁：{a0}': 'Quality gate: {a0}',
+  无持久化质量门禁: 'No persisted quality gate',
+  中断断点: 'Interrupted checkpoint',
+  '存在中断断点（已恢复 {a0} 次）—— 恢复或清除后再开跑':
+    'An interrupted checkpoint is waiting (resumed {a0}x) — resume or clear it first',
+  无中断断点: 'No interrupted checkpoint',
+  配置验证命令: 'Configure validation',
+  恢复断点: 'Resume checkpoint',
+  '阻断 {a0} · 警告 {a1}': 'Blocking {a0} · warnings {a1}',
+  '预检失败：{a0}': 'Preflight failed: {a0}',
+  '预检只读，不会修改配置或文件。': 'Preflight is read-only; it never modifies config or files.',
+
   // ── copy feedback ────────────────────────────────────────────────────────
   已复制: 'Copied',
   复制失败: 'Copy failed',
 }
-
 let current: Lang = 'zh'
 let storage: LangStorage | null = null
 const listeners = new Set<(lang: Lang) => void>()

@@ -75,6 +75,8 @@ import {
   scanSessionForQualityGate,
   scanSessionForExperienceBank,
   scanSessionForDefenseEvents,
+  scanSessionForPreflight,
+  buildPreflightInstruction,
   filterLiveEntries,
   filterTimelineEntries,
   serializeObservatoryExport,
@@ -336,6 +338,24 @@ interface ObsQualityGate {
   dimensions?: ObsQualityGateDimension[]
 }
 
+/** One readiness check from `iterate_preflight` (F11). `detail` is structured
+ *  facts the panel localizes into a sentence. */
+interface ObsPreflightCheck {
+  id?: string
+  status?: string
+  detail?: Record<string, unknown>
+}
+
+/** Latest `iterate_preflight` report scanned out of the session stream. */
+interface ObsPreflight {
+  ok?: boolean
+  ready?: boolean
+  blocking?: number
+  warnings?: number
+  error?: string | null
+  checks?: ObsPreflightCheck[]
+}
+
 interface ObsExperienceEntry {
   id?: string
   timestamp?: string
@@ -583,6 +603,7 @@ const ITERATE_CSS = `
 .iterate-gate[data-status="pass"] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); }
 .iterate-gate[data-status="fail"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 28%, transparent); }
 .iterate-gate[data-status="pending"] { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 28%, transparent); }
+.iterate-gate[data-status="warn"] { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 28%, transparent); }
 
 /* v3.0: Experience bank hit highlight */
 .iterate-exp-hit { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border: 1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 28%, transparent); font-size: 11px; color: var(--dsw-alias-state-success-primary); }
@@ -2179,6 +2200,8 @@ const OBS_TABS = [
   { key: 'f8', label: { zh: '质量门禁', en: 'Quality gate' }, hotkey: '8' },
   { key: 'f9', label: { zh: '经验银行', en: 'Experience bank' }, hotkey: '9' },
   { key: 'f10', label: { zh: '防御事件', en: 'Defense events' }, hotkey: '0' },
+  // v3.12: pre-run readiness checklist (validation/git/dirty-tree/stale-gate/checkpoint)
+  { key: 'f11', label: { zh: '开跑预检', en: 'Preflight' }, hotkey: '' },
 ] as const
 
 /** Digit → tab id. `1-9` map to F1–F9, `0` to F10, `-` back to the live feed
@@ -2267,6 +2290,12 @@ function latestDefenseEvents(session: unknown): ObsDefenseResult | null {
   return scanSessionForDefenseEvents(session) as ObsDefenseResult | null
 }
 
+/** Find the latest preflight report inside a session snapshot. */
+function latestPreflight(session: unknown): ObsPreflight | null {
+  if (!session) return null
+  return scanSessionForPreflight(session) as ObsPreflight | null
+}
+
 /** Build a human-pasteable `iterate_fix` instruction for one finding.
  *  Gap #10: delegates to the shared builder so the payload always names the
  *  four required `iterate_fix` params (file / content / finding / round) and
@@ -2295,6 +2324,7 @@ function ObservatoryPanel(props: SlotProps) {
   const qualityGate = latestQualityGate(session)
   const experienceBank = latestExperienceBank(session)
   const defenseEvents = latestDefenseEvents(session)
+  const preflight = latestPreflight(session)
 
   const [open, setOpen] = React.useState(false)
   const [tab, setTab] = React.useState('live')
@@ -3356,6 +3386,176 @@ function ObservatoryPanel(props: SlotProps) {
     )
   }
 
+  // ── F11: Preflight readiness ──────────────────────────────────────────────
+  // v3.12: renders the latest iterate_preflight checklist scanned from the
+  // session stream. Each warn/fail row offers the exact fix instruction
+  // (configure validation, clear a stale gate, resume an interrupted
+  // checkpoint) so the environment is repaired BEFORE a round is spent on it.
+  const renderPreflight = () => {
+    const preflightInstruction = buildPreflightInstruction()
+    const report = preflight
+    const hasReport = report !== null && Array.isArray(report.checks)
+    const ready = report !== null && report.ready === true
+    const blocking = Number(report && report.blocking != null ? report.blocking : 0)
+    const warnings = Number(report && report.warnings != null ? report.warnings : 0)
+    const statusLabel = !hasReport ? t('待预检') : ready ? t('就绪') : t('未就绪')
+    const statusTone = !hasReport ? 'pending' : ready ? 'pass' : 'fail'
+    const headerBar = React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 8 } },
+      React.createElement('b', {}, t('开跑预检')),
+      React.createElement('span', { className: 'iterate-gate', 'data-status': statusTone }, statusLabel),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'preflight' ? '' : undefined,
+        onClick: () => copyInstruction('preflight', preflightInstruction),
+        title: t('复制 iterate_preflight 预检指令（含 JSON 参数）'),
+      }, copiedKey === 'preflight' ? t('已复制') : t('运行预检')),
+    )
+
+    if (!hasReport) {
+      return React.createElement('div', {},
+        headerBar,
+        React.createElement('div', { className: 'iterate-obs-block' },
+          React.createElement('div', { className: 'iterate-obs-block-head' },
+            React.createElement('span', {}, t('开跑预检清单')),
+            React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.12'),
+          ),
+          React.createElement('div', { className: 'iterate-obs-block-body' },
+            React.createElement('div', { className: 'iterate-obs-msg' },
+              // Gap #4: separate "pulled and empty" from "never pulled".
+              diskEmptyStateText(toolCalledInSession(session, 'iterate_preflight'), t('预检结果'), getLang()),
+            ),
+            React.createElement('div', { className: 'iterate-obs-msg', style: { marginTop: 6 } },
+              t('开跑前先预检：确认验证命令、Git、工作区、陈旧门禁与中断断点都已就绪，避免开跑后才发现环境问题。'),
+            ),
+            React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
+              React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': copiedKey === 'preflight-instr' ? '' : undefined,
+                onClick: () => copyInstruction('preflight-instr', preflightInstruction),
+                title: t('复制预检指令'),
+              }, copiedKey === 'preflight-instr' ? t('已复制') : t('复制预检指令')),
+            ),
+          ),
+        ),
+      )
+    }
+
+    // A tool-level failure (bad path, root refused) carries no usable checks —
+    // surface the error instead of a misleading "ready, 0 blocking" summary.
+    if (report && report.ok === false) {
+      return React.createElement('div', {},
+        headerBar,
+        React.createElement('div', { className: 'iterate-obs-block' },
+          React.createElement('div', { className: 'iterate-obs-block-head' },
+            React.createElement('span', {}, t('开跑预检清单')),
+            React.createElement('span', { className: 'iterate-obs-badge' }, 'v3.12'),
+          ),
+          React.createElement('div', { className: 'iterate-obs-block-body' },
+            React.createElement('div', { className: 'iterate-obs-msg' },
+              tf('预检失败：{a0}', { a0: String(report.error || '') }),
+            ),
+          ),
+        ),
+      )
+    }
+
+    // Localized label + detail per check id. Detail is structured facts from
+    // the tool, so the panel — not the tool — owns the wording/language.
+    const CHECK_META: Record<string, { label: string; detail: (d: Record<string, unknown>) => string }> = {
+      validation: {
+        label: t('验证命令'),
+        detail: (d) => {
+          const n = Number(d.commandCount ?? 0)
+          return n > 0
+            ? tf('已配置 {a0} 条验证命令', { a0: n })
+            : t('未配置 validation.commands —— 本轮无法证明修复，属阻断项')
+        },
+      },
+      git: {
+        label: t('Git 仓库'),
+        detail: (d) => (d.isRepo === true ? t('已检测到 Git 仓库') : t('不是 Git 仓库 —— changed-only 范围与 iterate_diff 需要它')),
+      },
+      'dirty-tree': {
+        label: t('工作区'),
+        detail: (d) => {
+          const n = d.changedFiles
+          if (n === null || n === undefined) return t('未提交改动：未知')
+          const num = Number(n)
+          return num > 0
+            ? tf('{a0} 个未提交/未跟踪文件 —— 建议先 commit 或 stash', { a0: num })
+            : t('工作区干净')
+        },
+      },
+      'stale-gate': {
+        label: t('陈旧门禁'),
+        detail: (d) => {
+          const s = d.overallStatus
+          if (s === 'fail') return t('磁盘上残留 FAIL 质量门禁 —— 开新轮前先清除')
+          return s ? tf('质量门禁：{a0}', { a0: String(s) }) : t('无持久化质量门禁')
+        },
+      },
+      'interrupted-checkpoint': {
+        label: t('中断断点'),
+        detail: (d) => {
+          if (d.interrupted === true) {
+            const rc = Number(d.resumeCount ?? 0)
+            return tf('存在中断断点（已恢复 {a0} 次）—— 恢复或清除后再开跑', { a0: rc })
+          }
+          return t('无中断断点')
+        },
+      },
+    }
+
+    // Repair action per check id; null = guidance only (no tool can fix it).
+    const fixFor = (id: string): { key: string; label: string; instruction: string } | null => {
+      switch (id) {
+        case 'validation':
+          return { key: 'preflight-fix-validation', label: t('配置验证命令'), instruction: buildConfigFieldInstruction('validation.commands') }
+        case 'stale-gate':
+          return { key: 'preflight-fix-gate', label: t('清除门禁'), instruction: buildQualityGateClearInstruction() }
+        case 'interrupted-checkpoint':
+          return { key: 'preflight-fix-checkpoint', label: t('恢复断点'), instruction: buildCheckpointResumeInstruction() }
+        default:
+          return null
+      }
+    }
+
+    const rows = (report.checks || []).map((c, i) => {
+      const id = String(c.id || '')
+      const status = String(c.status || 'warn')
+      const meta = CHECK_META[id]
+      const label = meta ? meta.label : id || '?'
+      const detail = meta ? meta.detail(c.detail || {}) : ''
+      const fix = status !== 'pass' ? fixFor(id) : null
+      return React.createElement('div', { key: `pf-${i}`, className: 'iterate-obs-row' },
+        React.createElement('span', { className: 'iterate-gate', 'data-status': status }, status.toUpperCase()),
+        React.createElement('b', {}, label),
+        React.createElement('span', { className: 'iterate-obs-msg' }, detail),
+        fix
+          ? React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === fix.key ? '' : undefined,
+              onClick: () => copyInstruction(fix.key, fix.instruction),
+              title: fix.instruction,
+            }, copiedKey === fix.key ? t('已复制') : fix.label)
+          : null,
+      )
+    })
+
+    return React.createElement('div', {},
+      headerBar,
+      React.createElement('div', { className: 'iterate-obs-block' },
+        React.createElement('div', { className: 'iterate-obs-block-head' },
+          React.createElement('span', {}, t('开跑预检清单')),
+          React.createElement('span', { className: 'iterate-obs-head-meta' },
+            tf('阻断 {a0} · 警告 {a1}', { a0: blocking, a1: warnings }),
+          ),
+        ),
+        React.createElement('div', { className: 'iterate-obs-block-body' },
+          React.createElement('div', { className: 'iterate-obs-msg' }, t('预检只读，不会修改配置或文件。')),
+          ...rows,
+        ),
+      ),
+    )
+  }
+
   // ── Live: real-time secondary-subagent activity stream (newest first) ─────
   const renderLive = () => {
     const liveEntries = manifest.live || []
@@ -3440,6 +3640,7 @@ function ObservatoryPanel(props: SlotProps) {
       case 'f8': return renderQualityGate()
       case 'f9': return renderExperienceBank()
       case 'f10': return renderDefenseEvents()
+      case 'f11': return renderPreflight()
       default: return null
     }
   }

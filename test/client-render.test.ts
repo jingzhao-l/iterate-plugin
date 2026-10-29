@@ -373,9 +373,69 @@ describe('ObservatoryPanel', () => {
 
     click(head)
     const open = panel.textContent ?? ''
-    for (const tab of ['实时活动流', '审查线程', '收敛趋势', '发现定位', '修复与回滚', '断点恢复', '运行控制台', '决策时间线', '质量门禁', '经验银行', '防御事件']) {
+    for (const tab of ['实时活动流', '审查线程', '收敛趋势', '发现定位', '修复与回滚', '断点恢复', '运行控制台', '决策时间线', '质量门禁', '经验银行', '防御事件', '开跑预检']) {
       assert.ok(open.includes(tab), `tab "${tab}" is rendered`)
     }
+  })
+
+  it('renders the preflight checklist pulled from the session stream', () => {
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_preflight',
+          result: {
+            ok: true,
+            ready: false,
+            blocking: 1,
+            warnings: 2,
+            checks: [
+              { id: 'validation', status: 'fail', detail: { commandCount: 0 } },
+              { id: 'git', status: 'warn', detail: { isRepo: false } },
+              { id: 'dirty-tree', status: 'warn', detail: { changedFiles: 3 } },
+            ],
+          },
+        },
+      ],
+      transcript: transcriptFixture(),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '开跑预检'))
+    const html = panel.textContent ?? ''
+    assert.match(html, /未就绪/) // blocking summary badge
+    assert.match(html, /未配置 validation\.commands/) // blocking detail
+    assert.match(html, /不是 Git 仓库/) // warn detail
+    assert.match(html, /3 个未提交/)
+    assert.ok(buttonByText(panel, '配置验证命令'), 'the blocking fix action is offered')
+  })
+
+  it('offers the preflight run instruction when no report is pulled yet', () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: transcriptFixture() } })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '开跑预检'))
+    const html = panel.textContent ?? ''
+    assert.match(html, /待预检/)
+    assert.ok(buttonByText(panel, '运行预检'), 'the run-preflight instruction is offered')
+  })
+
+  it('renders a preflight failure instead of a misleading ready summary', () => {
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_preflight',
+          result: { ok: false, ready: false, blocking: 0, warnings: 0, checks: [], error: 'Refusing filesystem root as project root.' },
+        },
+      ],
+      transcript: transcriptFixture(),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '开跑预检'))
+    const html = panel.textContent ?? ''
+    assert.match(html, /预检失败：/)
+    assert.match(html, /Refusing filesystem root/)
+    // The failure branch must not render the summary/blocking rows of a real report.
+    assert.doesNotMatch(html, /阻断 0/)
   })
 
   it('renders a quality-gate snapshot pulled from the session stream', () => {
