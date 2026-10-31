@@ -22,6 +22,7 @@ import {
   hashReport,
   toKnownIntentionalYaml,
   buildApplyInstruction,
+  buildValidationApplyInstruction,
   collectIgnoredEntries,
   normalizeFindingFilter,
   findingMatches,
@@ -2711,5 +2712,36 @@ describe('dimension maps are prototype-pollution safe', () => {
     assert.equal(sum.critical, 0)
     assert.equal(sum.high, 0)
     assert.equal(Object.getPrototypeOf(sum.byDimension), null)
+  })
+})
+
+// ─── buildValidationApplyInstruction ────────────────────────────────────────
+
+describe('buildValidationApplyInstruction', () => {
+  it('emits a ready-to-run iterate_config write payload', () => {
+    const text = buildValidationApplyInstruction(['npm test', 'npm run lint'])
+    assert.match(text, /iterate_config/)
+    assert.match(text, /"operation": "write"/)
+    assert.match(text, /"default": \[/)
+    assert.match(text, /"npm test"/)
+    assert.match(text, /"npm run lint"/)
+    // The instruction is a fenced JSON block the model can copy verbatim.
+    assert.match(text, /```json\n[\s\S]*\n```/)
+  })
+
+  it('drops empty / non-string entries instead of emitting an invalid payload', () => {
+    const text = buildValidationApplyInstruction(['npm test', '', 42 as unknown as string, null as unknown as string])
+    const json = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(text)![1]!) as {
+      updates: { validation: { commands: { default: string[] } } }
+    }
+    assert.deepEqual(json.updates.validation.commands.default, ['npm test'])
+  })
+
+  it('tolerates a non-array input', () => {
+    const text = buildValidationApplyInstruction('junk' as unknown as string[])
+    const json = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(text)![1]!) as {
+      updates: { validation: { commands: { default: string[] } } }
+    }
+    assert.deepEqual(json.updates.validation.commands.default, [])
   })
 })

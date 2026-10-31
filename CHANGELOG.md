@@ -5,6 +5,51 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0] - 2026-10-31
+
+验证命令自动检测（Validation-command auto-detection）。开跑预检的阻断项此前只能手写
+YAML——错误嵌套、错误模块键、写了项目根本不存在的命令；现在可自动识别项目
+（package.json 脚本 / pytest / Cargo / Go / Make）并一键应用。按语义化版本是一次 minor。
+
+### Added
+
+- **`iterate_config` 新增 `operation:"detect"`** —— 读取项目 manifest，自动提出一个
+  按序去重的 `validation.commands.default` 命令集（node：`test`/`typecheck`/`lint`/`build`
+  四个脚本；python：`pytest -q` + 配置过的 `ruff check .`/`mypy .`；rust：`cargo test`
+  + 配置过的 `cargo clippy`/`cargo fmt --check`；go：`go test ./...` + `go vet ./...`；
+  make：`make test`/`make check` 兜底，仅当无任何生态专属命令时）。只提出 manifest
+  真实公告的命令，绝不发明、绝不执行；上限 6 条；坏 JSON / 不可读 manifest 一律降级为
+  "未检测到"而非抛错。返回 `ecosystem`/`commands`/`sources`/`updates`（可直接深合并的
+  部分配置）。
+- **`operation:"detect"` + `apply:true`** —— 一键把检测到的命令写入
+  `validation.commands.default`，走与 `write` 相同的备份 + 校验 + 回滚 + 项目锁路径；
+  已配置命令集时拒绝（除非 `force:true`），绝不静默覆盖手工调好的命令。
+- **`iterate_preflight` 阻断项携带检测建议** —— `validation.commands` 为空时，工具自动
+  检测项目并把 `suggestedCommands`/`ecosystem`/`detectedFrom` 附到阻断项 `detail`，
+  `render` 输出「检测到 {ecosystem} 项目，建议：…」。
+- **观测台 F11「应用建议」按钮** —— 阻断的验证命令行在检测到建议时显示
+  「应用建议」（复制 `iterate_config` 的 `operation:"write"` 指令，携带完整
+  `validation.commands.default` 载荷），否则保留原「配置验证命令」。
+
+### Changed
+
+- 上游 dsh 新版本 `dsh-v0.2.1-rc.5`（2026-10-30 发布，仅「优化对话中思考内容展示」，
+  无插件面 API 变动）→ 声明 compatible：`dshReleases` 27 → 28，三个 peer 范围加
+  `|| 0.2.1-rc.5`，devDeps 保持更高线 `0.2.2-alpha.2` 作为构建目标。工具总数仍 19；
+  观测台仍 12 页签。
+
+### Tests
+
+- `test/validation-detect.test.ts` 新增（detect 模块：node/python/rust/go/make、空项目、
+  坏 JSON 容错、非对象 manifest、去重、上限 6、`buildValidationUpdates` 深合并形状与
+  防御拷贝）；`test/config-tool.test.ts` 新增 detect 用例（只读提出、空项目 `ok:false`、
+  apply 写入并回读、无配置文件时创建、已配置拒绝、force 覆盖）；`test/preflight.test.ts`
+  新增建议用例（纯函数 detail 附着/省略/过滤 + execute 真实检测与「已配置不检测」）；
+  `test/parse.test.ts` 新增 `buildValidationApplyInstruction` 用例；`test/client-render.test.ts`
+  新增 F11 建议渲染 + 「应用建议」按钮用例。`npm run typecheck` 0 错误、`npm test`
+  **1374 passed / 0 failed**（此前 1340，+34）；`npm run build && npm run build:client`
+  干净，`dist/` 与 `lib/client.js` 与 `src/` 齐步（`package-contract` 强制）。
+
 ## [3.12.0] - 2026-10-29
 
 开跑预检（Preflight）。新增一个用户可感知的净功能：开始一轮迭代**之前**就把环境

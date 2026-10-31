@@ -77,6 +77,7 @@ import {
   scanSessionForDefenseEvents,
   scanSessionForPreflight,
   buildPreflightInstruction,
+  buildValidationApplyInstruction,
   filterLiveEntries,
   filterTimelineEntries,
   serializeObservatoryExport,
@@ -3464,9 +3465,17 @@ function ObservatoryPanel(props: SlotProps) {
         label: t('验证命令'),
         detail: (d) => {
           const n = Number(d.commandCount ?? 0)
-          return n > 0
-            ? tf('已配置 {a0} 条验证命令', { a0: n })
-            : t('未配置 validation.commands —— 本轮无法证明修复，属阻断项')
+          if (n > 0) return tf('已配置 {a0} 条验证命令', { a0: n })
+          const suggested = Array.isArray(d.suggestedCommands)
+            ? d.suggestedCommands.map((c) => String(c)).filter((c) => c.length > 0)
+            : []
+          if (suggested.length > 0) {
+            return tf('未配置 validation.commands（阻断项）—— 检测到 {a0} 项目，建议：{a1}', {
+              a0: String(d.ecosystem || ''),
+              a1: suggested.join(' · '),
+            })
+          }
+          return t('未配置 validation.commands —— 本轮无法证明修复，属阻断项')
         },
       },
       git: {
@@ -3505,10 +3514,21 @@ function ObservatoryPanel(props: SlotProps) {
     }
 
     // Repair action per check id; null = guidance only (no tool can fix it).
-    const fixFor = (id: string): { key: string; label: string; instruction: string } | null => {
+    const fixFor = (id: string, detail: Record<string, unknown>): { key: string; label: string; instruction: string } | null => {
       switch (id) {
-        case 'validation':
+        case 'validation': {
+          const suggested = Array.isArray(detail.suggestedCommands)
+            ? detail.suggestedCommands.map((c) => String(c)).filter((c) => c.length > 0)
+            : []
+          if (suggested.length > 0) {
+            return {
+              key: 'preflight-fix-validation',
+              label: t('应用建议'),
+              instruction: buildValidationApplyInstruction(suggested),
+            }
+          }
           return { key: 'preflight-fix-validation', label: t('配置验证命令'), instruction: buildConfigFieldInstruction('validation.commands') }
+        }
         case 'stale-gate':
           return { key: 'preflight-fix-gate', label: t('清除门禁'), instruction: buildQualityGateClearInstruction() }
         case 'interrupted-checkpoint':
@@ -3523,12 +3543,12 @@ function ObservatoryPanel(props: SlotProps) {
       const status = String(c.status || 'warn')
       const meta = CHECK_META[id]
       const label = meta ? meta.label : id || '?'
-      const detail = meta ? meta.detail(c.detail || {}) : ''
-      const fix = status !== 'pass' ? fixFor(id) : null
+      const detailText = meta ? meta.detail(c.detail || {}) : ''
+      const fix = status !== 'pass' ? fixFor(id, c.detail || {}) : null
       return React.createElement('div', { key: `pf-${i}`, className: 'iterate-obs-row' },
         React.createElement('span', { className: 'iterate-gate', 'data-status': status }, status.toUpperCase()),
         React.createElement('b', {}, label),
-        React.createElement('span', { className: 'iterate-obs-msg' }, detail),
+        React.createElement('span', { className: 'iterate-obs-msg' }, detailText),
         fix
           ? React.createElement('button', {
               className: 'iterate-btn', 'data-copied': copiedKey === fix.key ? '' : undefined,

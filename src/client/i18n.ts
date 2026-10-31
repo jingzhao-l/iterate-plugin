@@ -460,6 +460,8 @@ export const EN: Record<string, string> = {
   复制预检指令: 'Copy preflight instruction',
   验证命令: 'Validation commands',
   '已配置 {a0} 条验证命令': '{a0} validation command(s) configured',
+  '未配置 validation.commands（阻断项）—— 检测到 {a0} 项目，建议：{a1}':
+    'validation.commands is not configured (blocking) — detected {a0} project; suggested: {a1}',
   '未配置 validation.commands —— 本轮无法证明修复，属阻断项':
     'validation.commands is not configured — the run cannot prove fixes (blocking)',
   'Git 仓库': 'Git repository',
@@ -481,6 +483,7 @@ export const EN: Record<string, string> = {
     'An interrupted checkpoint is waiting (resumed {a0}x) — resume or clear it first',
   无中断断点: 'No interrupted checkpoint',
   配置验证命令: 'Configure validation',
+  应用建议: 'Apply suggestion',
   恢复断点: 'Resume checkpoint',
   '阻断 {a0} · 警告 {a1}': 'Blocking {a0} · warnings {a1}',
   '预检失败：{a0}': 'Preflight failed: {a0}',

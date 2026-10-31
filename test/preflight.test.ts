@@ -298,3 +298,114 @@ describe('iterate_preflight tool', () => {
     }
   })
 })
+
+// ─── validation-command suggestions on the blocking check ───────────────────
+
+describe('preflight validation suggestions', () => {
+  it('attaches detected commands + ecosystem + source files to the blocking detail', () => {
+    const r = buildPreflightReport({
+      validationCommandCount: 0,
+      isGitRepo: true,
+      changedFiles: 0,
+      gateOverallStatus: null,
+      interrupted: false,
+      resumeCount: 0,
+      suggestedCommands: ['npm test', 'npm run lint'],
+      ecosystem: 'node',
+      detectedFrom: ['package.json', 'package.json'],
+    })
+    const v = r.checks.find((c) => c.id === 'validation')
+    assert.equal(v?.status, 'fail')
+    assert.deepEqual(v?.detail, {
+      commandCount: 0,
+      suggestedCommands: ['npm test', 'npm run lint'],
+      ecosystem: 'node',
+      detectedFrom: ['package.json', 'package.json'],
+    })
+  })
+
+  it('omits the suggestion fields when nothing was detected', () => {
+    const r = buildPreflightReport({
+      validationCommandCount: 0,
+      isGitRepo: true,
+      changedFiles: 0,
+      gateOverallStatus: null,
+      interrupted: false,
+      resumeCount: 0,
+      suggestedCommands: [],
+      ecosystem: null,
+      detectedFrom: [],
+    })
+    assert.deepEqual(r.checks.find((c) => c.id === 'validation')?.detail, { commandCount: 0 })
+  })
+
+  it('never attaches suggestions when commands are already configured', () => {
+    const r = buildPreflightReport({
+      validationCommandCount: 2,
+      isGitRepo: true,
+      changedFiles: 0,
+      gateOverallStatus: null,
+      interrupted: false,
+      resumeCount: 0,
+      suggestedCommands: ['npm test'],
+      ecosystem: 'node',
+      detectedFrom: ['package.json'],
+    })
+    assert.deepEqual(r.checks.find((c) => c.id === 'validation')?.detail, { commandCount: 2 })
+  })
+
+  it('filters junk entries out of suggestedCommands', () => {
+    const r = buildPreflightReport({
+      validationCommandCount: 0,
+      isGitRepo: true,
+      changedFiles: 0,
+      gateOverallStatus: null,
+      interrupted: false,
+      resumeCount: 0,
+      suggestedCommands: ['npm test', '', 42 as unknown as string, 'npm run lint'],
+      ecosystem: 'node',
+      detectedFrom: ['package.json'],
+    })
+    const v = r.checks.find((c) => c.id === 'validation')
+    assert.deepEqual((v?.detail as { suggestedCommands?: string[] }).suggestedCommands, ['npm test', 'npm run lint'])
+  })
+
+  it('execute() auto-detects commands from the project manifest when none are configured', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', build: 'tsc' } }))
+      const [tool] = captureTools([registerPreflightTool])
+      assert.ok(tool, 'tool registered')
+      const res = (await tool({ path: dir })) as {
+        ok: boolean
+        blocking: number
+        checks: Array<{ id: string; status: string; detail: Record<string, unknown> }>
+      }
+      assert.equal(res.ok, true)
+      assert.equal(res.blocking, 1)
+      const v = res.checks.find((c) => c.id === 'validation')
+      assert.equal(v?.status, 'fail')
+      assert.deepEqual(v?.detail.suggestedCommands, ['npm test', 'npm run build'])
+      assert.equal(v?.detail.ecosystem, 'node')
+      assert.deepEqual(v?.detail.detectedFrom, ['package.json', 'package.json'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('execute() does not inspect the manifest once commands are configured', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      writeFileSync(join(dir, 'iterate.config.yaml'), CONFIG_WITH_VALIDATION, 'utf-8')
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }))
+      const [tool] = captureTools([registerPreflightTool])
+      assert.ok(tool, 'tool registered')
+      const res = (await tool({ path: dir })) as {
+        checks: Array<{ id: string; status: string; detail: Record<string, unknown> }>
+      }
+      assert.deepEqual(res.checks.find((c) => c.id === 'validation')?.detail, { commandCount: 1 })
+    } finally {
+      cleanup()
+    }
+  })
+})

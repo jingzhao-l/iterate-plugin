@@ -182,3 +182,140 @@ describe('iterate_config validate', () => {
     }
   })
 })
+
+// ─── detect operation: validation-command auto-detection ────────────────────
+
+describe('iterate_config detect', () => {
+  const NODE_CONFIG = [
+    'goal: "g"',
+    'dimensions:',
+    '  - correctness',
+    'validation:',
+    '  command_whitelist: []',
+    '  commands: {}',
+  ].join('\n')
+
+  it('proposes commands from package.json without writing anything', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const { dir, cleanup } = tempProject(NODE_CONFIG)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', lint: 'eslint .' } }))
+    try {
+      const before = readFileSync(join(dir, CONFIG_FILE), 'utf-8')
+      const res = (await configTool({ path: dir, operation: 'detect' })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.applied, false)
+      assert.equal(res.ecosystem, 'node')
+      assert.deepEqual(res.commands, ['npm test', 'npm run lint'])
+      assert.deepEqual(res.updates, { validation: { commands: { default: ['npm test', 'npm run lint'] } } })
+      // A read-only detect must not touch the config or create backups.
+      assert.equal(readFileSync(join(dir, CONFIG_FILE), 'utf-8'), before)
+      assert.deepEqual(readdirSync(dir).filter((n) => n.includes('backup')), [])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('reports a project with nothing to detect instead of pretending success', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const { dir, cleanup } = tempProject(NODE_CONFIG)
+    try {
+      const res = (await configTool({ path: dir, operation: 'detect' })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.equal(res.applied, false)
+      assert.equal(res.ecosystem, null)
+      assert.deepEqual(res.commands, [])
+      assert.match(String(res.error), /no validation commands detected/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('apply:true installs the detected commands (backup + round-trip read)', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const { dir, cleanup } = tempProject(NODE_CONFIG)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'jest', typecheck: 'tsc --noEmit' } }))
+    try {
+      const res = (await configTool({ path: dir, operation: 'detect', apply: true })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.applied, true)
+      assert.equal(typeof res.backupPath, 'string')
+      assert.ok(existsSync(String(res.backupPath)))
+      // The written config is re-read through the normal read path.
+      const read = (await configTool({ path: dir, section: 'validation' })) as Record<string, unknown>
+      const data = read.data as { commands?: { default?: string[] } }
+      assert.deepEqual(data.commands?.default, ['npm test', 'npm run typecheck'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('apply:true creates a config file on a project that has none', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const { dir, cleanup } = tempProject()
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'vitest' } }))
+    try {
+      const res = (await configTool({ path: dir, operation: 'detect', apply: true })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.applied, true)
+      assert.equal(existsSync(join(dir, CONFIG_FILE)), true)
+      const read = (await configTool({ path: dir, section: 'validation' })) as Record<string, unknown>
+      const data = read.data as { commands?: { default?: string[] } }
+      assert.deepEqual(data.commands?.default, ['npm test'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('refuses to clobber an existing command set without force', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const existing = [
+      'goal: "g"',
+      'dimensions:',
+      '  - correctness',
+      'validation:',
+      '  command_whitelist: []',
+      '  commands:',
+      '    default:',
+      '      - "make verify"',
+    ].join('\n')
+    const { dir, cleanup } = tempProject(existing)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'jest' } }))
+    try {
+      const before = readFileSync(join(dir, CONFIG_FILE), 'utf-8')
+      const res = (await configTool({ path: dir, operation: 'detect', apply: true })) as Record<string, unknown>
+      assert.equal(res.ok, false)
+      assert.equal(res.applied, false)
+      assert.match(String(res.error), /already has 1 command/)
+      assert.match(String(res.error), /force:true/)
+      assert.equal(readFileSync(join(dir, CONFIG_FILE), 'utf-8'), before)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('force:true replaces the default module', async () => {
+    const [configTool] = captureTools([registerConfigTool]) as [Tool]
+    const existing = [
+      'goal: "g"',
+      'dimensions:',
+      '  - correctness',
+      'validation:',
+      '  command_whitelist: []',
+      '  commands:',
+      '    default:',
+      '      - "make verify"',
+    ].join('\n')
+    const { dir, cleanup } = tempProject(existing)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'jest' } }))
+    try {
+      const res = (await configTool({ path: dir, operation: 'detect', apply: true, force: true })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.applied, true)
+      const read = (await configTool({ path: dir, section: 'validation' })) as Record<string, unknown>
+      const data = read.data as { commands?: { default?: string[] } }
+      assert.deepEqual(data.commands?.default, ['npm test'])
+    } finally {
+      cleanup()
+    }
+  })
+})

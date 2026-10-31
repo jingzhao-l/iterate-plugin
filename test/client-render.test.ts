@@ -614,3 +614,76 @@ describe('language switch', () => {
     assert.match(settings.textContent ?? '', /Chinese \(contract text to paste to the model\)/)
   })
 })
+
+// ─── F11 preflight suggestion rendering + one-click apply ───────────────────
+
+describe('preflight validation suggestions (F11)', () => {
+  it('renders the detected-command suggestion detail and an "apply suggestion" button', () => {
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_preflight',
+          result: {
+            ok: true,
+            ready: false,
+            blocking: 1,
+            warnings: 0,
+            checks: [
+              {
+                id: 'validation',
+                status: 'fail',
+                detail: {
+                  commandCount: 0,
+                  suggestedCommands: ['npm test', 'npm run lint'],
+                  ecosystem: 'node',
+                  detectedFrom: ['package.json', 'package.json'],
+                },
+              },
+            ],
+          },
+        },
+      ],
+      transcript: transcriptFixture(),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '开跑预检'))
+    const html = panel.textContent ?? ''
+    // The blocking detail names the detected ecosystem + commands.
+    assert.match(html, /检测到 node 项目，建议：npm test · npm run lint/)
+    // The one-click action is the new "apply suggestion", not the generic configure.
+    assert.ok(buttonByText(panel, '应用建议'), 'the apply-suggestion button is offered')
+    assert.ok(!buttonByText(panel, '配置验证命令'), 'the generic configure is not shown when a suggestion exists')
+
+    // The button carries the ready-to-run iterate_config write instruction in
+    // its title, so a single click can paste a validated payload.
+    const title = buttonByText(panel, '应用建议')?.getAttribute('title') ?? ''
+    assert.match(title, /iterate_config/)
+    assert.match(title, /"operation": "write"/)
+    assert.match(title, /"npm test"/)
+    assert.match(title, /"npm run lint"/)
+  })
+
+  it('still offers the generic configure action when no suggestion was detected', () => {
+    const session = {
+      toolCalls: [
+        {
+          tool: 'iterate_preflight',
+          result: {
+            ok: true,
+            ready: false,
+            blocking: 1,
+            warnings: 0,
+            checks: [{ id: 'validation', status: 'fail', detail: { commandCount: 0 } }],
+          },
+        },
+      ],
+      transcript: transcriptFixture(),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '开跑预检'))
+    assert.ok(buttonByText(panel, '配置验证命令'), 'generic configure is offered when nothing was detected')
+    assert.ok(!buttonByText(panel, '应用建议'), 'no apply-suggestion when the manifest has nothing to detect')
+  })
+})

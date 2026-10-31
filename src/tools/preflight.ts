@@ -25,6 +25,7 @@ import { readCheckpoint, computeStatus } from './checkpoint.ts'
 import { readDecisionEntries } from './decision-log.ts'
 import { readRegistry } from './fix.ts'
 import { resultHeadline } from './present.ts'
+import { detectValidationCommands } from '../validation-detect.ts'
 
 /** A single check's outcome. `fail` blocks a clean run; `warn` is advisory. */
 export type PreflightStatus = 'pass' | 'warn' | 'fail'
@@ -65,6 +66,12 @@ export interface PreflightInput {
   interrupted: boolean
   /** How many times the leftover checkpoint has already been resumed. */
   resumeCount: number
+  /** Commands auto-detected from the project manifest (only when none are configured). */
+  suggestedCommands?: string[]
+  /** Ecosystem that produced the suggestions (node/python/rust/go/make). */
+  ecosystem?: string | null
+  /** Manifest files the suggestions were derived from. */
+  detectedFrom?: string[]
 }
 
 /**
@@ -88,11 +95,23 @@ export interface PreflightInput {
  *                                progressed; `warn` + resume or clear.
  */
 export function buildPreflightReport(input: PreflightInput): PreflightReport {
+  const suggestions = Array.isArray(input.suggestedCommands) ? input.suggestedCommands.filter((c) => typeof c === 'string' && c.length > 0) : []
   const checks: PreflightCheck[] = [
     {
       id: 'validation',
       status: input.validationCommandCount > 0 ? 'pass' : 'fail',
-      detail: { commandCount: input.validationCommandCount },
+      detail: {
+        commandCount: input.validationCommandCount,
+        // Only meaningful when the blocking case is hit; the client turns these
+        // into a one-click "apply detected commands" action.
+        ...(input.validationCommandCount === 0 && suggestions.length > 0
+          ? {
+              suggestedCommands: suggestions,
+              ecosystem: input.ecosystem ?? null,
+              detectedFrom: Array.isArray(input.detectedFrom) ? input.detectedFrom : [],
+            }
+          : {}),
+      },
     },
     {
       id: 'git',
@@ -126,9 +145,17 @@ function describeCheck(id: string, detail: Record<string, unknown>): string {
   switch (id) {
     case 'validation': {
       const n = Number(detail.commandCount ?? 0)
-      return n > 0
-        ? `${n} validation command(s) configured`
-        : 'no validation.commands configured — the run cannot prove fixes (blocking)'
+      if (n > 0) return `${n} validation command(s) configured`
+      const suggested = Array.isArray(detail.suggestedCommands)
+        ? detail.suggestedCommands.map((c) => String(c))
+        : []
+      if (suggested.length > 0) {
+        return (
+          'no validation.commands configured — the run cannot prove fixes (blocking); ' +
+          `detected ${String(detail.ecosystem ?? 'project')} commands: ${suggested.join(', ')}`
+        )
+      }
+      return 'no validation.commands configured — the run cannot prove fixes (blocking)'
     }
     case 'git':
       return detail.isRepo === true
@@ -229,6 +256,24 @@ export function registerPreflightTool(ctx: { tools: { register: (def: ReturnType
           validationCommandCount = 0
         }
 
+        // 1b. When nothing is configured, inspect the project manifest so the
+        //     blocking check ships with an actionable, ready-to-apply set.
+        let suggestedCommands: string[] = []
+        let detectedEcosystem: string | null = null
+        let detectedFrom: string[] = []
+        if (validationCommandCount === 0) {
+          try {
+            const detection = detectValidationCommands(projectRoot)
+            suggestedCommands = detection.commands
+            detectedEcosystem = detection.ecosystem
+            detectedFrom = detection.sources.map((s) => s.file)
+          } catch {
+            suggestedCommands = []
+            detectedEcosystem = null
+            detectedFrom = []
+          }
+        }
+
         // 2/3. git repo + dirty tree (best-effort; any failure degrades to unknown).
         let isGitRepo = false
         let changedFiles: number | null = null
@@ -281,6 +326,9 @@ export function registerPreflightTool(ctx: { tools: { register: (def: ReturnType
           gateOverallStatus,
           interrupted,
           resumeCount,
+          suggestedCommands,
+          ecosystem: detectedEcosystem,
+          detectedFrom,
         })
         return { ...report, checks: report.checks as unknown as JsonValue }
       },

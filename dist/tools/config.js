@@ -1,9 +1,10 @@
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { defaultConfig, loadEffectiveConfig, validateConfig, resolveProjectRootForExec } from "../config-loader.js";
+import { defaultConfig, loadEffectiveConfig, validateConfig, resolveProjectRootForExec, flattenCommands } from "../config-loader.js";
 import { applyConfigUpdates, readRawConfig, validateConfigUpdates, writeConfigFile, } from "../config-write.js";
 import { withProjectLock } from "../file-lock.js";
+import { buildValidationUpdates, detectValidationCommands } from "../validation-detect.js";
 /**
  * Register the `iterate_config` tool.
  * Reads and returns the iterate.config.yaml configuration, or writes a
@@ -13,16 +14,24 @@ import { withProjectLock } from "../file-lock.js";
 export function registerConfigTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_config',
-        // `read` never writes; `write` persists a config update → only read
-        // joins a parallel dispatch group.
-        isConcurrencySafe: (args) => args.operation !== 'write',
+        // `read` never writes; `write` persists a config update. `detect` is a
+        // read UNLESS it is asked to apply the detected commands.
+        isConcurrencySafe: (args) => {
+            const a = args;
+            return a.operation !== 'write' && !(a.operation === 'detect' && a.apply === true);
+        },
         // Pending-call card: a config read vs a validated write.
         presentCall: (args) => {
             const a = args;
-            const isWrite = a.operation === 'write';
+            const isWrite = a.operation === 'write' || (a.operation === 'detect' && a.apply === true);
+            const title = isWrite
+                ? 'Update iterate.config.yaml'
+                : a.operation === 'detect'
+                    ? 'Detect validation commands'
+                    : 'Read iterate.config.yaml';
             return {
                 card: 'generic',
-                title: isWrite ? 'Update iterate.config.yaml' : 'Read iterate.config.yaml',
+                title,
                 kind: isWrite ? 'edit' : 'read',
                 ...(typeof a.section === 'string' && a.section ? { rawInput: { section: a.section } } : {}),
             };
@@ -30,12 +39,15 @@ export function registerConfigTool(ctx) {
         description: 'Read or update the iterate.config.yaml configuration from the project root. ' +
             'Returns the full parsed config, a specific section, or validation errors. ' +
             'Use this to discover available dimensions, validation commands, git settings, and personalization rules, ' +
-            'or to write back validated changes (goal, dimensions, max_rounds, review, atomic, validation, git, etc.).',
+            'or to write back validated changes (goal, dimensions, max_rounds, review, atomic, validation, git, etc.). ' +
+            'operation "detect" inspects the project manifest (package.json scripts / pytest / Cargo / Go / Make) and ' +
+            'proposes a ready-to-apply validation.commands set; pass apply:true to install it in one call.',
         parameters: {
             operation: {
                 type: 'string',
-                description: 'Default "read". "write" validates and applies a partial config update (backed up first).',
-                enum: ['read', 'write'],
+                description: 'Default "read". "write" validates and applies a partial config update (backed up first). ' +
+                    '"detect" proposes validation commands from the project manifest.',
+                enum: ['read', 'write', 'detect'],
             },
             path: {
                 type: 'string',
@@ -48,6 +60,15 @@ export function registerConfigTool(ctx) {
             validate: {
                 type: 'boolean',
                 description: 'If true, validate the config schema and return any missing fields.',
+            },
+            apply: {
+                type: 'boolean',
+                description: 'For operation "detect": when true, install the detected commands under validation.commands.default ' +
+                    '(refused if commands are already configured unless force:true).',
+            },
+            force: {
+                type: 'boolean',
+                description: 'For operation "detect" with apply:true: replace an existing default command set.',
             },
             updates: {
                 type: 'json',
@@ -70,6 +91,11 @@ export function registerConfigTool(ctx) {
                     availableSections: { type: 'array', items: { type: 'string' } },
                     operation: { type: 'string' },
                     ok: { type: 'boolean' },
+                    applied: { type: 'boolean' },
+                    ecosystem: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                    commands: { type: 'array', items: { type: 'string' } },
+                    sources: { type: 'json' },
+                    updates: { type: 'json' },
                     backupPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
                     error: { type: 'string' },
                 },
@@ -84,6 +110,80 @@ export function registerConfigTool(ctx) {
                 return { found: false, error: resolved.reason };
             }
             const projectRoot = resolved.root;
+            // ── Detect operation (validation-command auto-detection) ───────────
+            // Reads the project manifest and proposes a curated command set. With
+            // apply:true it installs the set under validation.commands.default in
+            // the same validated, backed-up, locked write path as operation:write.
+            if (args.operation === 'detect') {
+                const configPath = join(projectRoot, 'iterate.config.yaml');
+                const configExists = existsSync(configPath);
+                const detection = detectValidationCommands(projectRoot);
+                const updates = buildValidationUpdates(detection.commands);
+                const base = {
+                    operation: 'detect',
+                    found: configExists,
+                    ecosystem: detection.ecosystem,
+                    commands: detection.commands,
+                    sources: detection.sources,
+                    updates: updates,
+                };
+                if (detection.commands.length === 0) {
+                    return {
+                        ...base,
+                        ok: false,
+                        applied: false,
+                        error: 'no validation commands detected — the project does not advertise a test/typecheck/lint/build ' +
+                            'command; configure validation.commands manually',
+                    };
+                }
+                if (args.apply !== true) {
+                    return { ...base, ok: true, applied: false };
+                }
+                // Refuse to silently clobber a hand-tuned command set.
+                const current = loadEffectiveConfig(projectRoot).config;
+                const existing = flattenCommands(current.validation?.commands);
+                if (existing.length > 0 && args.force !== true) {
+                    return {
+                        ...base,
+                        ok: false,
+                        applied: false,
+                        error: `validation.commands already has ${existing.length} command(s); ` +
+                            'pass force:true to replace the "default" module',
+                    };
+                }
+                return withProjectLock(projectRoot, 'config-write', () => {
+                    let cfgBase;
+                    try {
+                        cfgBase = configExists
+                            ? readRawConfig(configPath)
+                            : defaultConfig();
+                    }
+                    catch (err) {
+                        return { ...base, ok: false, applied: false, error: `failed to read config: ${String(err)}` };
+                    }
+                    const merged = applyConfigUpdates(cfgBase, updates);
+                    const schemaErrors = validateConfig(merged);
+                    if (schemaErrors.length > 0) {
+                        return {
+                            ...base,
+                            ok: false,
+                            applied: false,
+                            errors: schemaErrors.map((e) => `missing/required field: ${e}`),
+                        };
+                    }
+                    const result = writeConfigFile(projectRoot, merged);
+                    if (!result.ok)
+                        return { ...base, ok: false, applied: false, error: result.error };
+                    const { config } = loadEffectiveConfig(projectRoot);
+                    return {
+                        ...base,
+                        ok: true,
+                        applied: true,
+                        backupPath: result.backupPath ?? null,
+                        config: config,
+                    };
+                });
+            }
             // ── Write operation ────────────────────────────────────────────────
             if (args.operation === 'write') {
                 const updates = args.updates;
