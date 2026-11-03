@@ -114,6 +114,7 @@ Both modes share:
 - **ProgressCapsule** (`shell.overlay`) — popup notification on each round completion / convergence (incl. convergence confirm).
 - **SettingsPanel** (`settings.section`) — theme toggle, triage-persistence notes, config-management guide (covers `validation.commands` / `language` / `personalization.known_intentional` with an explicit "empty validation.commands = unprotected" warning; a field picker generates the matching `iterate_config write` instruction), **v3.7: a 回读当前配置 (read back current config) button that closes the write → read-back loop** — it copies an `iterate_config read` instruction and, once the model echoes the result into the session, shows the current value of the selected field, runtime status overview (artifact layout + view/cleanup tool guide + disk-snapshot pull), one-click triage data reset.
 - **Bilingual UI (v3.7)** — every piece of UI chrome (panels, empty states, tabs, badges, settings, stop-reason and completion labels) ships in 简体中文 and English. Pick the language under **Settings → 界面语言 / Interface language**; the choice persists in `localStorage` (`iterate-ui-lang`) and otherwise auto-detects from `navigator.language` (a stored choice always wins, and auto-detection never writes a preference). **Model-facing copy deliberately stays Chinese** — the `build*Instruction` payloads and the copy-paste guides are contract text mirroring `SKILL.md`, so the two expanded guides carry a 「中文（粘贴给模型的契约文案）」 chip instead of looking like a missed translation.
+- **Right-click menu (v3.14, dsh ≥ 0.2.2-alpha.3)** — the iterate entry points now also hang off the **native unified context menus**: right-click a **Session** in the sidebar to `打开 iterate 质量指挥中心` (expands the docked observatory and jumps to the live stream), copy the preflight / dry-run / checkpoint-resume / disk-snapshot instructions, or right-click a **file** (with line) / **directory** to copy a *scoped* dry-run review instruction. Bilingual labels, copy-failure recovery guidance, and a shared success toast; a host without `contextMenus` degrades to no menu items (the docked panel remains the entry point).
 
 The UI layer is **defensive by design**: it degrades gracefully if any of `slots` / `theme` / `React` is unavailable — it never crashes the client.
 
@@ -346,14 +347,13 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   `0.1.7-alpha.1`, `0.1.7-alpha.2`, `0.1.7-rc.1`, `0.1.7-rc.2`, `0.2.0-rc.1`,
   `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`,
   `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2`,
-   `0.2.1-rc.3`, `0.2.1-rc.4`, `0.2.1-rc.5`, `0.2.2-alpha.2` (28 releases,
-  `0.1.1-rc.1` …
-  `0.2.2-alpha.2`).
+   `0.2.1-rc.3`, `0.2.1-rc.4`, `0.2.1-rc.5`, `0.2.2-alpha.2`,
+  `0.2.2-alpha.3` (29 releases, `0.1.1-rc.1` … `0.2.2-alpha.3`).
   The plugin is built against `@deepseek-ai/dsh-tools` /
-  `@deepseek-ai/dsh-util-values` `0.2.2-alpha.2` and uses only public contracts
+  `@deepseek-ai/dsh-util-values` `0.2.2-alpha.3` and uses only public contracts
   (tool registration, client slots + theme, bundle patch, and — since v3.9 —
   the session state-record API for session-linked run records).
-  It also declares `engines.dsh` (`>=0.1.1-rc.1`) so the dsh ≥ 0.2.2-alpha.2
+  It also declares `engines.dsh` (`>=0.1.1-rc.1`) so the dsh ≥ 0.2.2-alpha.3
   runtime evaluates compatibility from that single range (earlier runtimes fall
   back to the `@deepseek-ai/dsh-*` peer versions listed in `package.json`).
 - **Disposable-Profile evidence (real, `dsh` CLI `0.1.1-rc.1`)**: on a temp

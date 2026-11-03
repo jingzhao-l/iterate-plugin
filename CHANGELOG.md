@@ -5,6 +5,58 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.14.0] - 2026-11-03
+
+右键菜单集成（Right-click menu integration）。把 dsh 0.2.2-alpha.3 的**统一右键
+菜单**新能力转成插件的**新交互面**：iterate 的入口此前只有停靠在 composer 上的观测台
+和空态 CTA，用户必须找到面板才能开始；现在任意会话 / 文件 / 目录上右键即可打开
+质量指挥中心、复制预检 / dry-run / 断点恢复 / 拉取快照指令，或发起「仅审查此文件 /
+目录」的定向 dry-run。按语义化版本是一次 minor（净新增用户可感知功能）。
+
+### Added
+
+- **右键菜单贡献（dsh 0.2.2-alpha.3 `contextMenus` 服务）** —— 在 **Session** 上提供
+  5 项操作：`打开 iterate 质量指挥中心`（展开观测台并切到实时流）、`复制开跑预检指令`、
+  `复制 dry-run 审查指令`、`复制断点恢复指令`、`复制拉取磁盘快照指令`（后四项直接复用
+  观测台同一套指令构建器，保证两条路径永不漂移）；在 **File** 上提供 `仅审查此文件`
+  （携带行号的定向 dry-run）与`打开指挥中心`；在 **Directory** 上提供 `仅审查此目录`、
+  `复制开跑预检指令`、`打开指挥中心`。所有操作双语（zh/en）标签，失败时给出可执行的
+  复制失败指引（剪贴板被拒时提示改用观测台复制按钮），成功时通过共享 toast 反馈。
+- **观测台 open-event 桥** —— 「打开指挥中心」通过 window 自定义事件
+  （`iterate-plugin:open-observatory`）通知对应观测台面板：面板携带 `sessionId` 时
+  只响应匹配会话的事件（右键侧边栏的某个会话不会误开另一个会话的面板），无 `sessionId`
+  时按单面板回退响应；目标页签可指定（`live`/`f11` 等），非法页签回退 `live`。
+- **`buildScopedReviewInstruction`（新指令构建器，lib/parse.js）** —— 「仅审查此文件 /
+  目录」的 dry-run 指令：`iterate_review plan` 没有逐次 `scope` 参数，因此用自然语言
+  指令把审查范围限定到被右键的路径（含可选行号），其余文件仅作上下文、不得给出修复；
+  空范围防御性返回空串，绝不产出半截指令。
+- **`src/client/context-menu.ts`（新客户端模块）** —— 纯构建器（可单测，无 DOM/剪贴板
+  副作用）+ 命令式接线（`copy`/`openPanel`/`notify` 注入）。服务缺失的宿主（早于
+  0.2.2-alpha.3）优雅降级为「无菜单项」，观测台仍是入口；重复贡献 id / 不支持的 target
+  家族只记录并继续，绝不拖垮插件。
+
+### Changed
+
+- 上游 dsh 新版本 `dsh-v0.2.2-alpha.3`（2026-11-03 发布）→ 声明 `compatible`：
+  `dshReleases` 28 → 29；三个 dsh peer 范围加 `|| 0.2.2-alpha.3`；`@deepseek-ai/cordis`
+  peer 扩为 `^4.0.5-alpha.2 || ~4.0.6-alpha.1 || ~4.0.6-alpha.2`；devDeps 全部
+  `@deepseek-ai/*` 钉到 `0.2.2-alpha.3`、`cordis` 到 `4.0.6-alpha.2`。alpha.3 含
+  **插件面新能力**（统一右键菜单 `contextMenus`、设置页导航图标、SDK 原生命令等）与
+  Cordis Core 同步；本插件仅新消费 `contextMenus`（见 Added），其余改动（`tools.resolve`
+  迁移等）未触碰任何被迁移接口。工具总数仍 19；观测台仍 12 页签。
+
+### Tests
+
+- `test/context-menu.test.ts` 新增（纯构建器 zh/en、断点禁用、file/dir 指令键、
+  注册三大 target、复制成功/失败、open-panel 通知、unregister 恰好一次、注册抛错
+  不拖垮、open-observatory 事件派发与无 window 降级）。
+- `test/parse.test.ts` 新增 `buildScopedReviewInstruction` 5 例（file+行号、dir、空
+  范围、file 优先、非正行号省略）。
+- `test/client-render.test.ts` 新增观测台 open-event 3 例（匹配会话展开并切页签、
+  异会话忽略、无 sessionId 单面板回退）。
+- `npm run typecheck` 0 错误；`npm test` **1391 passed / 0 failed**（此前 1374，+17）；
+  `npm run build:client` 干净，`lib/client.js` 与 `src/` 齐步（`package-contract` 强制）。
+
 ## [3.13.0] - 2026-10-31
 
 验证命令自动检测（Validation-command auto-detection）。开跑预检的阻断项此前只能手写

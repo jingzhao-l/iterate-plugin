@@ -74,6 +74,7 @@ import {
   START_INSTRUCTION_FULL,
   START_INSTRUCTION_REVIEW_ONLY,
   START_INSTRUCTIONS,
+  buildScopedReviewInstruction,
   dashboardRunState,
   buildRoundComparison,
   serializeObservatoryExport as serializeExportWithExtras,
@@ -2216,6 +2217,44 @@ describe('startup instructions (gap #1)', () => {
     // read; it must surface the zero-verification hazard (gap #2's client half).
     assert.match(START_INSTRUCTION_FULL, /validation\.commands/)
     assert.match(START_INSTRUCTION_FULL, /iterate_config/)
+  })
+})
+
+// ─── v3.14 scoped dry-run review (right-click menu) ─────────────────────────
+
+describe('buildScopedReviewInstruction (v3.14)', () => {
+  it('narrows a dry-run to one file and names the line when given', () => {
+    const text = buildScopedReviewInstruction({ file: 'src/app.ts', line: 42 })
+    assert.match(text, /仅评审/)
+    assert.match(text, /dry-run/)
+    assert.match(text, /src\/app\.ts/)
+    assert.match(text, /第 42 行/)
+    assert.match(text, /workflow/)
+    assert.match(text, /不要调用 `iterate_fix`/)
+  })
+
+  it('narrows a dry-run to one directory', () => {
+    const text = buildScopedReviewInstruction({ dir: 'packages/core' })
+    assert.match(text, /packages\/core/)
+    assert.match(text, /目录/)
+    assert.ok(!text.includes('第 '), 'a directory scope has no line clause')
+  })
+
+  it('returns an empty string for an empty scope (never a partial instruction)', () => {
+    assert.equal(buildScopedReviewInstruction({}), '')
+    assert.equal(buildScopedReviewInstruction(undefined as unknown as Record<string, unknown>), '')
+    assert.equal(buildScopedReviewInstruction({ file: '' }), '')
+    assert.equal(buildScopedReviewInstruction({ dir: '' }), '')
+    assert.match(buildScopedReviewInstruction({ file: 'a.ts', dir: 'b' }), /a\.ts/, 'a non-empty file scope wins over a directory scope')
+  })
+
+  it('file wins over directory when both are present', () => {
+    assert.match(buildScopedReviewInstruction({ file: 'a.ts', dir: 'b' }), /a\.ts/)
+  })
+
+  it('a zero / negative line is omitted', () => {
+    assert.ok(!buildScopedReviewInstruction({ file: 'a.ts', line: 0 }).includes('第'))
+    assert.ok(!buildScopedReviewInstruction({ file: 'a.ts', line: -1 }).includes('第'))
   })
 })
 

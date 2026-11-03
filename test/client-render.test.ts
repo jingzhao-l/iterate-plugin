@@ -460,6 +460,39 @@ describe('ObservatoryPanel', () => {
   })
 })
 
+describe('ObservatoryPanel open-event bridge (v3.14)', () => {
+  const dispatchOpen = (detail: Record<string, unknown>) => {
+    const win = (globalThis as Record<string, unknown>).window as unknown as {
+      CustomEvent: new (type: string, init: { detail: unknown }) => unknown
+      dispatchEvent(ev: unknown): boolean
+    }
+    React.act(() => {
+      win.dispatchEvent(new win.CustomEvent('iterate-plugin:open-observatory', { detail }))
+    })
+  }
+
+  it('expands and switches tab when the event targets this session', () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { sessionId: 's1', transcript: transcriptFixture() } })
+    assert.doesNotMatch(panel.textContent ?? '', /F10/, 'collapsed before the event')
+    dispatchOpen({ sessionId: 's1', tab: 'f8' })
+    assert.ok(panel.querySelector('[role="tablist"]'), 'tab strip appears after the open event')
+    assert.match(panel.textContent ?? '', /质量门禁/, 'requested tab is active')
+  })
+
+  it('ignores the event when it targets a different session', () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { sessionId: 's1', transcript: transcriptFixture() } })
+    dispatchOpen({ sessionId: 's2', tab: 'f8' })
+    assert.doesNotMatch(panel.textContent ?? '', /F10/, 'a different session id does not open this panel')
+  })
+
+  it('opens the panel for an event with no session id (single-panel fallback)', () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: transcriptFixture() } })
+    dispatchOpen({ tab: 'f9' })
+    assert.ok(panel.querySelector('[role="tablist"]'), 'no session id opens the mounted panel')
+    assert.match(panel.textContent ?? '', /经验银行/)
+  })
+})
+
 describe('SettingsPanel', () => {
   it('renders every settings card', () => {
     const html = mountSlot(boot(), 'iterate-settings', {}).textContent ?? ''

@@ -78,6 +78,7 @@ import {
   scanSessionForPreflight,
   buildPreflightInstruction,
   buildValidationApplyInstruction,
+  buildScopedReviewInstruction,
   filterLiveEntries,
   filterTimelineEntries,
   serializeObservatoryExport,
@@ -132,6 +133,14 @@ import {
   type Lang,
 } from './i18n.ts'
 import { noteSession, readSession, subscribeSession } from './session-cache.ts'
+// v3.14: right-click menu contributions (dsh 0.2.2-alpha.3 unified context menus).
+import {
+  openObservatory,
+  OBS_OPEN_EVENT,
+  registerIterateContextMenus,
+  type ContextMenusService,
+  type ObsOpenDetail,
+} from './context-menu.ts'
 
 // ─── Module contract ─────────────────────────────────────────────────────────
 
@@ -907,6 +916,47 @@ function readTheme(ctx: ClientContext): ThemeService | undefined {
   return undefined
 }
 
+/**
+ * Resolve the dsh 0.2.2-alpha.3 `contextMenus` service. Unlike slots/theme it
+ * is NOT in the typed `ClientContext`, so it is probed through `ctx.get` (the
+ * cordis service locator) and structurally validated. A host that predates the
+ * capability returns `undefined` and the plugin simply has no menu entries.
+ */
+function readContextMenus(ctx: ClientContext): ContextMenusService | undefined {
+  if (!ctx || typeof ctx.get !== 'function') return undefined
+  const raw = ctx.get('contextMenus', false)
+  if (!raw || typeof raw !== 'object') return undefined
+  const svc = raw as { register?: unknown; notify?: unknown }
+  if (typeof svc.register !== 'function') return undefined
+  if (typeof svc.notify !== 'function') return undefined
+  return svc as unknown as ContextMenusService
+}
+
+/**
+ * Extract a session identifier from an opaque host-shaped session object.
+ * The slot `props.session` shape is host-defined; this probes the common
+ * keys so the observatory open-event can target the right session and be
+ * ignored by every other mounted panel. Returns `null` when unknown (the
+ * panel then responds to any open event — the single-panel fallback).
+ */
+function sessionIdOfSession(session: unknown): string | null {
+  if (!session || typeof session !== 'object') return null
+  const s = session as Record<string, unknown>
+  const candidates = [
+    s.sessionId, s.id, s.header, s.session,
+  ] as unknown[]
+  for (const c of candidates) {
+    if (typeof c === 'string' && c) return c
+    if (c && typeof c === 'object') {
+      const o = c as Record<string, unknown>
+      for (const k of ['sessionId', 'id']) {
+        if (typeof o[k] === 'string' && o[k]) return o[k] as string
+      }
+    }
+  }
+  return null
+}
+
 // ─── Module-level runtime state (shared across slots) ────────────────────────
 
 let slotsSvc: SlotsService | undefined = undefined
@@ -915,6 +965,8 @@ let storage: ReturnType<typeof createStorage> | null = null
 let themeDisposer: (() => void) | null = null
 let themeListener: (() => void) | null = null
 let themeEnabled = true
+/** v3.14: right-click menu contribution disposer (re-apply() never stacks). */
+let menuDisposer: (() => void) | null = null
 const roundPulseListeners: Array<(payload: { round: number; converged: boolean }) => void> = []
 
 /**
@@ -2392,6 +2444,28 @@ function ObservatoryPanel(props: SlotProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
+  // v3.14: the right-click "open command center" menu action dispatches a
+  // window event; this panel expands and switches tab when the event targets
+  // it (no sessionId = single-panel fallback, a different sessionId = ignore).
+  const panelSessionId = sessionIdOfSession(session)
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+    const onOpen = (ev: Event) => {
+      const detail = (ev as CustomEvent<ObsOpenDetail>).detail
+      const detailSession = detail && typeof detail.sessionId === 'string' && detail.sessionId
+        ? detail.sessionId
+        : null
+      if (detailSession && panelSessionId && detailSession !== panelSessionId) return
+      setOpen(true)
+      const target = detail && typeof detail.tab === 'string' ? detail.tab : 'live'
+      const valid = OBS_TABS.some((x) => x.key === target)
+      setTab(valid ? target : 'live')
+    }
+    window.addEventListener(OBS_OPEN_EVENT, onOpen)
+    return () => window.removeEventListener(OBS_OPEN_EVENT, onOpen)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelSessionId])
+
   /** Copy an instruction, flashing "已复制" on the originating button only when the copy actually succeeded. */
   const copyInstruction = (key: string, text: string) => {
     if (!text) return
@@ -3865,6 +3939,49 @@ export function apply(ctx: ClientContext): void {
         (props) => React.createElement(LangSettings, props),
       ),
     )
+  }
+
+  // 5b. v3.14: right-click menu contributions (dsh 0.2.2-alpha.3 unified
+  // context menus). Optional service: a host that predates the capability has
+  // no menu entries, and the docked observatory stays the entry point.
+  {
+    const menuSvc = readContextMenus(ctx)
+    if (menuSvc) {
+      // Resolve a paste-able instruction for a menu action id. Session-level
+      // ids map to the shared builders (the SAME single source of truth the
+      // observatory copy buttons use); file:/dir: ids are the scoped review.
+      const instructionByEntry = (id: string): string => {
+        if (id === 'iterate.preflight') return buildPreflightInstruction()
+        if (id === 'iterate.dry-run') return START_INSTRUCTIONS.reviewOnly
+        if (id === 'iterate.resume') return buildCheckpointResumeInstruction()
+        if (id === 'iterate.pull') return buildDiskSnapshotInstruction()
+        if (id.startsWith('file:')) {
+          const rest = id.slice('file:'.length)
+          const colon = rest.lastIndexOf(':')
+          const path = colon > 0 ? rest.slice(0, colon) : rest
+          const line = colon > 0 ? Number(rest.slice(colon + 1)) : undefined
+          return buildScopedReviewInstruction({ file: path, ...(Number.isInteger(line) && line! > 0 ? { line: line! } : {}) })
+        }
+        if (id.startsWith('dir:')) return buildScopedReviewInstruction({ dir: id.slice('dir:'.length) })
+        return ''
+      }
+      if (menuDisposer) {
+        try { menuDisposer() } catch { /* noop */ }
+        menuDisposer = null
+      }
+      menuDisposer = registerIterateContextMenus(
+        menuSvc,
+        {
+          copy: (text) => copyText(text),
+          openPanel: (detail) => { openObservatory(detail) },
+          notify: (text, success, action) => { menuSvc.notify(text, success, action) },
+        },
+        instructionByEntry,
+      )
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(() => { if (menuDisposer) { menuDisposer(); menuDisposer = null } })
+      }
+    }
   }
 
   // 6: keep theme toggle state consistent across theme/change events.
