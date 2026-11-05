@@ -40,6 +40,7 @@
  */
 
 import { getLang, type Lang } from './i18n.ts'
+import { OBSERVATORY_SHORTCUT_ID } from './shortcuts.ts'
 
 // ─── Structural service types (defensive; mirrors SlotsService) ──────────────
 //
@@ -63,6 +64,8 @@ export interface IterateMenuAction {
   separatorBefore?: boolean
   /** Localized operation + recovery guidance when `run` rejects. */
   failureLabel?: string
+  /** Live-shortcut display for an action backed by a registered command. */
+  commandId?: string
   run?: () => void | Promise<void>
 }
 
@@ -168,7 +171,7 @@ export function buildSessionMenuEntries(lang: Lang, opts?: { hasCheckpoint?: boo
 export function buildFileMenuEntries(lang: Lang): MenuEntry[] {
   return [
     { id: 'iterate.review-file', label: pick('iterate.review-file', lang) },
-    { id: 'iterate.open-panel', label: pick('iterate.open-panel', lang) },
+    { id: 'iterate.open-panel', label: pick('iterate.open-panel', lang), openTab: 'live' },
   ]
 }
 
@@ -177,7 +180,7 @@ export function buildDirectoryMenuEntries(lang: Lang): MenuEntry[] {
   return [
     { id: 'iterate.review-dir', label: pick('iterate.review-dir', lang) },
     { id: 'iterate.preflight', label: pick('iterate.preflight', lang), separatorBefore: true },
-    { id: 'iterate.open-panel', label: pick('iterate.open-panel', lang) },
+    { id: 'iterate.open-panel', label: pick('iterate.open-panel', lang), openTab: 'live' },
   ]
 }
 
@@ -203,6 +206,12 @@ function toAction(entry: MenuEntry, deps: IterateMenuDeps, lang: Lang): IterateM
   }
   if (entry.disabled) action.disabled = true
   if (entry.openTab) {
+    // The "open command center" action is backed by the registered
+    // `iterate.open-observatory` keyboard command, so the context menu shows
+    // its live keycap (Cmd/Ctrl+Shift+O) — the shortcut is discoverable in the
+    // same place the user would look for it. Display only: selection still
+    // runs this action's `run`.
+    action.commandId = OBSERVATORY_SHORTCUT_ID
     action.run = () => {
       deps.openPanel({ tab: entry.openTab })
       deps.notify(lang === 'zh' ? '已打开 iterate 观测台。' : 'Iterate observatory opened.', true)

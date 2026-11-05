@@ -151,6 +151,19 @@ describe('context-menu registration', () => {
     assert.ok(dirActions.find((a) => a.id === 'iterate.review-dir'))
   })
 
+  it('file/directory "open command center" actions actually open the panel (regression: no-op)', async () => {
+    const menu = fakeMenu()
+    const fake = fakeDeps(true)
+    registerIterateContextMenus(menu, fake.deps, () => '')
+    for (const [i, target] of [[1, 'file'], [2, 'directory']] as const) {
+      const actions = menu.contributions[i]!.resolve({ value: { sessionId: 's1', path: 'src' } }, new AbortController().signal)
+      const open = actions.find((a) => a.id === 'iterate.open-panel')
+      assert.ok(open?.run, `${target} open-panel action must have a run callback (was a no-op in 3.14.0)`)
+      await open!.run!()
+      assert.equal(fake.opened.at(-1)?.tab, 'live', `${target} open-panel must target the live tab`)
+    }
+  })
+
   it('unregister disposes every contribution exactly once and tolerates a throwing register', () => {
     const menu = fakeMenu()
     // Force the session registration to fail: the service must survive and

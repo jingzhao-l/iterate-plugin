@@ -24,7 +24,7 @@
  *   4. iterate theme skin      -> theme.overrideTokens
  *   5. Progress event linkage  -> ctx.on('slots/changed') + round-pulse + shell.overlay capsule
  *   6. Settings page section   -> settings.section
- *   7. Runtime observatory     -> conversation.input.dock (order 91, F1–F7 board)
+ *   7. Runtime observatory     -> conversation.input.dock (order 91, F1–F11 board)
  *
  * Design notes:
  *   - All styles are injected via one <style> tag; colors use dsh token
@@ -141,6 +141,11 @@ import {
   type ContextMenusService,
   type ObsOpenDetail,
 } from './context-menu.ts'
+// v3.15: keyboard-command contribution (dsh 0.2.2-rc.1 unified shortcuts).
+import {
+  registerIterateShortcuts,
+  type ShortcutsService,
+} from './shortcuts.ts'
 
 // ─── Module contract ─────────────────────────────────────────────────────────
 
@@ -933,6 +938,21 @@ function readContextMenus(ctx: ClientContext): ContextMenusService | undefined {
 }
 
 /**
+ * Resolve the dsh 0.2.2-rc.1 `shortcuts` service. Like contextMenus it is NOT
+ * in the typed `ClientContext`, so it is probed through `ctx.get` and
+ * structurally validated. A host that predates the capability returns
+ * `undefined` and the plugin simply has no keyboard command.
+ */
+function readShortcuts(ctx: ClientContext): ShortcutsService | undefined {
+  if (!ctx || typeof ctx.get !== 'function') return undefined
+  const raw = ctx.get('shortcuts', false)
+  if (!raw || typeof raw !== 'object') return undefined
+  const svc = raw as { register?: unknown }
+  if (typeof svc.register !== 'function') return undefined
+  return svc as unknown as ShortcutsService
+}
+
+/**
  * Extract a session identifier from an opaque host-shaped session object.
  * The slot `props.session` shape is host-defined; this probes the common
  * keys so the observatory open-event can target the right session and be
@@ -967,6 +987,8 @@ let themeListener: (() => void) | null = null
 let themeEnabled = true
 /** v3.14: right-click menu contribution disposer (re-apply() never stacks). */
 let menuDisposer: (() => void) | null = null
+/** v3.15: keyboard-command contribution disposer (re-apply() never stacks). */
+let shortcutDisposer: (() => void) | null = null
 const roundPulseListeners: Array<(payload: { round: number; converged: boolean }) => void> = []
 
 /**
@@ -2232,7 +2254,7 @@ function SettingsPanel(props: SlotProps) {
   )
 }
 
-// ─── Runtime observatory panel (F1–F7) ──────────────────────────────────────
+// ─── Runtime observatory panel (F1–F11) ─────────────────────────────────────
 
 /** Tab id → label for the observatory's eleven panels. Live (real-time
  *  activity stream) is first so it is the default view; F-panels follow.
@@ -2359,7 +2381,7 @@ function buildObsFixInstruction(f: ObsFinding): string {
 }
 
 /**
- * ObservatoryPanel: an 8-tab runtime observatory that renders the latest
+ * ObservatoryPanel: a 12-tab runtime observatory that renders the latest
  * iterate_transcript manifest found in the dsh session stream. The panel is
  * collapsed by default to a single entry row so it never re-occludes the main
  * convergence dashboard; clicking expands it into tabs. Every field read is
@@ -3907,7 +3929,7 @@ export function apply(ctx: ClientContext): void {
       ),
     )
 
-    // F1–F7: runtime observatory board (order 91, below the dashboard's 90 so
+    // F1–F11: runtime observatory board (order 91, below the dashboard's 90 so
     // its collapsed header never occludes the main convergence dashboard).
     slotsSvc.inject('conversation.input.dock', () =>
       slotsSvc?.register(
@@ -3980,6 +4002,26 @@ export function apply(ctx: ClientContext): void {
       )
       if (typeof ctx.effect === 'function') {
         ctx.effect(() => { if (menuDisposer) { menuDisposer(); menuDisposer = null } })
+      }
+    }
+  }
+
+  // 5c. v3.15: keyboard-command contribution (dsh 0.2.2-rc.1 unified
+  // shortcuts). Optional service: a host that predates the capability has no
+  // keyboard command, and the docked observatory stays the entry point.
+  {
+    const shortcutSvc = readShortcuts(ctx)
+    if (shortcutSvc) {
+      if (shortcutDisposer) {
+        try { shortcutDisposer() } catch { /* noop */ }
+        shortcutDisposer = null
+      }
+      shortcutDisposer = registerIterateShortcuts(shortcutSvc, {
+        openObservatory: (detail) => { openObservatory(detail) },
+        lang: () => getLang(),
+      })
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(() => { if (shortcutDisposer) { shortcutDisposer(); shortcutDisposer = null } })
       }
     }
   }

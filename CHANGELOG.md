@@ -5,6 +5,64 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.15.0] - 2026-11-05
+
+键盘快捷键 + 上游 dsh 0.2.2-rc.1 兼容（Keyboard shortcut + dsh 0.2.2-rc.1 compatibility）。
+把 dsh 0.2.2-rc.1 的**统一键盘命令**新能力转成插件的**新交互面**：iterate 指挥中心
+此前只能通过停靠观测台、空态 CTA 或右键菜单触达；现在任意会话内按 **Cmd/Ctrl+Shift+O**
+即可打开。同时修复 3.14.0 引入的「文件/目录右键 → 打开指挥中心」菜单项为空操作
+（缺 `openTab`）的回归，并升级到 dsh 0.2.2-rc.1。按语义化版本是一次 minor。
+
+### Added
+
+- **键盘命令贡献（dsh 0.2.2-rc.1 `shortcuts` 服务）** —— 注册
+  `iterate.open-observatory` 命令，默认绑定 **Cmd/Ctrl+Shift+O**（O = Open，
+  六种 runtime/platform 档位一致），任意输入区域（page / editable / terminal）
+  触发，`resolve` 恒返回 `handled` 并调用观测台 open 事件桥。纯构建器
+  `buildObservatoryShortcutCommand`（可单测，无 ctx/DOM 副作用）+ 命令式接线
+  `registerIterateShortcuts`（`openObservatory`/`lang` 注入，disposer 幂等、
+  注册抛错降级为无命令，绝不拖垮插件）。服务缺失的宿主（早于 0.2.2-rc.1）
+  优雅降级为「无键盘命令」，观测台仍是入口。
+- **右键菜单键帽提示（dsh 0.2.2-rc.1 `commandId`）** —— 会话/文件/目录右键的
+  「打开 iterate 质量指挥中心」动作携带同一命令 id `iterate.open-observatory`，
+  因此原生菜单实时显示键帽，dsh 快捷键设置页将其列为可编辑绑定；选择仍执行
+  动作自身的 `run`（显示与执行解耦，与上游契约一致）。
+
+### Fixed
+
+- **3.14.0 回归**：文件/目录右键的「打开指挥中心」因 `MenuEntry` 缺 `openTab`
+  被 `toAction` 判为无指令 → 返回一个**无 `run` 回调**的动作，点击为空操作。
+  现为 file/dir 的 open-panel 条目补 `openTab: 'live'`，点击真正展开观测台并
+  切到实时流（带回归测试）。
+- **依赖安全（Dependabot）**：`npm audit` 由 15 high（`zod <4.6.6` 的
+  GHSA-mrhx-c7xc-m3w5 经 `@deepseek-ai/*` 与 `iterate-kernel` 传递）降至
+  **0 漏洞**。`iterate-kernel` `0.1.9 → 0.1.10`（其 `zod` 升到已修复的
+  `4.6.7`），并加 `overrides: { "zod": "4.6.7" }` 把 `@deepseek-ai/dsh-llm` /
+  `dsh-agent` 钉死的 `4.4.3` 一致覆盖到修复版；typecheck + 全部测试证实
+  v4 patch 级升版无破坏性影响。
+
+### Changed
+
+- 上游 dsh 新版本 `dsh-v0.2.2-rc.1`（2026-11-04 发布）→ 声明 `compatible`：
+  `dshReleases` 29 → 30；三个 dsh peer 范围加 `|| 0.2.2-rc.1`；devDeps 全部
+  `@deepseek-ai/*` 钉到 `0.2.2-rc.1`、`cordis` 到 `4.1.0`。rc.1 含**插件面新能力**
+  （统一键盘命令 `shortcuts`、右键菜单 `commandId` 键帽、Session 事件日志/投影订阅、
+  Session Projection 注册 API 异步化、`tools.resolve` 迁移、Cordis Core 4.1.0 等）。
+  本插件仅新消费 `shortcuts` + `commandId`（见 Added/Fixed）；其余改动（
+  `tools.resolve` 迁移、Session Projection 异步化）未触碰任何被迁移接口——
+  typecheck 全绿、1391 既有测试全过，证实 rc.1 无破坏性影响。
+
+### Tests
+
+- `test/shortcuts.test.ts` 新增（纯构建器 en/zh 标签、六档默认绑定、regions/modals/
+  aliases、resolve→run、不阻塞任意 region、注册恰好一次、disposer 幂等、注册抛错降级、
+  dispose 抛错不传播、菜单 open 动作携带 commandId 的三 target 契约）。
+- `test/context-menu.test.ts` 新增 file/dir open-panel 回归 1 例（点击真正打开并
+  切到 live 页签）。
+- 客户端 stale 注释修正（8-tab→12-tab、F1–F7→F1–F11）。
+- `npm run typecheck` 0 错误；`npm test` **1395 passed / 0 failed**（此前 1391，+4）；
+  `npm run build:client` 干净，`lib/client.js` 与 `src/` 齐步（`package-contract` 强制）。
+
 ## [3.14.0] - 2026-11-03
 
 右键菜单集成（Right-click menu integration）。把 dsh 0.2.2-alpha.3 的**统一右键
