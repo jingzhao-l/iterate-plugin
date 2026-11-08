@@ -5,6 +5,47 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.16.0] - 2026-11-08
+
+跨会话运行对比（Cross-session run comparison）。
+观测台的 **F2 收敛趋势**此前只能对比**同一会话内**的各个轮次；跨两次**迭代**
+（重构前 / 重构后）的对比要靠「导出 JSON」再并排手工对齐两个文件。本次把跨会话
+对比做成**一等交互**：在 F2 把当前运行一键**存为对比基准**（轮次 / 发现 /
+critical+high / 修复成功 / 修复失败 / 验证通过率 / 门禁得分，持久化到
+localStorage），下次运行再一键**与基准对比**，得到逐项并排表 + 带方向的
+「更好 / 更差」着色差值。按语义化版本是一次 minor。
+
+### Added
+
+- **跨会话对比（F2 收敛趋势）** —— 新增「跨会话对比」块：**存为对比基准**
+  （把当前运行摘要写入 localStorage `iterate.run-baseline`，含项目 / 模式 /
+  轮次 / 发现 / 严重发现 / 修复 / 验证 / 门禁 / 停止原因 / 收敛序列）、
+  **与基准对比**（逐指标并排表：基准 | 当前 | 变化，差值按「越高越好 /
+  越低越好」方向着色）、**清除基准**、**收起对比**。空态与禁用态明确
+  （无运行数据时禁用保存；无基准时提示先保存；损坏的存储读作「无基准」而
+  不是幽灵运行）。纯构建器 `buildRunBaseline` / `compareRuns` 与解析器
+  `parseRunBaseline` 独立成 `src/client/run-compare.ts`（无 React / DOM /
+  中文文案依赖，可单测），带版本号 schema，坏载荷安全拒绝而不抛错。
+- **双语标签** —— 新增 `跨会话对比 / 基准 / 当前 / 变化 / 指标`、动作
+  `存为对比基准 / 已存为基准 / 与基准对比 / 收起对比 / 清除基准` 及空态
+  文案的 en 译名；更新 F2 旧的「跨会话对比靠导出 JSON 并排比较」提示为
+  指向新的一键对比路径。
+
+### Changed
+
+- 更新 F2「跨轮对比（本会话）」的副标题文案：跨会话对比不再需要手工导出
+  JSON 并排，改为「用下方「存为对比基准」保存本次运行，再与下一次迭代对比」。
+
+### Tests
+
+- `test/run-compare.test.ts` 新增（纯模块 12 例：buildRunBaseline 聚合 /
+  缺失与畸形输入的 0 与 null / 非对象条目防御 / 通过率取整 / 可选字段省略 /
+  parseRunBaseline 往返与拒绝损坏 / 版本不符 / 非数组收敛 / 缺 savedAt /
+  compareRuns 方向与 null 语义 / 存储键）。
+- `test/client-render.test.ts` 新增 5 例（jsdom 渲染：存基准并持久化到
+  localStorage / 与基准并排对比 / 清除基准与收起对比 / 损坏存储读作无基准）。
+- 全量 `npm test` 1421 通过（较 3.15.0 增 17），`npm run typecheck` 全绿。
+
 ## [3.15.0] - 2026-11-05
 
 键盘快捷键 + 上游 dsh 0.2.2-rc.1 兼容（Keyboard shortcut + dsh 0.2.2-rc.1 compatibility）。

@@ -146,6 +146,17 @@ import {
   registerIterateShortcuts,
   type ShortcutsService,
 } from './shortcuts.ts'
+// v3.16: cross-session run comparison — the F2 tab compares two iterations of
+// the same project (save the current run as a baseline, then compare any later
+// run against it), instead of the old export-two-JSONs-and-diff-by-hand chore.
+import {
+  buildRunBaseline,
+  parseRunBaseline,
+  compareRuns,
+  RUN_BASELINE_STORAGE_KEY,
+  type RunBaseline,
+  type RunCompareMetric,
+} from './run-compare.ts'
 
 // ─── Module contract ─────────────────────────────────────────────────────────
 
@@ -2318,6 +2329,17 @@ const OBS_LIVE_META: Record<string, { label: { zh: string; en: string }; color: 
 }
 const OBS_LIVE_FALLBACK_COLOR = 'var(--dsw-alias-label-secondary)'
 
+/** v3.16: cross-session comparison metric labels (inline {zh,en} pair, like OBS_TABS). */
+const RUN_COMPARE_METRIC_LABELS: Record<string, { zh: string; en: string }> = {
+  rounds: { zh: '轮次', en: 'Rounds' },
+  findings: { zh: '发现', en: 'Findings' },
+  criticalHigh: { zh: '严重（critical+high）', en: 'Critical + high' },
+  fixed: { zh: '修复成功', en: 'Fixes applied' },
+  failedFixes: { zh: '修复失败', en: 'Failed fixes' },
+  validationPassRate: { zh: '验证通过率', en: 'Validation pass rate' },
+  qualityGateScore: { zh: '门禁得分', en: 'Quality gate score' },
+}
+
 /**
  * Format a live-event timestamp as DD/MM HH:mm:ss (0-padded). Accepts an epoch
  * ms number or an ISO-ish string; any unparseable value degrades to ''.
@@ -2427,6 +2449,20 @@ function ObservatoryPanel(props: SlotProps) {
   // button still copies a back-end iterate_experience search instruction.
   // v3.0: Defense events filter
   const [defenseFilter, setDefenseFilter] = React.useState('')
+
+  // v3.16: cross-session comparison — the baseline is read from localStorage
+  // once on mount (a corrupt/stale payload reads as "no baseline", never as a
+  // phantom run); `showCompare` toggles the side-by-side table, `baselineFlash`
+  // confirms the save action.
+  const [baseline, setBaseline] = React.useState<RunBaseline | null>(() => {
+    try {
+      return parseRunBaseline(storage ? storage.get(RUN_BASELINE_STORAGE_KEY) : null)
+    } catch {
+      return null
+    }
+  })
+  const [showCompare, setShowCompare] = React.useState(false)
+  const [baselineFlash, setBaselineFlash] = React.useState(false)
 
   // Single shared "copied" flash timer (reused across all copy buttons).
   const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -2691,18 +2727,62 @@ function ObservatoryPanel(props: SlotProps) {
     }))
   }
 
+  // ── v3.16: cross-session run comparison handlers ────────────────────────
+  // The summary is built from the SAME manifest the F2 tab renders, so a saved
+  // baseline can never disagree with what the user is looking at.
+  const currentRunSummary = (): RunBaseline | null => {
+    const hasRun =
+      (manifest.convergence || []).length > 0 ||
+      (manifest.findings || []).length > 0 ||
+      (manifest.fixes || []).length > 0 ||
+      (typeof manifest.round === 'number' && manifest.round > 0)
+    if (!hasRun) return null
+    return buildRunBaseline(
+      {
+        project: manifest.project || undefined,
+        mode: manifest.mode || undefined,
+        convergence: manifest.convergence || [],
+        findings: (manifest.findings || []) as Array<{ severity?: string }>,
+        fixes: (manifest.fixes || []) as Array<{ success?: boolean }>,
+        validations: (manifest.validations || []) as Array<{ allowed?: boolean }>,
+        qualityGateStatus: (qualityGate && qualityGate.overallStatus) || null,
+        qualityGateScore: qualityGate && typeof qualityGate.overallScore === 'number' ? qualityGate.overallScore : null,
+        stoppedReason: manifest.stoppedReason || null,
+      },
+      new Date().toISOString(),
+    )
+  }
+  const saveBaseline = () => {
+    const summary = currentRunSummary()
+    if (!summary || !storage) return
+    try {
+      storage.set(RUN_BASELINE_STORAGE_KEY, JSON.stringify(summary))
+      setBaseline(summary)
+      setShowCompare(true)
+      setBaselineFlash(true)
+      if (copyTimer.current) clearTimeout(copyTimer.current)
+      copyTimer.current = setTimeout(() => setBaselineFlash(false), 1600)
+    } catch (err) {
+      log('failed to persist run baseline', err)
+    }
+  }
+  const clearBaseline = () => {
+    if (storage) {
+      try { storage.remove(RUN_BASELINE_STORAGE_KEY) } catch (err) { log('failed to clear run baseline', err) }
+    }
+    setBaseline(null)
+    setShowCompare(false)
+  }
+
   // ── F2: convergence trend (inline bars, reusing TrendChart) ─────────────
   const renderTrend = () => {
     const conv = manifest.convergence || []
-    if (conv.length === 0) {
-      return React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无收敛数据'))
-    }
     const points = conv.map((n, i) => ({ round: i + 1, count: n }))
     // Gap #13 (step ①): single-session cross-round comparison. One row per
     // round — findings raised / fixed / severity mix / validation outcome.
-    // Cross-SESSION comparison rides on the #4 pull instruction instead (the
-    // client has no filesystem access, so `iterate_history` aggregates have to
-    // be echoed back into the session first).
+    // v3.16: the cross-SESSION half is now the `renderCrossSessionCompare`
+    // block below (save the current run as a baseline, then compare any later
+    // run against it) instead of the old export-two-JSONs-and-diff-by-hand chore.
     const report = latestReport(session)
     const comparison = buildRoundComparison(report, manifest.validations || [], manifest.fixes || [])
     const comparisonTable = comparison.length === 0
@@ -2742,22 +2822,117 @@ function ObservatoryPanel(props: SlotProps) {
             }),
           ),
         )
-    return React.createElement('div', {},
-      React.createElement(TrendChart, { points }),
-      React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
-        tf(`各轮发现数量：{a0}{a1}`, { a0: conv.join(' → '), a1: typeof manifest.round === 'number' ? tf(` · 当前 Round {a0}`, { a0: manifest.round }) : '' }),
-      ),
-      comparisonTable
-        ? React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
-            React.createElement('div', { className: 'iterate-obs-block-head' },
-              React.createElement('span', {}, t('跨轮对比（本会话）')),
-              React.createElement('span', { className: 'iterate-obs-head-meta' },
-                t('跨会话对比：本表只覆盖当前会话；点「拉取磁盘快照」让模型回显 iterate_history，再用「导出 JSON」并排比较两次运行'),
-              ),
+    const trendBody = conv.length === 0
+      ? React.createElement('div', { className: 'iterate-obs-empty' }, t('暂无收敛数据'))
+      : React.createElement('div', {},
+          React.createElement(TrendChart, { points }),
+          React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 6 } },
+            tf(`各轮发现数量：{a0}{a1}`, { a0: conv.join(' → '), a1: typeof manifest.round === 'number' ? tf(` · 当前 Round {a0}`, { a0: manifest.round }) : '' }),
+          ),
+          comparisonTable
+            ? React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
+                React.createElement('div', { className: 'iterate-obs-block-head' },
+                  React.createElement('span', {}, t('跨轮对比（本会话）')),
+                  React.createElement('span', { className: 'iterate-obs-head-meta' },
+                    t('跨会话对比：本表只覆盖当前会话；要跨两次迭代对比，用下方「存为对比基准」保存本次运行，再与下一次迭代对比。'),
+                  ),
+                ),
+                React.createElement('div', { className: 'iterate-obs-block-body' }, comparisonTable),
+              )
+            : null,
+        )
+    return React.createElement('div', {}, trendBody, renderCrossSessionCompare())
+  }
+
+  // ── v3.16: cross-session run comparison (F2) ─────────────────────────────
+  // Side-by-side comparison of the CURRENT run against a previously saved
+  // baseline, persisted in localStorage. This replaces the manual
+  // export-JSON-and-diff chore the old cross-session hint pointed at: save the
+  // current run once, then compare any later run against it in one click.
+  const renderCrossSessionCompare = () => {
+    const current = currentRunSummary()
+    const hasRun = current !== null
+    const metricLabel = (key: string): string => {
+      const m = RUN_COMPARE_METRIC_LABELS[key]
+      return m ? m[getLang()] : key
+    }
+    const fmtCell = (v: number | null, key: string): string => {
+      if (v === null) return '—'
+      return key === 'validationPassRate' ? `${v}%` : String(v)
+    }
+    const deltaText = (row: RunCompareMetric): string => {
+      if (row.baseline === null || row.current === null) return '—'
+      const d = row.current - row.baseline
+      return d === 0 ? '0' : `${d > 0 ? '+' : ''}${d}`
+    }
+    const deltaTint = (row: RunCompareMetric): { color: string; fontWeight: number } | undefined => {
+      if (row.baseline === null || row.current === null || row.higherIsBetter === null) return undefined
+      const d = row.current - row.baseline
+      if (d === 0) return undefined
+      const improved = row.higherIsBetter ? d > 0 : d < 0
+      return improved
+        ? { color: 'var(--dsw-alias-state-success-primary)', fontWeight: 600 }
+        : { color: 'var(--dsw-alias-state-error-primary)', fontWeight: 600 }
+    }
+    let compareBody: React.ReactNode = null
+    if (baseline && current && showCompare) {
+      const rows = compareRuns(baseline, current)
+      compareBody = React.createElement('table', { className: 'iterate-obs-table' },
+        React.createElement('thead', {},
+          React.createElement('tr', {},
+            React.createElement('th', {}, t('指标')),
+            React.createElement('th', {}, t('基准')),
+            React.createElement('th', {}, t('当前')),
+            React.createElement('th', {}, t('变化')),
+          ),
+        ),
+        React.createElement('tbody', {},
+          ...rows.map((row) =>
+            React.createElement('tr', { key: `rc-${row.key}` },
+              React.createElement('td', {}, metricLabel(row.key)),
+              React.createElement('td', {}, fmtCell(row.baseline, row.key)),
+              React.createElement('td', {}, fmtCell(row.current, row.key)),
+              React.createElement('td', { style: deltaTint(row) }, deltaText(row)),
             ),
-            React.createElement('div', { className: 'iterate-obs-block-body' }, comparisonTable),
-          )
-        : null,
+          ),
+        ),
+      )
+    }
+    return React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
+      React.createElement('div', { className: 'iterate-obs-block-head' },
+        React.createElement('span', {}, t('跨会话对比')),
+        baseline
+          ? React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`基准已保存：{a0}`, { a0: baseline.savedAt }))
+          : React.createElement('span', { className: 'iterate-obs-head-meta' }, t('先保存当前运行为基准，再跑下一次迭代后一键对比')),
+      ),
+      React.createElement('div', { className: 'iterate-obs-block-body' },
+        React.createElement('div', { className: 'iterate-obs-bar', style: { flexWrap: 'wrap' } },
+          React.createElement('button', {
+            className: 'iterate-btn', 'data-primary': '', disabled: !hasRun,
+            title: hasRun ? t('把当前运行摘要保存为对比基准（含轮次/发现/修复/验证/门禁）') : t('当前没有可保存的运行数据'),
+            onClick: saveBaseline,
+          }, baselineFlash ? t('已存为基准') : t('存为对比基准')),
+          baseline
+            ? React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': showCompare ? '' : undefined,
+                disabled: !hasRun,
+                title: t('显示或隐藏与已保存基准的对比表'),
+                onClick: () => setShowCompare((v) => !v),
+              }, showCompare ? t('收起对比') : t('与基准对比'))
+            : null,
+          baseline
+            ? React.createElement('button', {
+                className: 'iterate-btn', 'data-ghost': '',
+                title: t('清除已保存的对比基准'),
+                onClick: clearBaseline,
+              }, t('清除基准'))
+            : null,
+        ),
+        showCompare && baseline && !hasRun
+          ? React.createElement('div', { className: 'iterate-obs-empty', style: { marginTop: 8 } }, t('当前会话没有运行数据可对比'))
+          : null,
+        compareBody,
+      ),
     )
   }
 

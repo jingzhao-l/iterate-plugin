@@ -296,8 +296,27 @@ export const EN: Record<string, string> = {
   '各轮发现数量：{a0}{a1}': 'Findings per round: {a0}{a1}',
   ' · 当前 Round {a0}': ' · current round {a0}',
   '跨轮对比（本会话）': 'Cross-round comparison (this session)',
-  '跨会话对比：本表只覆盖当前会话；点「拉取磁盘快照」让模型回显 iterate_history，再用「导出 JSON」并排比较两次运行':
-    'Cross-session comparison: this table only covers the current session — click "Pull disk snapshot" to have the model echo iterate_history, then use "Export JSON" to compare two runs side by side',
+  '跨会话对比：本表只覆盖当前会话；要跨两次迭代对比，用下方「存为对比基准」保存本次运行，再与下一次迭代对比。':
+    'Cross-session comparison: this table only covers the current session — to compare two iterations, save this run with \"Save as comparison baseline\" below, then compare the next iteration against it.',
+  跨会话对比: 'Cross-session comparison',
+  '基准已保存：{a0}': 'Baseline saved: {a0}',
+  '先保存当前运行为基准，再跑下一次迭代后一键对比':
+    'Save the current run as the baseline, then one-click compare the next iteration against it',
+  '把当前运行摘要保存为对比基准（含轮次/发现/修复/验证/门禁）':
+    'Save the current run summary as the comparison baseline (rounds / findings / fixes / validation / gate)',
+  '当前没有可保存的运行数据': 'No run data to save yet',
+  已存为基准: 'Saved as baseline',
+  存为对比基准: 'Save as comparison baseline',
+  '显示或隐藏与已保存基准的对比表': 'Show or hide the comparison against the saved baseline',
+  收起对比: 'Hide comparison',
+  与基准对比: 'Compare with baseline',
+  '清除已保存的对比基准': 'Clear the saved comparison baseline',
+  清除基准: 'Clear baseline',
+  '当前会话没有运行数据可对比': 'This session has no run data to compare yet',
+  指标: 'Metric',
+  基准: 'Baseline',
+  当前: 'Current',
+  变化: 'Delta',
 
   // ── F3 finding locations ─────────────────────────────────────────────────
   暂无发现: 'No findings',

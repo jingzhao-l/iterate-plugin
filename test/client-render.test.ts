@@ -720,3 +720,118 @@ describe('preflight validation suggestions (F11)', () => {
     assert.ok(!buttonByText(panel, '应用建议'), 'no apply-suggestion when the manifest has nothing to detect')
   })
 })
+
+describe('ObservatoryPanel cross-session comparison (v3.16)', () => {
+  // A completed run with real aggregates — the same shape the F2 tab renders.
+  const runFixture = () =>
+    transcriptFixture({
+      mode: 'normal',
+      round: 3,
+      convergence: [3, 1, 0],
+      findings: [
+        { file: 'a.ts', line: 1, dimension: 'correctness', severity: 'critical', summary: 'x' },
+        { file: 'b.ts', line: 2, dimension: 'security', severity: 'high', summary: 'y' },
+        { file: 'c.ts', line: 3, dimension: 'style', severity: 'low', summary: 'z' },
+      ],
+      fixes: [{ id: 'f1', file: 'a.ts', success: true }, { id: 'f2', file: 'b.ts', success: false }],
+      validations: [{ round: 1, command: 'npm test', allowed: true }, { round: 2, command: 'npm test', allowed: false }],
+      stoppedReason: 'converged',
+    })
+
+  const openTrendTab = (panel: Rendered): void => {
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '收敛趋势'))
+  }
+
+  it('offers the cross-session comparison block and saves a baseline', () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: runFixture() } })
+    openTrendTab(panel)
+    assert.match(panel.textContent ?? '', /跨会话对比/)
+    assert.match(panel.textContent ?? '', /先保存当前运行为基准/)
+    const save = buttonByText(panel, '存为对比基准')
+    assert.ok(save, 'the save-as-baseline action is offered when a run is present')
+    click(save)
+    assert.match(panel.textContent ?? '', /已存为基准/, 'save flashes confirmation')
+    const stored = localStorage.getItem('iterate.run-baseline')
+    assert.ok(stored, 'the baseline is persisted to localStorage')
+    const parsed = JSON.parse(stored as string) as { findings: number; rounds: number }
+    assert.equal(parsed.findings, 3, 'persisted findings count matches the manifest')
+    assert.equal(parsed.rounds, 3, 'persisted rounds count matches the convergence series')
+  })
+
+  it('compares a later run against the saved baseline side by side', () => {
+    // Seed a baseline: 5 findings, 2 fixes, 1 failed fix.
+    localStorage.setItem('iterate.run-baseline', JSON.stringify({
+      version: 1,
+      savedAt: '2026-11-01T00:00:00.000Z',
+      project: '/srv/proj',
+      mode: 'normal',
+      rounds: 4,
+      findings: 5,
+      criticalHigh: 3,
+      fixed: 1,
+      failedFixes: 1,
+      validationPassRate: 50,
+      validationTotal: 2,
+      qualityGateStatus: 'fail',
+      qualityGateScore: 61,
+      stoppedReason: 'max_rounds_reached',
+      convergence: [3, 2, 1, 1],
+    }))
+    // Current run: 3 findings, 2 fixes (1 failed), 50% validation.
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: runFixture() } })
+    openTrendTab(panel)
+    assert.match(panel.textContent ?? '', /基准已保存：2026-11-01/)
+    click(buttonByText(panel, '与基准对比'))
+    const html = panel.textContent ?? ''
+    assert.match(html, /跨会话对比/)
+    assert.match(html, /轮次/)
+    assert.match(html, /修复成功/)
+    assert.match(html, /门禁得分/)
+    assert.match(html, /基准/) // the "Baseline" column header
+    assert.match(html, /当前/) // the "Current" column header
+    assert.match(html, /变化/) // the "Delta" column header
+  })
+
+  it('clears a saved baseline and drops the compare affordance', () => {
+    localStorage.setItem('iterate.run-baseline', JSON.stringify({
+      version: 1,
+      savedAt: '2026-11-01T00:00:00.000Z',
+      rounds: 4, findings: 5, criticalHigh: 3, fixed: 1, failedFixes: 1,
+      validationPassRate: 50, validationTotal: 2, qualityGateStatus: 'fail',
+      qualityGateScore: 61, stoppedReason: null, convergence: [3, 2, 1, 1],
+    }))
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: runFixture() } })
+    openTrendTab(panel)
+    click(buttonByText(panel, '清除基准'))
+    assert.equal(localStorage.getItem('iterate.run-baseline'), null, 'the baseline is removed from storage')
+    const html = panel.textContent ?? ''
+    assert.match(html, /先保存当前运行为基准/, 'the empty-state hint returns')
+    assert.ok(!buttonByText(panel, '与基准对比'), 'the compare action disappears with the baseline')
+  })
+
+  it('never reads a corrupt baseline as a phantom run', () => {
+    localStorage.setItem('iterate.run-baseline', 'not valid json {')
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: runFixture() } })
+    openTrendTab(panel)
+    const html = panel.textContent ?? ''
+    assert.match(html, /先保存当前运行为基准/, 'corrupt storage reads as "no baseline"')
+    assert.ok(!buttonByText(panel, '与基准对比'), 'no compare action for a corrupt baseline')
+  })
+
+  it('toggles the comparison table off with the collapse action', () => {
+    localStorage.setItem('iterate.run-baseline', JSON.stringify({
+      version: 1,
+      savedAt: '2026-11-01T00:00:00.000Z',
+      rounds: 4, findings: 5, criticalHigh: 3, fixed: 1, failedFixes: 1,
+      validationPassRate: 50, validationTotal: 2, qualityGateStatus: 'fail',
+      qualityGateScore: 61, stoppedReason: null, convergence: [3, 2, 1, 1],
+    }))
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: runFixture() } })
+    openTrendTab(panel)
+    click(buttonByText(panel, '与基准对比'))
+    assert.ok(buttonByText(panel, '收起对比'), 'the collapse action appears once compared')
+    click(buttonByText(panel, '收起对比'))
+    assert.ok(buttonByText(panel, '与基准对比'), 'the table collapses back to the compare action')
+  })
+})
