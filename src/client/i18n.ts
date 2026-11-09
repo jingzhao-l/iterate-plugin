@@ -317,6 +317,9 @@ export const EN: Record<string, string> = {
   基准: 'Baseline',
   当前: 'Current',
   变化: 'Delta',
+  复制对比表: 'Copy comparison table',
+  '复制跨会话对比表为 Markdown（可粘贴进 PR / issue / CI 注释）':
+    'Copy the cross-session comparison as a Markdown table (paste into a PR / issue / CI comment)',
 
   // ── F3 finding locations ─────────────────────────────────────────────────
   暂无发现: 'No findings',
@@ -398,6 +401,11 @@ export const EN: Record<string, string> = {
   '复制 iterate_quality_gate clear 指令文本（重置陈旧的 FAIL 证书）':
     'Copy the iterate_quality_gate clear instruction (resets a stale FAIL certificate)',
   清除门禁: 'Clear gate',
+  重算门禁: 'Recompute gate',
+  '复制 iterate_quality_gate compute 指令：从当前会话推导维度/发现/验证结果，一键重算并持久化门禁证书':
+    'Copy the iterate_quality_gate compute instruction: derive dimensions / findings / validation results from this session and recompute + persist the gate certificate',
+  '当前会话没有可重算的门禁数据（需先有审查/验证结果）':
+    'No gate data in this session to recompute (need review / validation results first)',
   '复制拉取磁盘快照指令：让模型回显 .iterate/ 下的门禁、经验、防御事件与 transcript':
     'Copy the disk-snapshot instruction: have the model echo the gate, experience, defense events and transcript artifacts under .iterate/',
   质量门禁视图: 'Quality gate view',

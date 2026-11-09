@@ -323,6 +323,25 @@ function decodedLines(filePath: string): Array<{ raw: string; decoded: unknown }
   return out
 }
 
+/**
+ * Rebuild the exact ledger text the kernel verifies, dropping only the artifact a
+ * trailing newline leaves. Unlike `decodedLines` this keeps interior blank lines:
+ * `kernelVerifyLedgerText` splits on "\n" and `JSON.parse`s each line, so an interior
+ * blank line is a corrupt entry it must report — renumbering the lines that follow it
+ * (by dropping it here) would mask a real break as a healthy ledger.
+ */
+function ledgerTextForVerify(filePath: string): string {
+  let text: string
+  try {
+    text = readFileSync(filePath, 'utf-8')
+  } catch {
+    return ''
+  }
+  const lines = text.endsWith('\n') ? text.slice(0, -1) : text
+  if (lines.length === 0) return ''
+  return `${lines}\n`
+}
+
 /** The 1-based line number of the first legacy record AFTER the chain began, else `null`. */
 export function contestedLedgerLine(filePath: string): number | null {
   const kinds = decodedLines(filePath).map((l) => classifyDecisionLine(l.decoded))
@@ -798,8 +817,7 @@ export function verifyDecisionLedger(projectRoot: string): {
 } {
   const filePath = decisionLogPath(projectRoot)
   try {
-    const lines = decodedLines(filePath)
-    const body = `${lines.map((l) => l.raw).join('\n')}${lines.length > 0 ? '\n' : ''}`
+    const body = ledgerTextForVerify(filePath)
     const verified = kernelVerifyLedgerText(body)
     return {
       ok: verified.ok,

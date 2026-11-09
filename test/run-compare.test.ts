@@ -21,6 +21,7 @@ import {
   buildRunBaseline,
   parseRunBaseline,
   compareRuns,
+  buildRunCompareMarkdown,
   RUN_BASELINE_STORAGE_KEY,
   RUN_BASELINE_VERSION,
   type RunBaseline,
@@ -174,5 +175,47 @@ describe('compareRuns', () => {
 
   it('exposes the storage key the renderer persists under', () => {
     assert.equal(RUN_BASELINE_STORAGE_KEY, 'iterate.run-baseline')
+  })
+})
+
+// ─── buildRunCompareMarkdown (v3.17) ─────────────────────────────────────────
+
+describe('buildRunCompareMarkdown', () => {
+  const LABELS: Record<string, string> = {
+    指标: 'Metric', 基准: 'Baseline', 当前: 'Current', 变化: 'Delta',
+    rounds: 'Rounds', findings: 'Findings', criticalHigh: 'Critical + high',
+    fixed: 'Fixes applied', failedFixes: 'Failed fixes',
+    validationPassRate: 'Validation pass rate', qualityGateScore: 'Quality gate score',
+  }
+
+  it('renders a pipe table with a header, separator and one row per metric', () => {
+    const base = buildRunBaseline(input(), SAVED_AT)
+    const current = buildRunBaseline(
+      input({ findings: [{ severity: 'medium' }], convergence: [3, 1, 0], qualityGateScore: 95 }),
+      SAVED_AT,
+    )
+    const md = buildRunCompareMarkdown(compareRuns(base, current), LABELS)
+    const lines = md.split('\n')
+    assert.match(lines[0]!, /^\| Metric \| Baseline \| Current \| Delta \|$/)
+    assert.match(lines[1]!, /^\| --- \| --- \| --- \| --- \|$/)
+    assert.equal(lines.length, 1 + 1 + 7, '7 metric rows')
+    assert.match(md, /\| Rounds \| 3 \| 3 \| 0 \|/)
+    assert.match(md, /\| Findings \| 5 \| 1 \| -4 \|/)
+    assert.match(md, /\| Quality gate score \| 92 \| 95 \| 3 \|/)
+  })
+
+  it('renders a null cell as an em dash (a side that never measured it)', () => {
+    const base = buildRunBaseline(input(), SAVED_AT)
+    const dry = buildRunBaseline(
+      input({ fixes: [], validations: [], qualityGateStatus: null, qualityGateScore: null }),
+      SAVED_AT,
+    )
+    const md = buildRunCompareMarkdown(compareRuns(base, dry), LABELS)
+    assert.match(md, /\| Validation pass rate \| 67 \| — \| — \|/)
+    assert.match(md, /\| Quality gate score \| 92 \| — \| — \|/)
+  })
+
+  it('tolerates an empty row list and an empty label map (falls back to the raw keys)', () => {
+    assert.equal(buildRunCompareMarkdown([], {}), '| 指标 | 基准 | 当前 | 变化 |\n| --- | --- | --- | --- |')
   })
 })

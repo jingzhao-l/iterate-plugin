@@ -211,3 +211,29 @@ export function compareRuns(baseline: RunBaseline, current: RunBaseline): RunCom
   ]
   return rows
 }
+
+/**
+ * Render the side-by-side comparison as a Markdown table that can be pasted
+ * into a PR / issue / CI comment. `labels` is resolved by the caller from the
+ * current UI language (this module stays dependency-free and Chinese-free).
+ * A `null` cell renders as `—` (that side had no such measurement).
+ *
+ * @param rows - the rows from {@link compareRuns}
+ * @param labels - metric key → localized column name
+ */
+export function buildRunCompareMarkdown(rows: RunCompareMetric[], labels: Record<string, string>): string {
+  const cell = (v: number | null): string => (v === null ? '—' : String(v))
+  const header = ['指标', '基准', '当前', '变化'].map((h) => labels[h] ?? h)
+  const lines = [
+    `| ${header.join(' | ')} |`,
+    `| ${header.map(() => '---').join(' | ')} |`,
+  ]
+  for (const row of rows) {
+    const delta =
+      row.baseline === null || row.current === null ? '—' : String(row.current - row.baseline)
+    lines.push(
+      `| ${labels[row.key] ?? row.key} | ${cell(row.baseline)} | ${cell(row.current)} | ${delta} |`,
+    )
+  }
+  return lines.join('\n')
+}

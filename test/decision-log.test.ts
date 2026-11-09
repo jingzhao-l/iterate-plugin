@@ -1131,4 +1131,30 @@ describe('iterate_decision_log execute', () => {
       cleanup()
     }
   })
+
+  it('reports an interior blank line as a real break, not a healthy ledger', async () => {
+    const { dir, cleanup } = tempProject()
+    try {
+      const tool = captureDecisionLogTool()
+      await tool.execute({ operation: 'append', type: 'decision', round: 1, data: {}, path: dir })
+      await tool.execute({ operation: 'append', type: 'decision', round: 2, data: {}, path: dir })
+      // The kernel splits on "\n" and JSON.parses each line, so a blank interior line is a
+      // corrupt entry it must report. Splicing one in must surface as a failed verify, never
+      // as ok:true — dropping the line here would renumber the entries after it and mask the
+      // real break behind a clean-looking ledger. Read the raw text (not linesOf, which
+      // filters blanks) so the blank line actually reaches the file.
+      const rawLines = readFileSync(logOf(dir), 'utf-8').split('\n')
+      if (rawLines[rawLines.length - 1] === '') rawLines.pop()
+      rawLines.splice(1, 0, '')
+      writeFileSync(logOf(dir), rawLines.join('\n') + '\n', 'utf-8')
+
+      const verdict = await tool.execute({ operation: 'verify', path: dir })
+      assert.equal(verdict.success, false, 'an interior blank line is a real break and must not verify clean')
+      const chain = verdict.chain as { brokenKind?: string; firstBrokenLine?: number }
+      assert.equal(chain.brokenKind, 'corrupt')
+      assert.equal(chain.firstBrokenLine, 2)
+    } finally {
+      cleanup()
+    }
+  })
 })

@@ -90,6 +90,8 @@ import {
   buildCheckpointClearInstruction,
   buildQualityGateQueryInstruction,
   buildQualityGateClearInstruction,
+  buildQualityGateComputeInstruction,
+  deriveQualityGateComputeInput,
   buildRollbackInstruction,
   buildExperienceListInstruction,
   buildDefenseEventsListInstruction,
@@ -2782,5 +2784,139 @@ describe('buildValidationApplyInstruction', () => {
       updates: { validation: { commands: { default: string[] } } }
     }
     assert.deepEqual(json.updates.validation.commands.default, [])
+  })
+})
+
+// ─── buildQualityGateComputeInstruction / deriveQualityGateComputeInput ──────
+
+describe('buildQualityGateComputeInstruction', () => {
+  it('emits a compute payload with every derived field', () => {
+    const text = buildQualityGateComputeInstruction({
+      dimensions: ['correctness', 'security'],
+      findings: [{ dimension: 'security', severity: 'high', file: 'src/a.ts', line: 3 }],
+      validationResults: [{ command: 'npm test', exitCode: 0 }],
+      findingsByRound: { security: [2, 1, 0] },
+      fixedByDimension: { security: 2 },
+    })
+    const payload = jsonBlockOf(text)!
+    assert.equal(payload.operation, 'compute')
+    assert.deepEqual(payload.dimensions, ['correctness', 'security'])
+    assert.deepEqual(payload.findings, [
+      { dimension: 'security', severity: 'high', file: 'src/a.ts', line: 3 },
+    ])
+    assert.deepEqual(payload.validationResults, [{ command: 'npm test', exitCode: 0 }])
+    assert.deepEqual(payload.findingsByRound, { security: [2, 1, 0] })
+    assert.deepEqual(payload.fixedByDimension, { security: 2 })
+    assert.match(text, /iterate_quality_gate/)
+  })
+
+  it('omits empty fields and keeps a bare {operation:compute} legal', () => {
+    const text = buildQualityGateComputeInstruction({ dimensions: [], findings: [], validationResults: [] })
+    assert.deepEqual(jsonBlockOf(text), { operation: 'compute' })
+  })
+
+  it('tolerates a null / junk input without throwing', () => {
+    assert.deepEqual(jsonBlockOf(buildQualityGateComputeInstruction(null)), { operation: 'compute' })
+    assert.deepEqual(jsonBlockOf(buildQualityGateComputeInstruction(undefined)), { operation: 'compute' })
+    assert.deepEqual(jsonBlockOf(buildQualityGateComputeInstruction('junk' as never)), { operation: 'compute' })
+  })
+
+  it('sanitizes a malformed field instead of shipping NaN / bad shapes', () => {
+    const text = buildQualityGateComputeInstruction({
+      dimensions: ['', 'correctness', 42 as unknown as string],
+      findings: [
+        { dimension: 'correctness', severity: 'high', file: '', line: -1 },
+        { dimension: '', severity: 'high', file: 'src/x.ts' },
+        { dimension: 'correctness', severity: 'high', file: 'src/x.ts', line: 7 },
+      ] as never,
+      validationResults: [{ command: '', exitCode: 0 }, { command: 't', exitCode: Number.NaN }] as never,
+      findingsByRound: { correctness: [1, 'x' as unknown as number, -2, 3], empty: [] } as never,
+      fixedByDimension: { correctness: -1, security: 2 } as never,
+    })
+    const payload = jsonBlockOf(text)!
+    assert.deepEqual(payload.dimensions, ['correctness'])
+    assert.deepEqual(payload.findings, [{ dimension: 'correctness', severity: 'high', file: 'src/x.ts', line: 7 }])
+    assert.equal(payload.validationResults, undefined, 'empty after sanitizing → omitted, not []')
+    assert.deepEqual(payload.findingsByRound, { correctness: [1, 3] })
+    assert.deepEqual(payload.fixedByDimension, { security: 2 })
+  })
+})
+
+describe('deriveQualityGateComputeInput', () => {
+  it('derives dimensions / findings / validationResults / findingsByRound / fixedByDimension from a manifest', () => {
+    const manifest = {
+      rounds: [
+        {
+          round: 1,
+          threads: [
+            { dimension: 'security', findings: [{ dimension: 'security', severity: 'high', file: 'src/a.ts', line: 3 }] },
+            { dimension: 'correctness', findings: [{ dimension: 'correctness', severity: 'medium', file: 'src/b.ts' }] },
+          ],
+        },
+        {
+          round: 2,
+          threads: [
+            { dimension: 'security', findings: [] },
+            { dimension: 'correctness', findings: [{ dimension: 'correctness', severity: 'low', file: 'src/b.ts' }] },
+          ],
+        },
+      ],
+      findings: [
+        { dimension: 'security', severity: 'high', file: 'src/a.ts', line: 3 },
+        { dimension: 'correctness', severity: 'medium', file: 'src/b.ts' },
+        { dimension: 'correctness', severity: 'low', file: 'src/b.ts' },
+      ],
+      validations: [{ command: 'npm test', exitCode: 0 }, { command: 'npm run lint', exitCode: 1 }],
+      fixes: [
+        { file: 'src/a.ts', line: 3, success: true },
+        { file: 'src/b.ts', success: false },
+        { file: 'src/untracked.ts', success: true },
+      ],
+    }
+    const input = deriveQualityGateComputeInput(manifest, null)
+    assert.deepEqual(input.dimensions, ['security', 'correctness'])
+    assert.equal(input.findings.length, 3)
+    assert.equal(input.validationResults.length, 2)
+    assert.deepEqual(input.findingsByRound, {
+      security: [1, 0],
+      correctness: [1, 1],
+    })
+    // The successful fix on src/a.ts attributes to security (matched by file+line);
+    // the failed fix is skipped; the unmatched fix is left unattributed.
+    assert.deepEqual(input.fixedByDimension, { security: 1 })
+  })
+
+  it('falls back to the persisted gate dimensions when the manifest has no threads', () => {
+    const input = deriveQualityGateComputeInput(
+      { rounds: [], findings: [], validations: [], fixes: [] },
+      { dimensions: [{ dimension: 'correctness' }, { dimension: 'performance' }] },
+    )
+    assert.deepEqual(input.dimensions, ['correctness', 'performance'])
+    assert.deepEqual(input.findingsByRound, { correctness: [], performance: [] })
+    assert.deepEqual(input.fixedByDimension, {})
+  })
+
+  it('records every round (including a 0 for a dimension absent that round)', () => {
+    const input = deriveQualityGateComputeInput(
+      {
+        rounds: [
+          { round: 1, threads: [{ dimension: 'security', findings: [{ dimension: 'security' }] }] },
+          { round: 2, threads: [{ dimension: 'security', findings: [] }] },
+          { round: 3, threads: [] },
+        ],
+        findings: [], validations: [], fixes: [],
+      },
+      null,
+    )
+    assert.deepEqual(input.findingsByRound, { security: [1, 0, 0] })
+  })
+
+  it('never throws on a malformed manifest', () => {
+    const input = deriveQualityGateComputeInput(null as never, 'junk' as never)
+    assert.deepEqual(input.dimensions, [])
+    assert.deepEqual(input.findings, [])
+    assert.deepEqual(input.validationResults, [])
+    assert.deepEqual(input.findingsByRound, {})
+    assert.deepEqual(input.fixedByDimension, {})
   })
 })

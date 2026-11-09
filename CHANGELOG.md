@@ -5,6 +5,61 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.17.0] - 2026-11-09
+
+一键重算门禁 + 对比表复制（One-click gate recompute + comparison-table copy）。
+把两条此前「只能手写 / 只能看不能带走」的路径改成**一等交互**，按语义化版本是一次 minor。
+
+- **F8 一键重算门禁**：`iterate_quality_gate` 的 `compute` 载荷里有一串
+  **手写极易出错**的 `findingsByRound`（每个维度每轮的收敛序列）。此前要重算
+  门禁证书只能手工拼这个 JSON；现在 F8 的「重算门禁」按钮从当前会话的
+  transcript 推导出**完整 compute 载荷**（维度 = 各轮线程维度并集，回退到已
+  持久化门禁的维度集；findings / validationResults 直接取自会话；
+  findingsByRound 按「每维度 × 每轮」补齐（缺维度的轮记 0，保证收敛率真实）；
+  fixedByDimension 按「成功的 fix 命中同文件（同 line 时更严格）的 finding」
+  归因），一键复制粘贴给模型即重算并持久化证书。无审查/验证数据时按钮禁用并
+  给出明确提示，而非复制一个空载荷。纯构建器
+  `buildQualityGateComputeInstruction` 与纯归约器 `deriveQualityGateComputeInput`
+  落进 `lib/parse.js`，无 React / DOM / 中文依赖，可单测。
+- **F2 复制对比表**：跨会话对比表（v3.16）此前只能在面板里看，无法带走。新增
+  「复制对比表」把逐指标并排表（基准 | 当前 | 变化）渲染成 **Markdown 表格**
+  复制进剪贴板，可直接粘贴进 PR / issue / CI 注释；复制失败时按既有模式
+  揭示原文供手动复制，绝不静默丢动作。纯渲染器 `buildRunCompareMarkdown`
+  落进 `src/client/run-compare.ts`（标签由调用方按当前语言注入）。
+
+### Added
+
+- **F8「重算门禁」按钮** —— `buildQualityGateComputeInstruction`（纯，产出
+  `iterate_quality_gate` `compute` 指令，含完整推导载荷；空/坏输入容错为
+  `{operation:"compute"}`，绝不抛错）+ `deriveQualityGateComputeInput`
+  （纯，transcript + 会话内门禁快照 → compute 输入；坏 manifest 恒返回空形状）。
+  双语标签与禁用态文案已入 i18n。
+- **F2「复制对比表」按钮** —— `buildRunCompareMarkdown`（纯，逐指标一行
+  `| 指标 | 基准 | 当前 | 变化 |`，`null` 渲染为 `—`，标签注入）。双语标签已入
+  i18n。
+
+### Fixed
+
+- **dist 与 src 漂移（预存缺陷）**：`dist/tools/decision-log.js` 未随
+  `fix(consumers)` 的「plugin 校验丢内部空行」重建——`verifyDecisionLedger`
+  曾按 `decodedLines`（丢弃内部空行）重排账本文本，掩盖真实断裂；现重建
+  `dist/`，`verifyDecisionLedger` 改走 `ledgerTextForVerify`（只剥尾部换行，
+  保留内部空行供内核裁决）。重建后 `dist/` 与 `src/` 逐字节齐步。
+- **文档计数**：`src/index.ts` 顶部与 README 的工具计数统一为 19（原 18/17
+  与注册表不符）。
+
+### Tests
+
+- `test/parse.test.ts` 新增 9 例（compute 构建器全字段 / 空字段省略 /
+  null 与 junk 容错 / 畸形字段清洗；派生器维度并集与门禁回退 / 逐轮补齐 0 /
+  成功修复按文件+行归因 / 坏 manifest 恒空）。
+- `test/run-compare.test.ts` 新增 3 例（Markdown 表头 + 逐指标行 + 差值方向 /
+  null 单元格 / 空行集与空标签回退）。
+- `test/client-render.test.ts` 新增 4 例（F8 重算按钮渲染与派生载荷 / 无数据
+  禁用 / F2 复制对比表出现并揭示 Markdown）。
+- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿（详见
+  RELEASE.md 3.17.0 记录）。
+
 ## [3.16.0] - 2026-11-08
 
 跨会话运行对比（Cross-session run comparison）。

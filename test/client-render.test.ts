@@ -835,3 +835,108 @@ describe('ObservatoryPanel cross-session comparison (v3.16)', () => {
     assert.ok(buttonByText(panel, '与基准对比'), 'the table collapses back to the compare action')
   })
 })
+
+describe('ObservatoryPanel one-click gate recompute (v3.17)', () => {
+  const gateFixture = () =>
+    transcriptFixture({
+      mode: 'normal',
+      round: 2,
+      maxRounds: 2,
+      rounds: [
+        {
+          round: 1,
+          threads: [
+            { dimension: 'correctness', findings: [{ dimension: 'correctness', severity: 'high', file: 'a.ts', line: 1 }] },
+            { dimension: 'security', findings: [{ dimension: 'security', severity: 'critical', file: 'b.ts', line: 2 }] },
+          ],
+        },
+        {
+          round: 2,
+          threads: [
+            { dimension: 'correctness', findings: [] },
+            { dimension: 'security', findings: [] },
+          ],
+        },
+      ],
+      findings: [
+        { dimension: 'correctness', severity: 'high', file: 'a.ts', line: 1 },
+        { dimension: 'security', severity: 'critical', file: 'b.ts', line: 2 },
+      ],
+      fixes: [{ id: 'f1', file: 'a.ts', line: 1, success: true }],
+      validations: [{ round: 1, command: 'npm test', exitCode: 0, allowed: true }],
+    })
+
+  const openGateTab = (panel: Rendered): void => {
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '质量门禁'))
+  }
+
+  it('offers the recompute action and derives a compute payload from the session', async () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: gateFixture() } })
+    openGateTab(panel)
+    const recompute = buttonByText(panel, '重算门禁')
+    assert.ok(recompute, 'the recompute action is offered when the session has review data')
+    const recomputeEl = recompute as unknown as HTMLButtonElement
+    assert.equal(recomputeEl.disabled, false, 'enabled when data exists')
+    // jsdom has no clipboard → the copy FAILURE path reveals the raw instruction
+    // (await act so the copy promise's state update lands inside the act scope).
+    await React.act(async () => recomputeEl.click())
+    const html = panel.textContent ?? ''
+    assert.match(html, /iterate_quality_gate/)
+    assert.match(html, /"operation": "compute"/)
+    assert.match(html, /"findingsByRound"/)
+    assert.match(html, /"security": \[\s*1,\s*0\s*\]/)
+  })
+
+  it('disables recompute when the session carries no gate data', () => {
+    const panel = mountSlot(boot(), 'iterate-observatory', {
+      session: { transcript: transcriptFixture({ rounds: [], findings: [], validations: [], fixes: [] }) },
+    })
+    openGateTab(panel)
+    const recompute = buttonByText(panel, '重算门禁')
+    assert.ok(recompute)
+    assert.equal((recompute as unknown as HTMLButtonElement).disabled, true, 'disabled with no review / validation data')
+  })
+})
+
+describe('ObservatoryPanel copy-comparison-table (v3.17)', () => {
+  const runFixture = () =>
+    transcriptFixture({
+      mode: 'normal',
+      round: 3,
+      convergence: [3, 1, 0],
+      findings: [
+        { file: 'a.ts', line: 1, dimension: 'correctness', severity: 'critical', summary: 'x' },
+        { file: 'b.ts', line: 2, dimension: 'security', severity: 'high', summary: 'y' },
+      ],
+      fixes: [{ id: 'f1', file: 'a.ts', success: true }],
+      validations: [{ round: 1, command: 'npm test', allowed: true }],
+      stoppedReason: 'converged',
+    })
+
+  const openTrendTab = (panel: Rendered): void => {
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '收敛趋势'))
+  }
+
+  it('copies the comparison as a Markdown table once compared', async () => {
+    localStorage.setItem('iterate.run-baseline', JSON.stringify({
+      version: 1,
+      savedAt: '2026-11-01T00:00:00.000Z',
+      rounds: 4, findings: 5, criticalHigh: 3, fixed: 1, failedFixes: 1,
+      validationPassRate: 50, validationTotal: 2, qualityGateStatus: 'fail',
+      qualityGateScore: 61, stoppedReason: null, convergence: [3, 2, 1, 1],
+    }))
+    const panel = mountSlot(boot(), 'iterate-observatory', { session: { transcript: runFixture() } })
+    openTrendTab(panel)
+    click(buttonByText(panel, '与基准对比'))
+    const copy = buttonByText(panel, '复制对比表')
+    assert.ok(copy, 'the copy-comparison action appears once compared')
+    // Clipboard write fails in jsdom → the raw Markdown table is revealed
+    // (await act so the copy promise's state update lands inside the act scope).
+    await React.act(async () => (copy as unknown as HTMLElement).click())
+    const html = panel.textContent ?? ''
+    assert.match(html, /\| 指标 \| 基准 \| 当前 \| 变化 \|/)
+    assert.match(html, /\| 轮次 \| 4 \| 3 \| -1 \|/)
+  })
+})

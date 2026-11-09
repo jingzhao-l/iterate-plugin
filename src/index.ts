@@ -2,16 +2,17 @@
  * iterate-plugin — dsh plugin for the iterate autonomous closed-loop workflow
  *
  * Architecture:
- * - The plugin registers 18 tools (14 original + 3 v3.0 quality command center
- *   tools + 1 v3.9 report export)
+ * - The plugin registers 19 tools (14 original + 3 v3.0 quality command center
+ *   tools + 1 v3.9 report export + 1 v3.12 pre-run preflight)
  *   Original: config, validate, decision-log, context, review, triage, fix, diff,
  *   rollback, checkpoint, status, history, prune, transcript
  *   v3.0: experience, quality_gate, defense_events
  *   v3.9: report
+ *   v3.12: preflight
  * - The plugin injects a system prompt section teaching the iterate workflow pattern
  * - The model (prompted by the skill) writes a workflow script using dsh's `workflow` tool
  * - The workflow script uses `agent()` / `parallel()` / `phase()` / `log()` to orchestrate
- * - Subagents use the 18 tools to do real work (read config, run validation, log decisions,
+ * - Subagents use the 19 tools to do real work (read config, run validation, log decisions,
  *   review, triage, apply/rollback/fixing, checkpoint, status, history, prune, transcript,
  *   query experience bank, check quality gates, query defense events, export a report)
  * - A `tools/pre-execute` hook gates destructive iterate calls behind human approval
@@ -25,7 +26,7 @@
  *
  * Key files:
  * - src/index.ts      — Plugin entry: register tools + inject skill prompt
- * - src/tools/        — 18 tool implementations (14 original + 3 v3.0 + 1 v3.9)
+ * - src/tools/        — 19 tool implementations (14 original + 3 v3.0 + 1 v3.9 + 1 v3.12)
  * - src/config-loader.ts — YAML config loading
  * - src/types.ts     — Shared types
  */

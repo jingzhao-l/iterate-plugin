@@ -101,6 +101,8 @@ import {
   buildRollbackInstruction, // #10: shared rollback payload
   buildQualityGateQueryInstruction, // #10: JSON-carrying query instruction
   buildQualityGateClearInstruction, // #10: JSON-carrying clear instruction
+  buildQualityGateComputeInstruction, // v3.17: one-click recompute payload from THIS session
+  deriveQualityGateComputeInput, // v3.17: manifest → compute input reducer
   buildTriageReadbackInstruction, // #7: close the write-back loop
   buildExperienceListInstruction, // #3/#10: JSON list payload for F9
   buildDefenseEventsListInstruction, // #3/#10: JSON list payload for F10
@@ -153,6 +155,7 @@ import {
   buildRunBaseline,
   parseRunBaseline,
   compareRuns,
+  buildRunCompareMarkdown,
   RUN_BASELINE_STORAGE_KEY,
   type RunBaseline,
   type RunCompareMetric,
@@ -2920,6 +2923,21 @@ function ObservatoryPanel(props: SlotProps) {
                 onClick: () => setShowCompare((v) => !v),
               }, showCompare ? t('收起对比') : t('与基准对比'))
             : null,
+          baseline && current && showCompare
+            ? React.createElement('button', {
+                className: 'iterate-btn', 'data-copied': copiedKey === 'rc-copy' ? '' : undefined,
+                onClick: () => copyInstruction('rc-copy', buildRunCompareMarkdown(compareRuns(baseline, current), {
+                  指标: t('指标'),
+                  基准: t('基准'),
+                  当前: t('当前'),
+                  变化: t('变化'),
+                  ...Object.fromEntries(
+                    Object.entries(RUN_COMPARE_METRIC_LABELS).map(([k, v]) => [k, v[getLang()]]),
+                  ),
+                })),
+                title: t('复制跨会话对比表为 Markdown（可粘贴进 PR / issue / CI 注释）'),
+              }, copiedKey === 'rc-copy' ? t('已复制') : t('复制对比表'))
+            : null,
           baseline
             ? React.createElement('button', {
                 className: 'iterate-btn', 'data-ghost': '',
@@ -3327,6 +3345,19 @@ function ObservatoryPanel(props: SlotProps) {
     // Reset a stale FAIL certificate before a fresh iteration — the tool's
     // `clear` operation existed since v3.5.1 but had no client entry point.
     const gateClearInstruction = buildQualityGateClearInstruction()
+    // v3.17: one-click recompute. The gate's `compute` payload needs a
+    // hand-shaped `findingsByRound` convergence series that a human cannot
+    // type by hand — this derives it from the session manifest the panel is
+    // already rendering, so the recompute can never disagree with the view.
+    const computeInput = deriveQualityGateComputeInput(
+      manifest as unknown as Record<string, unknown> | null | undefined,
+      qualityGate as unknown as Record<string, unknown> | null | undefined,
+    )
+    const computeInstruction = buildQualityGateComputeInstruction(computeInput)
+    const hasComputeData =
+      computeInput.dimensions.length > 0 ||
+      computeInput.findings.length > 0 ||
+      computeInput.validationResults.length > 0
     const gate = qualityGate
     const dims = gate && gate.dimensions ? gate.dimensions : []
     const hasGate = gate !== null && Boolean(gate.overallStatus || gate.overallScore != null || dims.length > 0)
@@ -3342,6 +3373,14 @@ function ObservatoryPanel(props: SlotProps) {
         onClick: () => copyInstruction('qgate', gateInstruction),
         title: t('复制 iterate_quality_gate 查询指令（含 JSON 参数）'),
       }, copiedKey === 'qgate' ? t('已复制') : t('查询门禁')),
+      React.createElement('button', {
+        className: 'iterate-btn', 'data-primary': '', 'data-copied': copiedKey === 'qgate-compute' ? '' : undefined,
+        disabled: !hasComputeData,
+        onClick: () => copyInstruction('qgate-compute', computeInstruction),
+        title: hasComputeData
+          ? t('复制 iterate_quality_gate compute 指令：从当前会话推导维度/发现/验证结果，一键重算并持久化门禁证书')
+          : t('当前会话没有可重算的门禁数据（需先有审查/验证结果）'),
+      }, copiedKey === 'qgate-compute' ? t('已复制') : t('重算门禁')),
       React.createElement('button', {
         className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === 'qgate-clear' ? '' : undefined,
         onClick: () => copyInstruction('qgate-clear', gateClearInstruction),
