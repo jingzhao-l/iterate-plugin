@@ -562,14 +562,14 @@ const ITERATE_CSS = `
 .iterate-filter-search::placeholder { color: var(--dsw-alias-label-secondary); }
 .iterate-filter-count { margin-left: auto; white-space: nowrap; }
 .iterate-filter-chip { padding: 3px 9px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
-.iterate-filter-chip:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+@media (hover: hover) { .iterate-filter-chip:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); } }
 .iterate-filter-chip[data-active] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); font-weight: 600; }
 .iterate-filter-clear { padding: 3px 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent); color: var(--dsw-alias-state-warn-primary); background: transparent; font-size: 11px; cursor: pointer; }
-.iterate-filter-clear:hover { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); }
+@media (hover: hover) { .iterate-filter-clear:hover { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); } }
 .iterate-batch { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .iterate-batch-label { margin-right: 2px; }
 .iterate-batch-btn { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
-.iterate-batch-btn:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+@media (hover: hover) { .iterate-batch-btn:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); } }
 .iterate-finding[data-selected] { outline: 1px solid var(--dsw-alias-brand-primary); outline-offset: -1px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 6%, transparent); }
 
 /* Trend chart (inline SVG) */
@@ -647,7 +647,7 @@ const ITERATE_CSS = `
 
 /* v3.0: Command buttons */
 .iterate-cmd { padding: 4px 10px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 11px; cursor: pointer; font-weight: 500; }
-.iterate-cmd:hover { background: var(--dsw-alias-bg-layer-2); }
+@media (hover: hover) { .iterate-cmd:hover { background: var(--dsw-alias-bg-layer-2); } }
 .iterate-cmd[data-primary] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 .iterate-cmd[data-danger] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent); color: var(--dsw-alias-state-error-primary); }
 .iterate-cmd:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -692,7 +692,7 @@ const ITERATE_CSS = `
 /* Button variants */
 .iterate-btn[data-ghost] { background: transparent; }
 .iterate-btn[data-danger] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent); color: var(--dsw-alias-state-error-primary); background: transparent; }
-.iterate-btn[data-danger]:hover { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); }
+@media (hover: hover) { .iterate-btn[data-danger]:hover { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); } }
 .iterate-btn[data-confirm] { border-color: var(--dsw-alias-state-error-primary); color: #FFFFFF; background: var(--dsw-alias-state-error-primary); }
 
 /* Collapsible guide / status code blocks */
@@ -741,6 +741,22 @@ const ITERATE_CSS = `
 .iterate-obs-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
 .iterate-obs-row:last-child { border-bottom: none; }
 .iterate-obs-livebadge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; border: 1px solid currentColor; background: color-mix(in srgb, currentColor 10%, transparent); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+
+/* v3.18 — dsh-responsive-ui compliance (mobile / touch, see .agents/skills/dsh-responsive-ui) */
+/* §1 minimum viewport: 390 CSS px, no unintended horizontal scroll. A mono JSON
+   instruction can carry an unbreakable token; wrap it instead of forcing width. */
+.iterate-payload { overflow-wrap: anywhere; }
+.iterate-obs-mono, .iterate-obs-code { max-width: 100%; }
+@media (max-width: 480px) {
+  .iterate-progress { min-width: 0; flex-basis: 100%; }
+  .iterate-filter-search { min-width: 0; flex: 1 1 140px; }
+  .iterate-obs-head { padding: 8px 10px; }
+  .iterate-triage-foot, .iterate-filter { padding: 8px 10px; }
+}
+/* §9 input floor: a coarse pointer must not trip iOS Safari's focus zoom. */
+@media (pointer: coarse) {
+  .iterate-filter-search, .iterate-filter-select, .iterate-obs-input { font-size: 16px; }
+}
 `
 
 // ─── Small helpers ───────────────────────────────────────────────────────────
@@ -4088,6 +4104,34 @@ const LangProgress = withLang(ProgressCapsule)
 const LangSettings = withLang(SettingsPanel)
 
 /**
+ * v3.18 — iterate settings-page navigation icon (dsh 0.2.2-rc.1 capability).
+ *
+ * The shell lets a settings surface supply its own navigation glyph: register a
+ * `settings.section.icon` contribution with the SAME `id` as the `settings.section`
+ * it belongs to. The shell owns the button, label and decorative icon wrapper, so
+ * this component only draws the glyph (`size` in px, `active` state). Disposing the
+ * contribution restores the default glyph, so it degrades cleanly on hosts that do
+ * not declare the slot yet.
+ */
+function IterateSettingsIcon(props: { size?: number; active?: boolean }): React.ReactElement {
+  const size = typeof props.size === 'number' && props.size > 0 ? props.size : 16
+  return React.createElement(
+    'svg',
+    { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+    // Iterate loop: an open circular arrow plus a terminal head.
+    React.createElement('path', {
+      d: 'M13.5 8 A5.5 5.5 0 1 1 8 2.5',
+      stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round',
+    }),
+    React.createElement('path', {
+      d: 'M8 1 L10.2 3.2 L8 5.4',
+      stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round',
+    }),
+    React.createElement('circle', { cx: 8, cy: 8, r: 1.2, fill: 'currentColor' }),
+  )
+}
+
+/**
  * Plugin client entry. Called by the dsh client runtime with its context.
  */
 export function apply(ctx: ClientContext): void {
@@ -4173,6 +4217,15 @@ export function apply(ctx: ClientContext): void {
       slotsSvc?.register(
         { name: 'settings.section', id: 'iterate-settings', order: 30, label: () => 'iterate' },
         (props) => React.createElement(LangSettings, props),
+      ),
+    )
+
+    // v3.18: settings-page navigation icon (dsh 0.2.2-rc.1 `settings.section.icon`).
+    // Same `id` as the section contribution above so the shell swaps the default glyph.
+    slotsSvc.inject('settings.section.icon', () =>
+      slotsSvc?.register(
+        { name: 'settings.section.icon', id: 'iterate-settings', order: 30 },
+        (props) => React.createElement(IterateSettingsIcon, props),
       ),
     )
   }

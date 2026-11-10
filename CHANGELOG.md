@@ -5,6 +5,42 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.18.0] - 2026-11-10
+
+设置页导航图标 + 移动端合规响应式（Settings-page navigation icon + dsh-responsive-ui compliance）。
+把 dsh `0.2.2-rc.1` 的「插件为设置页提供导航图标」新能力转成插件的净新增交互面，并把官方
+`dsh-responsive-ui` 的移动/触屏硬性要求补齐——按语义化版本是一次 minor。
+
+- **设置页导航图标（dsh 0.2.2-rc.1 `settings.section.icon` 能力）**：此前 iterate 的
+  设置面板在 dsh 设置页导航里只有默认图标；现在注册与 `settings.section` 同 id 的
+  `settings.section.icon` 贡献，壳层以 iterate 专属循环箭头替换默认字形（`size`/`active`
+  由壳层传入，卸载自动恢复默认图标）。宿主未声明该槽位时优雅降级为默认字形，绝不拖垮。
+- **移动端合规响应式（官方 `dsh-responsive-ui`）**：面板此前无任何 `@media` 分支，
+  在手机上会触发 iOS 聚焦缩放 / 横向溢出。本轮补齐官方硬性要求——
+  `@media (hover: hover)` 门控全部 5 条 hover 效果（触屏点击不再残留 hover 痕迹）、
+  `@media (pointer: coarse)` 下文本输入与文本域 16px 地板（防 iOS Safari 聚焦放大）、
+  `overflow-wrap: anywhere` 兜底超长 mono JSON 载荷、`@media (max-width: 480px)` 下
+  放宽进度条/搜索框最小宽度并按窄屏收紧内边距（满足 390px 最小视口不溢出）。
+
+### Added
+
+- **设置页导航图标** —— `IterateSettingsIcon`（纯 SVG 组件，`size`/`active` 由壳层注入，
+  模块级定义保持身份稳定）+ `settings.section.icon` 注册（`id: 'iterate-settings'`，
+  与设置面板同 id）。dsh 0.2.2-rc.1 插件面新能力转化。
+- **移动端合规 CSS** —— 注入样式尾部新增响应式块：hover 门控（5 条 `:hover` 规则包进
+  `@media (hover: hover)`）、`(pointer: coarse)` 16px 输入地板（`.iterate-filter-search` /
+  `.iterate-filter-select` / `.iterate-obs-input`）、`overflow-wrap: anywhere`、
+  `(max-width: 480px)` 窄屏松弛。全部随 `ITERATE_CSS` 注入，无需额外样式文件。
+
+### Tests
+
+- `test/client-render.test.ts` 新增 4 例：图标注册存在且 id 匹配设置面板 / 图标渲染
+  svg 且 size 生效；hover 门控媒体查询存在 / 16px 粗指针地板与载荷换行存在。
+- 测试台 `boot()` 改为同 id 保首个注册（设置面板先注册，图标不覆盖它，图标直接经
+  `registrations` 断言）。
+- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿（详见
+  RELEASE.md 3.18.0 记录）。
+
 ## [3.17.0] - 2026-11-09
 
 一键重算门禁 + 对比表复制（One-click gate recompute + comparison-table copy）。

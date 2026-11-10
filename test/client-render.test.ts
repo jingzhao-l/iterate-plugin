@@ -81,6 +81,7 @@ interface Rendered {
 interface TestDocument {
   createElement(tag: string): Rendered
   body: { appendChild(child: Rendered): void }
+  querySelector(selector: string): Rendered | null
 }
 
 interface StorageLike {
@@ -154,15 +155,20 @@ function boot(): Map<string, Mount> {
   client.apply(fakeClientContext())
   const byId = new Map<string, Mount>()
   for (const r of registrations) {
-    byId.set(r.meta.id, (props) => {
-      const container = document.createElement('div')
-      document.body.appendChild(container)
-      const root = createRoot(container)
-      React.act(() => {
-        root.render(r.render(props))
+    // A settings.section and its settings.section.icon share the same `id`
+    // (the shell matches them by id). The panel registers first, so keep it as
+    // the mountable entry; the icon is asserted directly via `registrations`.
+    if (!byId.has(r.meta.id)) {
+      byId.set(r.meta.id, (props) => {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const root = createRoot(container)
+        React.act(() => {
+          root.render(r.render(props))
+        })
+        return container
       })
-      return container
-    })
+    }
   }
   return byId
 }
@@ -938,5 +944,51 @@ describe('ObservatoryPanel copy-comparison-table (v3.17)', () => {
     const html = panel.textContent ?? ''
     assert.match(html, /\| 指标 \| 基准 \| 当前 \| 变化 \|/)
     assert.match(html, /\| 轮次 \| 4 \| 3 \| -1 \|/)
+  })
+})
+
+describe('settings navigation icon (v3.18, dsh 0.2.2-rc.1)', () => {
+  it('registers a settings.section.icon contribution matching the settings section id', () => {
+    boot()
+    const icon = registrations.find((r) => r.meta.name === 'settings.section.icon')
+    assert.ok(icon, 'settings.section.icon is registered')
+    assert.equal(icon.meta.id, 'iterate-settings', 'matches the settings.section id')
+  })
+
+  it('renders an svg glyph with the requested size', () => {
+    boot()
+    const icon = registrations.find((r) => r.meta.name === 'settings.section.icon')
+    assert.ok(icon)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    React.act(() => {
+      root.render(icon!.render({ size: 20, active: true }))
+    })
+    const svg = container.querySelector('svg')
+    assert.ok(svg, 'the icon renders an svg element')
+    assert.equal(svg!.getAttribute('width'), '20')
+    assert.equal(svg!.getAttribute('aria-hidden'), 'true')
+    root.unmount()
+  })
+})
+
+describe('dsh-responsive-ui compliance CSS (v3.18)', () => {
+  it('gates hover effects under @media (hover: hover)', () => {
+    boot()
+    const css = document.querySelector('style[data-iterate-lock="1"]')?.textContent ?? ''
+    assert.match(css, /@media \(hover: hover\)/, 'hover effects are hover-capable gated')
+    assert.match(css, /\.iterate-filter-chip:hover/, 'the chip hover rule is preserved')
+    assert.match(css, /\.iterate-cmd:hover/, 'the command hover rule is preserved')
+  })
+
+  it('sets a 16px coarse-pointer input floor and wraps long payloads', () => {
+    boot()
+    const css = document.querySelector('style[data-iterate-lock="1"]')?.textContent ?? ''
+    assert.match(css, /@media \(pointer: coarse\)/, 'coarse-pointer block present')
+    assert.match(css, /\.iterate-filter-search[^}]*font-size: 16px/, 'search input gets the 16px floor')
+    assert.match(css, /\.iterate-obs-input[^}]*font-size: 16px/, 'observatory textarea gets the 16px floor')
+    assert.match(css, /overflow-wrap: anywhere/, 'mono payload wraps instead of overflowing')
+    assert.match(css, /@media \(max-width: 480px\)/, 'narrow-viewport block present')
   })
 })
