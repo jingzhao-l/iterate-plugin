@@ -28,7 +28,10 @@
  */
 
 /** Report formats accepted by the tool and the export buttons. */
-export const REPORT_FORMATS = ['markdown', 'sarif', 'json'] as const
+export const REPORT_FORMATS = ['markdown', 'sarif', 'json', 'fence'] as const
+
+/** Fence language Chat renders as the iterate run card (see src/client/fence.ts). */
+export const CHAT_FENCE_LANG = 'iterate-report'
 
 /** Severity ordering (lowest index = most severe). */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low'] as const
@@ -640,7 +643,22 @@ export function renderRunReport(
 ): string | SarifLog | RunReportJson {
   if (format === 'sarif') return renderRunReportSarif(manifest, extra, opts)
   if (format === 'json') return renderRunReportJson(manifest, extra)
+  if (format === 'fence') return renderRunReportFence(manifest, extra)
   return renderRunReportMarkdown(manifest, extra, opts)
+}
+
+/**
+ * Render the `iterate-report` fence: the complete normalized run model as JSON
+ * wrapped in the fence Chat renders as an interactive run card. This is the
+ * bridge between the report tool and the chat card — the exact payload the
+ * observatory's "copy chat card" action produces.
+ */
+export function renderRunReportFence(
+  manifest: unknown,
+  extra?: { qualityGate?: unknown; experienceBank?: unknown; defenseEvents?: unknown } | null,
+): string {
+  const doc = renderRunReportJson(manifest, extra)
+  return `\`\`\`${CHAT_FENCE_LANG}\n${JSON.stringify(doc, null, 2)}\n\`\`\`\n`
 }
 
 /**

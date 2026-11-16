@@ -211,6 +211,23 @@ pnpm add /path/to/iterate-skill/harness/iterate-plugin
 - **拉取磁盘快照**——新会话（或刷新后）面板是空的，哪怕磁盘上 `.iterate/` 早有产物。拉取按钮复制一条指令，让模型调用只读工具（`iterate_status`、`iterate_transcript` `read`、`iterate_quality_gate` `read`、`iterate_experience` `list`、`iterate_defense_events` `list`、`iterate_history`）并把**完整**结果回显进会话流；会话扫描器随之填充看板、F2、F5、F8、F9、F10。空态文案区分"磁盘无数据"与"尚未拉取"。
 - **导出 JSON**——一键把整个观测台序列化为 JSON：manifest + 实时流 + `qualityGate` + `experienceBank` + `defenseEvents` + `report`（优先下载，失败回退复制到剪贴板）。
 
+### 聊天报告卡片（v3.19）
+
+当助手回复以 ``` ``iterate-report`` ``` 围栏代码块结尾（内容为一次 `iterate_report` 运行的 JSON）时，Chat 会把它渲染成**可交互运行卡片**，而不是一堵原始 JSON：
+
+- 结论 + 项目（已收敛 / 运行中 / 达到轮次上限 / 验证中止）、轮次、发现数与严重度分布、已修复、验证通过；
+- 质量闸门（状态、总分、验证通过率、分维度分数）；
+- 前三项发现（严重度徽章 + `file:line` + 摘要；更长列表显示 `+N 更多`）；
+- 就地**复制 Markdown**（可粘贴进 PR 的报告）、**复制 JSON**、**打开指挥中心**（实时观测台）。
+
+这基于 dsh **0.2.2-rc.2** 的按语言键控围栏槽位（`conversation.chat.markdown.fence`）：插件为 `iterate-report` 语言注册一个层。不支持该槽位的宿主保留普通代码块——数据不丢、不崩溃。消息仍在流式传输时，层原样让出代码块（不会闪半截解析错误）；无法解析的载荷回退到代码块并带一行简短警告；`meta="compact"`（```` ```iterate-report compact ````）隐藏发现列表，卡片更紧凑。
+
+围栏有两种产出方式：
+- **观测台 → 复制聊天卡片**——复制当前运行对应的完整围栏；
+- **`iterate_report { format: "fence" }`**——工具直接输出同一个围栏（把返回内容粘贴进回复即可）。
+
+两者共用与报告导出完全相同的归一化 JSON，因此卡片永远不会与文件 / PR 报告不一致。
+
 ### 从设置页管理配置
 
 设置区复制一份配置编辑指引，列出支持的 `iterate.config.yaml` 字段——包括 `validation.commands`（并显式警告：留空意味着每一轮迭代都不受任何测试保护）——并提供**字段选择器**：选中字段后，按钮会生成对应的 `iterate_config write` 指令（schema 校验、自动备份、失败自动回滚）供你粘贴回会话。
@@ -341,7 +358,7 @@ validation:
 ### Node.js / DSH 兼容范围
 
 - **Node.js**：`>=20`（`package.json` 的 `engines.node`）。
-- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5`、`0.2.2-alpha.2`、`0.2.2-alpha.3`、`0.2.2-rc.1`（共 30 个版本，`0.1.1-rc.1` … `0.2.2-rc.1`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.2-rc.1` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch，以及 v3.9 起的会话状态记录接口）。插件同时声明 `engines.dsh`（`>=0.1.1-rc.1`），使 dsh ≥ 0.2.2-rc.1 运行时只依据该范围判断兼容性（更早的运行时仍回退校验 `package.json` 中列出的 `@deepseek-ai/dsh-*` peer 版本）。
+- **DSH**：`package.json` 的 `dsh.compatibility.dshReleases` 字段是发布兼容性的**唯一真源**（本 README 逐字镜像该字段；两者需同步更新）。以下官方版本声明为 `compatible`：`0.1.1-rc.1`、`0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1`、`0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1`、`0.1.5-rc.2`、`0.1.6-alpha.1`、`0.1.6-alpha.2`、`0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`、`0.2.1-alpha.2`、`0.2.1-alpha.3`、`0.2.1-alpha.4`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5`、`0.2.2-alpha.2`、`0.2.2-alpha.3`、`0.2.2-rc.1`、`0.2.2-rc.2`、`0.2.2-rc.3`（共 32 个版本，`0.1.1-rc.1` … `0.2.2-rc.3`）。插件基于 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-util-values` `0.2.2-rc.3` 构建，只使用公开契约（工具注册、客户端 slots + theme、bundle patch，以及 v3.9 起的会话状态记录接口）。插件同时声明 `engines.dsh`（`>=0.1.1-rc.1`），使 dsh ≥ 0.2.2-rc.3 运行时只依据该范围判断兼容性（更早的运行时仍回退校验 `package.json` 中列出的 `@deepseek-ai/dsh-*` peer 版本）。
 - **一次性 Profile 证据（真实，`dsh` CLI `0.1.1-rc.1`）**：在临时 `$DSH_HOME` 下
   `dsh plugin --profile <p> add <本仓库>` 约 449ms 完成安装；`dsh --profile <p>
   --dump-config` 正确合成 `iterate-plugin` bundle patch；`dsh plugin --profile <p>

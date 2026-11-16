@@ -212,6 +212,23 @@ Press `1`–`9` to jump to F1–F9, `0` for F10, and `-` to return to the live s
 - **拉取磁盘快照 (pull disk snapshot)** — a new session (or a refresh) starts with empty panels even when `.iterate/` already holds artifacts on disk. The pull button copies an instruction asking the model to call the read-side tools (`iterate_status`, `iterate_transcript` `read`, `iterate_quality_gate` `read`, `iterate_experience` `list`, `iterate_defense_events` `list`, `iterate_history`) and echo their **full** results into the stream; the session scanners then fill the dashboard, F2, F5, F8, F9, F10. Empty states distinguish "no data on disk" from "not pulled yet".
 - **导出 JSON (export)** — one click serializes the whole observatory to JSON: manifest + live feed + `qualityGate` + `experienceBank` + `defenseEvents` + `report` (download first, copy-to-clipboard fallback).
 
+### Chat report card (v3.19)
+
+An assistant reply that ends with a fenced block ```` ```iterate-report ```` (followed by the JSON of an `iterate_report` run) renders as an **interactive run card** instead of a wall of raw JSON:
+
+- verdict + project (converged / running / max rounds / validation-aborted), rounds, findings + severity mix, fixes applied, validations passed;
+- the quality gate (status, score, verification rate, per-dimension scores);
+- the top three findings (severity badge, `file:line`, summary; `+N more` for longer lists);
+- **copy Markdown** (a PR-pasteable report), **copy JSON**, and **open command center** (the live observatory) right in the chat.
+
+This is built on dsh **0.2.2-rc.2's** keyed fence slot (`conversation.chat.markdown.fence`): the plugin registers a layer for the `iterate-report` language. A host that predates the slot keeps the plain code block — nothing is lost, nothing crashes. While a message is still streaming, the layer yields the code block untouched (no half-parsed flash); an unparsable payload falls back to the code block with a short warning; `meta="compact"` (```` ```iterate-report compact ````) hides the findings list for a denser card.
+
+The fence is produced two ways:
+- **observatory → 复制聊天卡片 (copy chat card)** — copies the exact fence for the current run;
+- **`iterate_report { format: "fence" }`** — renders the same fence as the tool's output (paste the returned content into a reply).
+
+Both use the identical normalized JSON the report export uses, so the card can never disagree with the file/PR report.
+
 ### Config management from the settings page
 
 The settings section copies a config-edit guide that lists the supported `iterate.config.yaml` fields — including `validation.commands` (with an explicit warning that an empty list means every round runs unprotected) — and offers a **field picker**: choose a field, and the button generates the matching `iterate_config write` instruction (schema-validated, auto-backup, auto-rollback) for you to paste back.
@@ -352,9 +369,9 @@ All runtime state lives under `.iterate/` at the project root (can be excluded v
   `0.2.0-rc.2`, `0.2.1-alpha.1`, `0.2.1-alpha.2`, `0.2.1-alpha.3`,
   `0.2.1-alpha.4`, `0.2.1-alpha.5`, `0.2.1-rc.1`, `0.2.1-rc.2`,
    `0.2.1-rc.3`, `0.2.1-rc.4`, `0.2.1-rc.5`, `0.2.2-alpha.2`,
-  `0.2.2-alpha.3`, `0.2.2-rc.1` (30 releases, `0.1.1-rc.1` … `0.2.2-rc.1`).
+  `0.2.2-alpha.3`, `0.2.2-rc.1`, `0.2.2-rc.2`, `0.2.2-rc.3` (32 releases, `0.1.1-rc.1` … `0.2.2-rc.3`).
   The plugin is built against `@deepseek-ai/dsh-tools` /
-  `@deepseek-ai/dsh-util-values` `0.2.2-rc.1` and uses only public contracts
+  `@deepseek-ai/dsh-util-values` `0.2.2-rc.3` and uses only public contracts
   (tool registration, client slots + theme, bundle patch, and — since v3.9 —
   the session state-record API for session-linked run records).
   It also declares `engines.dsh` (`>=0.1.1-rc.1`) so the dsh ≥ 0.2.2-rc.1

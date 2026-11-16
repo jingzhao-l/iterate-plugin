@@ -164,7 +164,10 @@ function boot(): Map<string, Mount> {
         document.body.appendChild(container)
         const root = createRoot(container)
         React.act(() => {
-          root.render(r.render(props))
+          // dsh mounts the registered `render` as a component (owner props), so
+          // a raw layer (the iterate-report fence) can use hooks. A slot render
+          // that already returns an element behaves identically under it.
+          root.render(React.createElement(r.render as never, props))
         })
         return container
       })
@@ -263,11 +266,11 @@ describe('client bootstrap', () => {
     assert.deepEqual(client.inject, ['slots', 'theme'])
   })
 
-  it('registers all five render entries across three slots', () => {
+  it('registers all six render entries across four slots', () => {
     const slots = boot()
     assert.deepEqual(
       [...slots.keys()].sort(),
-      ['iterate-dashboard', 'iterate-observatory', 'iterate-progress', 'iterate-settings', 'iterate-turn-tail'],
+      ['iterate-dashboard', 'iterate-observatory', 'iterate-plugin/fence/iterate-report', 'iterate-progress', 'iterate-settings', 'iterate-turn-tail'],
     )
   })
 

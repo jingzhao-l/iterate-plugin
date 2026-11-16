@@ -127,13 +127,19 @@ import {
   detectLang,
   getLang,
   setLang,
-  subscribeLang,
   t,
   tf,
   LANG_NAMES,
   LANG_STORAGE_KEY,
-  type Lang,
 } from './i18n.ts'
+import { useLang } from './lang.ts'
+// v3.19: `iterate-report` chat Markdown-fence card (dsh 0.2.2-rc.2 keyed
+// fence slot `conversation.chat.markdown.fence`) + the shared fence builder
+// used by the observatory's "copy chat card" action.
+import {
+  registerReportFence,
+  toIterateFence,
+} from './fence.ts'
 import { noteSession, readSession, subscribeSession } from './session-cache.ts'
 // v3.14: right-click menu contributions (dsh 0.2.2-alpha.3 unified context menus).
 import {
@@ -214,6 +220,10 @@ interface SlotsRegistrationMeta {
   name: string
   id: string
   order?: number
+  /** Keyed hoc slots (dsh 0.2.2-rc.2+): the dispatch key this layer serves. */
+  key?: string
+  /** Chain/hoc ordering override (ascending; registration order otherwise). */
+  priority?: number
   label?: () => string
   select?: (owner: SlotProps) => { matched: boolean } | null
 }
@@ -742,6 +752,83 @@ const ITERATE_CSS = `
 .iterate-obs-row:last-child { border-bottom: none; }
 .iterate-obs-livebadge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; border: 1px solid currentColor; background: color-mix(in srgb, currentColor 10%, transparent); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
 
+/* v3.19 — iterate-report chat fence card (dsh 0.2.2-rc.2 keyed fence slot).
+   Renders in the chat flow where the raw JSON fence used to appear. Density is
+   tuned for a conversation column: one header row, one metric row, at most
+   three findings. Every color is a dsw token (or color-mix of one), so the
+   card follows light/dark and custom themes. */
+.iterate-fence {
+  margin: 6px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1); padding: 10px 12px;
+  font-size: 12px; color: var(--dsw-alias-label-primary); max-width: 100%; overflow: hidden;
+}
+.iterate-fence-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.iterate-fence-title { font-weight: 650; }
+.iterate-fence-project {
+  font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px;
+  color: var(--dsw-alias-label-secondary); max-width: 46ch; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.iterate-fence-mode { font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-verdict { display: inline-flex; align-items: center; padding: 1px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.iterate-fence-verdict[data-tone="ok"] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 13%, transparent); }
+.iterate-fence-verdict[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 13%, transparent); }
+.iterate-fence-verdict[data-tone="muted"] { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 13%, transparent); }
+.iterate-fence-metrics { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-top: 8px; }
+.iterate-fence-metric { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.iterate-fence-metric-label { font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-metric-value { font-size: 13px; color: var(--dsw-alias-label-primary); }
+.iterate-fence-mix { margin-top: 4px; font-size: 11px; color: var(--dsw-alias-label-secondary); font-family: var(--dsw-font-mono, ui-monospace, monospace); }
+.iterate-fence-empty { margin-top: 4px; font-size: 11px; color: var(--dsw-alias-state-success-primary); }
+.iterate-fence-gate { margin-top: 8px; padding: 7px 9px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); }
+.iterate-fence-gate-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.iterate-fence-gate-label { font-size: 11px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-gate-status { padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; }
+.iterate-fence-gate-status[data-status="pass"] { color: var(--dsw-alias-state-success-primary); background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 13%, transparent); }
+.iterate-fence-gate-status[data-status="warn"] { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 13%, transparent); }
+.iterate-fence-gate-status[data-status="fail"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 13%, transparent); }
+.iterate-fence-gate-status[data-status="pending"] { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 13%, transparent); }
+.iterate-fence-gate-meta { font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-gate-fail { margin-top: 4px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+.iterate-fence-dims { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.iterate-fence-dim { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-dim-score { font-weight: 600; }
+.iterate-fence-dim-score[data-status="pass"] { color: var(--dsw-alias-state-success-primary); }
+.iterate-fence-dim-score[data-status="warn"] { color: var(--dsw-alias-state-warn-primary); }
+.iterate-fence-dim-score[data-status="fail"] { color: var(--dsw-alias-state-error-primary); }
+.iterate-fence-findings { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.iterate-fence-finding { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.iterate-fence-sev { flex-shrink: 0; padding: 0 6px; border-radius: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.iterate-fence-sev[data-sev="critical"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 15%, transparent); }
+.iterate-fence-sev[data-sev="high"] { color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 15%, transparent); }
+.iterate-fence-sev[data-sev="medium"] { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 15%, transparent); }
+.iterate-fence-sev[data-sev="low"] { color: var(--dsw-alias-label-secondary); background: color-mix(in srgb, var(--dsw-alias-label-secondary) 15%, transparent); }
+.iterate-fence-loc { flex-shrink: 0; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-summary { min-width: 0; overflow-wrap: anywhere; color: var(--dsw-alias-label-primary); }
+.iterate-fence-more { font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.iterate-fence-defense { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.iterate-fence-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.iterate-fence-btn {
+  padding: 3px 9px; border-radius: 7px; border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+  font-size: 11px; cursor: pointer;
+}
+.iterate-fence-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.iterate-fence-btn[data-copied] { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
+.iterate-fence-btn[data-failed] { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
+.iterate-fence-warn {
+  margin-bottom: 6px; padding: 4px 8px; border-radius: 6px; font-size: 11px;
+  color: var(--dsw-alias-state-warn-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 480px) {
+  .iterate-fence { padding: 8px 10px; }
+  .iterate-fence-project { max-width: 100%; }
+  .iterate-fence-metrics { gap: 10px; }
+  .iterate-fence-actions { gap: 4px; }
+}
+
 /* v3.18 — dsh-responsive-ui compliance (mobile / touch, see .agents/skills/dsh-responsive-ui) */
 /* §1 minimum viewport: 390 CSS px, no unintended horizontal scroll. A mono JSON
    instruction can carry an unbreakable token; wrap it instead of forcing width. */
@@ -822,13 +909,9 @@ function removeStorageByPrefix(prefix: string): number {
  * Subscribe a component to language changes. Components that render `t()` /
  * `tf()` must call this so a language switch repaints them — the slot
  * wrappers registered in `apply()` apply it once per slot, so no panel can be
- * forgotten.
+ * forgotten. The hook itself lives in `lang.ts` because the report-fence layer
+ * (`fence.ts`) needs the same binding.
  */
-function useLang(): Lang {
-  const [lang, set] = React.useState<Lang>(getLang())
-  React.useEffect(() => subscribeLang(set), [])
-  return lang
-}
 
 /**
  * Newest session published by the session-scoped slots (session-cache.ts).
@@ -2624,8 +2707,17 @@ function ObservatoryPanel(props: SlotProps) {
     })
   }
 
-  /** Force every thread open (or closed) and drop per-thread state. */
-  const setAllThreads = (mode: 'all' | 'none') => {
+  /** v3.19: copy the exact `iterate-report` fence Chat renders as a run card.
+   *  Same normalized JSON as the report export, wrapped in the fence language
+   *  `fence.ts` registers, so the pasted block cannot drift from the card's
+   *  data model. */
+  const copyChatCard = () => {
+    if (!manifest) return
+    const fence = toIterateFence(renderRunReportJson(manifest, { qualityGate, experienceBank, defenseEvents }))
+    copyInstruction('chat-card', fence)
+  }
+
+  /** Force every thread open (or closed) and drop per-thread state. */  const setAllThreads = (mode: 'all' | 'none') => {
     setThreadMode(mode)
     setExpandedThreads(new Set())
   }
@@ -4059,6 +4151,14 @@ function ObservatoryPanel(props: SlotProps) {
               onClick: () => copyInstruction('pull-snapshot', pullInstruction),
               title: pullTitle,
             }, copiedKey === 'pull-snapshot' ? t('已复制') : t('拉取磁盘快照')),
+            // v3.19: the chat report card — copies the exact ```iterate-report
+            // fence Chat renders as an interactive run card (metrics, gate,
+            // findings, copy actions). Paste it into a reply / PR comment.
+            React.createElement('button', {
+              className: 'iterate-btn', 'data-copied': copiedKey === 'chat-card' ? '' : undefined,
+              onClick: copyChatCard,
+              title: t('复制 ```iterate-report 代码块：粘贴到回复里，Chat 会渲染成可交互运行卡片（指标 / 质量闸门 / 发现 / 复制按钮）'),
+            }, copiedKey === 'chat-card' ? t('已复制') : t('复制聊天卡片')),
           ),
           React.createElement('div', { className: 'iterate-obs-tabs', role: 'tablist', 'aria-label': t('观测台页签（快捷键 1-9 / 0 / -）') },
             ...OBS_TABS.map((t) =>
@@ -4228,6 +4328,15 @@ export function apply(ctx: ClientContext): void {
         (props) => React.createElement(IterateSettingsIcon, props),
       ),
     )
+
+    // v3.19: `iterate-report` chat Markdown fence (dsh 0.2.2-rc.2 keyed hoc slot
+    // `conversation.chat.markdown.fence`). A host that predates the keyed-fence
+    // capability never declares the slot, so the inject is a no-op and the raw
+    // JSON block stays readable — no crash, no lost data.
+    registerReportFence(slotsSvc, {
+      copyText,
+      openObservatory: (tab) => { openObservatory(tab === undefined ? undefined : { tab }) },
+    })
   }
 
   // 5b. v3.14: right-click menu contributions (dsh 0.2.2-alpha.3 unified

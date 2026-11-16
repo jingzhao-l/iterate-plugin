@@ -27,7 +27,9 @@
  *     bots can consume the exact same facts the human report shows.
  */
 /** Report formats accepted by the tool and the export buttons. */
-export const REPORT_FORMATS = ['markdown', 'sarif', 'json'];
+export const REPORT_FORMATS = ['markdown', 'sarif', 'json', 'fence'];
+/** Fence language Chat renders as the iterate run card (see src/client/fence.ts). */
+export const CHAT_FENCE_LANG = 'iterate-report';
 /** Severity ordering (lowest index = most severe). */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low'];
 /** Human labels for the report, keyed by language. */
@@ -480,7 +482,19 @@ export function renderRunReport(format, manifest, extra, opts) {
         return renderRunReportSarif(manifest, extra, opts);
     if (format === 'json')
         return renderRunReportJson(manifest, extra);
+    if (format === 'fence')
+        return renderRunReportFence(manifest, extra);
     return renderRunReportMarkdown(manifest, extra, opts);
+}
+/**
+ * Render the `iterate-report` fence: the complete normalized run model as JSON
+ * wrapped in the fence Chat renders as an interactive run card. This is the
+ * bridge between the report tool and the chat card — the exact payload the
+ * observatory's "copy chat card" action produces.
+ */
+export function renderRunReportFence(manifest, extra) {
+    const doc = renderRunReportJson(manifest, extra);
+    return `\`\`\`${CHAT_FENCE_LANG}\n${JSON.stringify(doc, null, 2)}\n\`\`\`\n`;
 }
 /**
  * Deterministic download filename for a report, e.g.

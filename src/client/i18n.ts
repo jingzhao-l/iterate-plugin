@@ -519,6 +519,33 @@ export const EN: Record<string, string> = {
   // ── copy feedback ────────────────────────────────────────────────────────
   已复制: 'Copied',
   复制失败: 'Copy failed',
+
+  // ── v3.19: `iterate-report` chat fence card ──────────────────────────────
+  迭代运行报告: 'Iterate run report',
+  质量闸门报告: 'Quality gate report',
+  质量闸门: 'Quality gate',
+  已达到轮次上限: 'Max rounds reached',
+  验证中止: 'Aborted by validation',
+  已停止: 'Stopped',
+  未计算: 'Not computed',
+  '另有 {a0} 项发现': '{a0} more findings',
+  '验证 {a0}%': 'Verification {a0}%',
+  总分: 'Score',
+  验证通过率: 'Verification rate',
+  检查项: 'Checks',
+  '本次运行未发现新问题': 'No findings in this run',
+  '复制 Markdown': 'Copy Markdown',
+  '复制 JSON': 'Copy JSON',
+  打开指挥中心: 'Open command center',
+  打开实时质量指挥中心: 'Open the live quality command center',
+  前置条件失败: 'Precondition failed',
+  不变量被破坏: 'Invariant violated',
+  假设被推翻: 'Assumption falsified',
+  '无法解析 iterate-report 负载：{a0}': 'Could not parse the iterate-report payload: {a0}',
+  '未识别的 iterate 负载（已回退为普通代码块）': 'Unrecognized iterate payload (falling back to the plain code block)',
+  复制聊天卡片: 'Copy chat card',
+  '复制 ```iterate-report 代码块：粘贴到回复里，Chat 会渲染成可交互运行卡片（指标 / 质量闸门 / 发现 / 复制按钮）':
+    'Copy the ```iterate-report block: paste it into a reply and Chat renders an interactive run card (metrics / quality gate / findings / copy actions)',
 }
 let current: Lang = 'zh'
 let storage: LangStorage | null = null

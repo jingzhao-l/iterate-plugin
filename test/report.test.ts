@@ -16,6 +16,7 @@ import {
   renderRunReportMarkdown,
   renderRunReportSarif,
   renderRunReportJson,
+  renderRunReportFence,
   renderRunReport,
   runReportFilename,
   sarifLevel,
@@ -128,7 +129,7 @@ describe('renderRunReportMarkdown', () => {
   })
 
   it('is registered in REPORT_FORMATS', () => {
-    assert.deepEqual(REPORT_FORMATS, ['markdown', 'sarif', 'json'])
+    assert.deepEqual(REPORT_FORMATS, ['markdown', 'sarif', 'json', 'fence'])
   })
 })
 
@@ -221,11 +222,96 @@ describe('renderRunReport / runReportFilename', () => {
     assert.equal(typeof renderRunReport('markdown', sampleManifest(), {}), 'string')
     assert.equal(typeof renderRunReport('bogus', sampleManifest(), {}), 'string')
   })
-
   it('builds deterministic filenames', () => {
     assert.equal(runReportFilename('markdown', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.md')
     assert.equal(runReportFilename('sarif', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.sarif')
     assert.equal(runReportFilename('json', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.json')
+    // the fence format reuses the Markdown extension (it IS markdown).
+    assert.equal(runReportFilename('fence', { now: '2026-10-18T01:02:03.000Z' }), 'iterate-report-2026-10-18T01-02-03-000Z.md')
+  })
+})
+
+describe('renderRunReportFence', () => {
+  it('wraps the normalized JSON in the iterate-report fence', () => {
+    const fence = renderRunReportFence(sampleManifest(), sampleExtra())
+    assert.match(fence, /^```iterate-report\n/)
+    assert.match(fence, /\n```\n$/)
+    const body = fence.split('\n').slice(1, -2).join('\n')
+    const doc = JSON.parse(body) as { $schema: string; findings: unknown[]; severityCounts: Record<string, number> }
+    assert.equal(doc.$schema, 'iterate-run-report/1')
+    assert.equal(doc.findings.length, 2)
+    assert.equal(doc.severityCounts.critical, 1)
+    assert.equal(doc.severityCounts.high, 1)
+  })
+
+  it('tolerates a null manifest', () => {
+    const fence = renderRunReportFence(null, null)
+    const body = fence.split('\n').slice(1, -2).join('\n')
+    const doc = JSON.parse(body) as { findings: unknown[]; project: string }
+    assert.equal(doc.project, '')
+    assert.deepEqual(doc.findings, [])
+  })
+})
+
+describe('iterate_report tool — fence format', () => {
+  function seedProject(): string {
+    const root = mkdtempSync(join(tmpdir(), 'iterate-report-'))
+    mkdirSync(join(root, '.iterate'), { recursive: true })
+    writeFileSync(join(root, '.iterate', 'transcript.json'), JSON.stringify(sampleManifest()), 'utf-8')
+    writeFileSync(join(root, '.iterate', 'quality-gate.json'), JSON.stringify(sampleExtra().qualityGate), 'utf-8')
+    writeFileSync(join(root, '.iterate', 'experience.json'), JSON.stringify(sampleExtra().experienceBank), 'utf-8')
+    writeFileSync(join(root, '.iterate', 'defense-events.json'), JSON.stringify(sampleExtra().defenseEvents), 'utf-8')
+    return root
+  }
+
+  it('renders the fence without writing', async () => {
+    const tool = captureReportTool()
+    const root = seedProject()
+    try {
+      const res = (await tool({ format: 'fence', path: root })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.format, 'fence')
+      const content = String(res.content)
+      assert.match(content, /^```iterate-report\n/)
+      const body = content.split('\n').slice(1, -2).join('\n')
+      const doc = JSON.parse(body) as { findings: unknown[] }
+      assert.equal(doc.findings.length, 2)
+      assert.equal(res.findings, 2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('renders a partial run (empty transcript) without throwing', async () => {
+    const tool = captureReportTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-report-'))
+    try {
+      const res = (await tool({ format: 'fence', path: root })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.match(String(res.content), /^```iterate-report\n/)
+      assert.equal(res.findings, 0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('persists the fence when write:true', async () => {
+    const tool = captureReportTool()
+    const root = seedProject()
+    try {
+      const res = (await tool({ format: 'fence', write: true, path: root })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(res.written, true)
+      const reportPath = String(res.reportPath)
+      assert.match(reportPath, /\.md$/)
+      const written = readFileSync(reportPath, 'utf-8')
+      assert.match(written, /^```iterate-report\n/)
+      const body = written.split('\n').slice(1, -2).join('\n')
+      const doc = JSON.parse(body) as { findings: unknown[] }
+      assert.equal(doc.findings.length, 2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

@@ -29,7 +29,7 @@ import { readQualityGate } from "./quality-store.js";
 import { readExperienceBank } from "./experience-store.js";
 import { readDefenseEvents } from "./defense-store.js";
 import { resultHeadline } from "./present.js";
-import { renderRunReportMarkdown, renderRunReportSarif, renderRunReportJson, REPORT_FORMATS } from "../report-render.js";
+import { renderRunReportMarkdown, renderRunReportSarif, renderRunReportJson, renderRunReportFence, REPORT_FORMATS } from "../report-render.js";
 /** Formats accepted by the tool (kept in sync with the shared renderer). */
 const FORMATS = new Set(REPORT_FORMATS);
 /** Read the persisted transcript manifest, tolerating a missing/garbled file. */
@@ -71,14 +71,18 @@ export function registerReportTool(ctx) {
             'file + line locations and the suggested fix). `format:"json"` renders the COMPLETE normalized run ' +
             'model as machine-readable JSON (findings, fixes, validations, convergence, quality gate, ' +
             'experience bank, defense events) — the lossless format for CI dashboards and PR bots. ' +
+            '`format:"fence"` renders the same JSON wrapped in the ```iterate-report fence Chat shows as an ' +
+            'interactive run card — paste it into a reply and the reader gets metrics, the quality gate, the ' +
+            'top findings and copy actions instead of raw JSON. ' +
             'Set `write:true` to also persist the report under `.iterate/report.md` / `.iterate/report.sarif` ' +
-            '/ `.iterate/report.json` and get the path back. `lang` selects the report language (zh | en). ' +
+            '/ `.iterate/report.json` (or `.iterate/report.md` for the fence) and get the path back. ' +
+            '`lang` selects the report language (zh | en). ' +
             'Read-only apart from the optional report file; never touches source files.',
         parameters: {
             format: {
                 type: 'string',
-                description: 'Report format: "markdown" (default), "sarif", or "json".',
-                enum: ['markdown', 'sarif', 'json'],
+                description: 'Report format: "markdown" (default), "sarif", "json", or "fence".',
+                enum: ['markdown', 'sarif', 'json', 'fence'],
             },
             write: {
                 type: 'boolean',
@@ -176,6 +180,11 @@ export function registerReportTool(ctx) {
                     json = doc;
                     content = JSON.stringify(doc, null, 2);
                     findings = doc.findings.length;
+                }
+                else if (format === 'fence') {
+                    // The ```iterate-report fence Chat renders as an interactive card.
+                    content = renderRunReportFence(manifest, extra);
+                    findings = renderRunReportJson(manifest, extra).findings.length;
                 }
                 else {
                     content = renderRunReportMarkdown(manifest, extra, { lang });

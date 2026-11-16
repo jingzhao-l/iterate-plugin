@@ -5,6 +5,62 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.19.0] - 2026-11-16
+
+聊天报告卡片 + dsh 0.2.2-rc.3 兼容（Chat report card + dsh 0.2.2-rc.3 compat）。
+把 dsh `0.2.2-rc.2` 的「插件按语言扩展聊天代码块渲染」新能力转成插件的**净新增交互面**——
+助手回复里的 ```iterate-report 围栏从「一堵原始 JSON」变成「可交互运行卡片」——
+并按语义化版本是一次 minor。
+
+- **聊天报告卡片（dsh 0.2.2-rc.2 `conversation.chat.markdown.fence` 键控槽位）**：
+  此前运行报告的 JSON 只能在 PR / CI / 剪贴板里流动，聊天里永远是一段没人读的
+  代码块。现在插件为 `iterate-report` 语言注册一个层：助手回复以该围栏结尾时，
+  Chat 把它渲染成紧凑卡片——结论徽章（已收敛 / 运行中 / 达到轮次上限 / 验证中止）、
+  轮次、发现数与严重度分布、已修复、验证通过、质量闸门（状态/总分/通过率/分维度）、
+  前三项发现（严重度徽章 + file:line + 摘要，更多折叠为 `+N 更多`），并就地提供
+  **复制 Markdown**（可粘贴进 PR 的报告表）/ **复制 JSON** / **打开指挥中心**。
+  防御性设计：消息流式传输时原样让出内层代码块（半截 JSON 不闪错）；无法解析或
+  未识别的载荷回退到代码块并带一行警告（数据永不丢失）；`meta="compact"` 隐藏发现
+  列表以适配窄/短卡片；全部文案走 `t()`/`tf()` 双语，跟随语言切换即时重绘；
+  无 XSS 面（全部以 React 文本渲染，无 `dangerouslySetInnerHTML`）。
+- **观测台「复制聊天卡片」**：一键把当前运行序列化为与卡片完全一致的围栏
+  （同一份归一化 JSON），粘贴进回复即渲染——无需手写 JSON。
+- **`iterate_report { format: "fence" }`**：工具直接输出同款围栏（`write:true` 时
+  落盘 `.iterate/report.md`），让 agent 无需知道卡片存在也能产出它。
+
+### Added
+
+- `src/client/fence.ts` —— 纯解析/汇总层（`parseIterateFence` / `normalizeFenceRunReport` /
+  `normalizeFenceGate` / `severityMix` / `fenceVerdict` / `buildFenceMarkdown` /
+  `toIterateFence`）与 React 层（`createReportFenceLayer` / `registerReportFence`）。
+- `src/client/lang.ts` —— 语言钩子抽取（`useLang`），供槽位组件与围栏卡片共用。
+- 观测台工具栏「复制聊天卡片」按钮（`copyChatCard`，经 `toIterateFence`）。
+- `report-render.ts`：`renderRunReportFence` + `CHAT_FENCE_LANG`；`REPORT_FORMATS`
+  增加 `'fence'`。
+- 围栏卡片 CSS（`.iterate-fence*`，全部 dsw token + `color-mix`，含窄屏 `@media`）。
+
+### Compatibility
+
+- `dsh.compatibility.dshReleases` 增加 `0.2.2-rc.2` / `0.2.2-rc.3`（32 个版本）；
+  peer 范围追加 `|| 0.2.2-rc.2 || 0.2.2-rc.3`；devDependencies 对齐 `0.2.2-rc.3`。
+  与 `0.2.2-rc.2/rc.3` 无破坏性变更：本次仅新增（键控围栏槽位、`format:"fence"`），
+  既有工具/面板 API 未动，类型检查与全量测试在 rc.3 上通过。
+
+### Tests
+
+- `test/fence.test.ts` 新增 31 例：检测（tagged/untagged/gate/invalid/unknown/empty）、
+  归一化（严重度排序、计数回退、行号守卫、防御分组）、Markdown 导出（管道转义、
+  截断提示、空载荷）、渲染（流式→内层、无效→回退+警告、紧凑 meta、复制
+  Markdown/JSON、打开指挥中心、剪贴板失败态、语言切换重绘）、防御式注册
+  （未知槽位不抛）。
+- `test/report.test.ts` 新增 `renderRunReportFence` 与 `iterate_report` fence
+  格式（含 `write:true` 落盘与空转录本容错）用例；`REPORT_FORMATS` 断言更新。
+- `test/client-i18n.test.ts` 扫描面扩展至 `src/client/fence.ts`（新字典无死项/
+  无缺译）；`test/client-render.test.ts` 注册断言更新为六条目并让 `boot()` 以
+  组件方式挂载注册渲染（围栏层可使用 hooks）。
+- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿
+  （1440 → 1476 例）。
+
 ## [3.18.0] - 2026-11-10
 
 设置页导航图标 + 移动端合规响应式（Settings-page navigation icon + dsh-responsive-ui compliance）。

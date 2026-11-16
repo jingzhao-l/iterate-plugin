@@ -157,7 +157,10 @@ const placeholders = (s: string): Set<string> =>
   new Set([...s.matchAll(/\{([A-Za-z0-9_]+)\}/g)].flatMap((m) => (m[1] === undefined ? [] : [m[1]])))
 
 const CLIENT_SRC = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
-const clientLiterals = scanLiterals(CLIENT_SRC).filter((l) => CJK.test(l.value))
+/** v3.19: the fence card is its own module — scan it too, or its copy would
+ *  ship untranslated / with dead dictionary entries. */
+const FENCE_SRC = readFileSync(new URL('../src/client/fence.ts', import.meta.url), 'utf8')
+const clientLiterals = [CLIENT_SRC, FENCE_SRC].flatMap((src) => scanLiterals(src)).filter((l) => CJK.test(l.value))
 /** Inline `{ zh, en }` pairs (module constants) — translated in place, not via `EN`. */
 const inlinePairs = clientLiterals.filter((l) => /zh:\s*$/.test(l.prefix))
 const dictionaryKeys = clientLiterals.filter((l) => !/zh:\s*$/.test(l.prefix))
