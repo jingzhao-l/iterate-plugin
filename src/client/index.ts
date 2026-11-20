@@ -99,6 +99,10 @@ import {
   buildCheckpointResumeInstruction, // #10: resume takes {operation} only
   buildCheckpointClearInstruction, // #10: clear takes {operation} only
   buildRollbackInstruction, // #10: shared rollback payload
+  buildDiffInstruction, // v3.20: pull a file's diff for fixes that predate persisted diffs
+  parseDiffLines, // v3.20: unified diff text → renderable +/-/hunk lines
+  collectSessionDiffs, // v3.20: iterate_diff results echoed into the session
+  mapValidationOutputsByCommand, // v3.20: iterate_validate stdout/stderr per command
   buildQualityGateQueryInstruction, // #10: JSON-carrying query instruction
   buildQualityGateClearInstruction, // #10: JSON-carrying clear instruction
   buildQualityGateComputeInstruction, // v3.17: one-click recompute payload from THIS session
@@ -296,6 +300,8 @@ interface ObsFix {
   linesAdded?: number
   linesRemoved?: number
   success?: boolean
+  /** v3.20: persisted unified diff (bounded server-side). */
+  diff?: string
 }
 
 interface ObsEntry {
@@ -751,6 +757,34 @@ const ITERATE_CSS = `
 .iterate-obs-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 11px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
 .iterate-obs-row:last-child { border-bottom: none; }
 .iterate-obs-livebadge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; border: 1px solid currentColor; background: color-mix(in srgb, currentColor 10%, transparent); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+
+/* v3.20 — evidence viewers: F4 inline diff + F6 command output. Read-only
+   code surfaces, so they stay monospace, scroll vertically, and wrap long
+   tokens instead of forcing the panel wide (390px viewport safe). */
+.iterate-val-item { border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.iterate-val-item:last-child { border-bottom: none; }
+.iterate-val-item > .iterate-obs-row { border-bottom: none; }
+.iterate-obs-output { margin-top: 6px; }
+.iterate-diff-wrap { margin-top: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; overflow: hidden; }
+.iterate-diff-meta { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--dsw-alias-bg-layer-2); border-bottom: 1px solid var(--dsw-alias-border-l1); font-size: 10.5px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
+.iterate-diff-stat { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-weight: 600; }
+.iterate-diff-stat[data-kind="add"] { color: var(--dsw-alias-state-success-primary); }
+.iterate-diff-stat[data-kind="del"] { color: var(--dsw-alias-state-error-primary); }
+.iterate-diff {
+  margin: 0; padding: 6px 8px; max-height: 320px; overflow: auto;
+  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 10.5px; line-height: 1.45;
+  white-space: normal; tab-size: 2;
+}
+.iterate-diff-line { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 2px; border-left: 2px solid transparent; }
+.iterate-diff-line[data-kind="add"] { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); border-left-color: var(--dsw-alias-state-success-primary); }
+.iterate-diff-line[data-kind="del"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); border-left-color: var(--dsw-alias-state-error-primary); }
+.iterate-diff-line[data-kind="hunk"] { color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 8%, transparent); }
+.iterate-diff-line[data-kind="meta"] { color: var(--dsw-alias-label-secondary); font-style: italic; }
+@media (max-width: 480px) {
+  .iterate-diff { max-height: 240px; font-size: 10px; }
+  .iterate-diff-meta { gap: 6px; }
+}
 
 /* v3.19 — iterate-report chat fence card (dsh 0.2.2-rc.2 keyed fence slot).
    Renders in the chat flow where the raw JSON fence used to appear. Density is
@@ -2524,6 +2558,9 @@ function ObservatoryPanel(props: SlotProps) {
   const experienceBank = latestExperienceBank(session)
   const defenseEvents = latestDefenseEvents(session)
   const preflight = latestPreflight(session)
+  // v3.20: evidence scans — diffs of legacy fixes and validation command output.
+  const sessionDiffs = React.useMemo(() => collectSessionDiffs(session), [session])
+  const validationOutputs = React.useMemo(() => mapValidationOutputsByCommand(session), [session])
 
   const [open, setOpen] = React.useState(false)
   const [tab, setTab] = React.useState('live')
@@ -2551,6 +2588,18 @@ function ObservatoryPanel(props: SlotProps) {
   // button still copies a back-end iterate_experience search instruction.
   // v3.0: Defense events filter
   const [defenseFilter, setDefenseFilter] = React.useState('')
+
+  // v3.20: evidence viewers — expanded per-fix diffs and per-command output.
+  const [openDiffs, setOpenDiffs] = React.useState<Set<string>>(new Set())
+  const [openOutputs, setOpenOutputs] = React.useState<Set<string>>(new Set())
+  const toggleInSet = (setter: typeof setOpenDiffs, key: string) => {
+    setter((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   // v3.16: cross-session comparison — the baseline is read from localStorage
   // once on mount (a corrupt/stale payload reads as "no baseline", never as a
@@ -3176,6 +3225,18 @@ function ObservatoryPanel(props: SlotProps) {
   }
 
   // ── F4: fixes + rollback ───────────────────────────────────────────────
+  // v3.20: an inline diff viewer. Before this, F4 showed only `+N/−M`: to see
+  // WHAT changed (and judge a rollback) the user had to copy an iterate_diff
+  // instruction, wait for the model to echo it, and read raw JSON in chat.
+  const renderDiff = (text: string, k: string) => React.createElement(
+    'pre',
+    { className: 'iterate-diff', 'data-iterate': 'diff-body' },
+    ...parseDiffLines(text).map((line, i) => React.createElement(
+      'span',
+      { key: `${k}-l${i}`, className: 'iterate-diff-line', 'data-kind': line.kind },
+      line.text,
+    )),
+  )
   const renderFixes = () => {
     const fixes = manifest.fixes || []
     if (fixes.length === 0) {
@@ -3184,13 +3245,21 @@ function ObservatoryPanel(props: SlotProps) {
     return React.createElement('div', {}, ...fixes.map((f, i) => {
       const k = `f4-${i}`
       const id = String(f.id || `fix#${i + 1}`)
+      const file = String(f.file || '')
       const rollbackText = buildRollbackInstruction(id)
       const added = typeof f.linesAdded === 'number' ? f.linesAdded : 0
       const removed = typeof f.linesRemoved === 'number' ? f.linesRemoved : 0
+      // Prefer the diff persisted with the fix (v3.20+); older records fall
+      // back to a diff already echoed by `iterate_diff` in this session.
+      const persisted = typeof f.diff === 'string' && f.diff.length > 0 ? f.diff : ''
+      const diffText = persisted || sessionDiffs[file] || ''
+      const diffOpen = openDiffs.has(k)
+      const diffLines = diffText ? parseDiffLines(diffText) : []
+      const countKind = (kind: string) => diffLines.filter((l) => l.kind === kind).length
       return React.createElement('div', { key: k, className: 'iterate-obs-block' },
         React.createElement('div', { className: 'iterate-obs-block-head' },
           React.createElement('b', {}, id),
-          React.createElement('span', { className: 'iterate-obs-file' }, String(f.file || '?')),
+          React.createElement('span', { className: 'iterate-obs-file' }, file || '?'),
           React.createElement('span', { className: 'iterate-obs-chip' }, f.success === true ? t('成功') : t('失败')),
           typeof f.round === 'number'
             ? React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${f.round}`)
@@ -3201,12 +3270,41 @@ function ObservatoryPanel(props: SlotProps) {
           React.createElement('div', { className: 'iterate-obs-bar', style: { marginTop: 8 } },
             React.createElement('span', { className: 'iterate-obs-chip' }, `+${added}`),
             React.createElement('span', { className: 'iterate-obs-chip' }, `−${removed}`),
+            diffText
+              ? React.createElement('button', {
+                  className: 'iterate-btn',
+                  'aria-expanded': diffOpen,
+                  onClick: () => toggleInSet(setOpenDiffs, k),
+                  title: t('展开/收起该修复的逐行差异'),
+                }, diffOpen ? t('收起差异') : t('查看差异'))
+              : React.createElement('button', {
+                  className: 'iterate-btn', 'data-copied': copiedKey === `${k}-pull` ? '' : undefined,
+                  onClick: () => copyInstruction(`${k}-pull`, buildDiffInstruction(file)),
+                  title: t('复制 iterate_diff 指令文本（读取该文件的完整差异）'),
+                }, copiedKey === `${k}-pull` ? t('已复制') : t('拉取差异')),
+            diffText
+              ? React.createElement('button', {
+                  className: 'iterate-btn', 'data-copied': copiedKey === `${k}-diff` ? '' : undefined,
+                  onClick: () => copyInstruction(`${k}-diff`, diffText),
+                  title: t('复制统一差异文本（可粘贴进 PR / issue）'),
+                }, copiedKey === `${k}-diff` ? t('已复制') : t('复制 diff'))
+              : null,
             React.createElement('button', {
               className: 'iterate-btn', 'data-danger': '', 'data-copied': copiedKey === `${k}-rb` ? '' : undefined,
               onClick: () => copyInstruction(`${k}-rb`, rollbackText),
               title: t('复制 iterate_rollback 指令文本'),
             }, copiedKey === `${k}-rb` ? t('已复制') : t('回滚')),
           ),
+          diffOpen && diffText
+            ? React.createElement('div', { className: 'iterate-diff-wrap' },
+                React.createElement('div', { className: 'iterate-diff-meta' },
+                  React.createElement('span', {}, persisted ? t('已记录的差异') : t('取自本会话的 iterate_diff 结果')),
+                  React.createElement('span', { className: 'iterate-diff-stat', 'data-kind': 'add' }, `+${countKind('add')}`),
+                  React.createElement('span', { className: 'iterate-diff-stat', 'data-kind': 'del' }, `−${countKind('del')}`),
+                ),
+                renderDiff(diffText, k),
+              )
+            : null,
         ),
       )
     }))
@@ -3283,28 +3381,91 @@ function ObservatoryPanel(props: SlotProps) {
       const failed = !allowed
       const highlight = failed && abortedByValidation
       const exit = typeof v.exitCode === 'number' ? `exit ${v.exitCode}` : 'exit —'
-      return React.createElement('div', {
-        key: `val-${i}`,
-        className: 'iterate-obs-row',
-        'data-status': allowed ? 'pass' : 'fail',
-        'data-highlight': highlight ? '' : undefined,
-        title: v.rejectReason ? String(v.rejectReason) : undefined,
-      },
-        React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${typeof v.round === 'number' ? v.round : '?'}`),
-        React.createElement('code', { className: 'iterate-obs-mono' }, String(v.command || '')),
-        React.createElement('span', { className: 'iterate-obs-chip', 'data-status': allowed ? 'pass' : 'fail' },
-          allowed ? t('通过') : t('失败'),
+      const command = String(v.command || '')
+      // v3.20: stdout/stderr of the latest run of this command, scanned out of
+      // the session stream. Before this the console showed only an exit code,
+      // forcing a terminal rerun to learn WHY a command failed.
+      const output = command && Object.hasOwn(validationOutputs, command) ? validationOutputs[command] : null
+      const rowKey = `val-${i}`
+      const outputOpen = openOutputs.has(rowKey)
+      const outputText = output
+        ? [
+            output.stdout ? `[stdout]\n${output.stdout}` : '',
+            output.stderr ? `[stderr]\n${output.stderr}` : '',
+          ].filter(Boolean).join('\n')
+        : ''
+      return React.createElement('div', { key: rowKey, className: 'iterate-val-item' },
+        React.createElement('div', {
+          className: 'iterate-obs-row',
+          'data-status': allowed ? 'pass' : 'fail',
+          'data-highlight': highlight ? '' : undefined,
+          title: v.rejectReason ? String(v.rejectReason) : undefined,
+        },
+          React.createElement('span', { className: 'iterate-obs-head-meta' }, `Round ${typeof v.round === 'number' ? v.round : '?'}`),
+          React.createElement('code', { className: 'iterate-obs-mono' }, command),
+          React.createElement('span', { className: 'iterate-obs-chip', 'data-status': allowed ? 'pass' : 'fail' },
+            allowed ? t('通过') : t('失败'),
+          ),
+          React.createElement('span', { className: 'iterate-obs-head-meta' }, exit),
+          highlight ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, t('导致中止')) : null,
+          outputText
+            ? React.createElement('button', {
+                className: 'iterate-btn',
+                'aria-expanded': outputOpen,
+                onClick: () => toggleInSet(setOpenOutputs, rowKey),
+                title: t('展开/收起该命令的 stdout / stderr'),
+              }, outputOpen ? t('收起输出') : t('查看输出'))
+            : React.createElement('span', {
+                className: 'iterate-obs-head-meta',
+                title: t('本会话还没有该命令的输出（跑一次 iterate_validate 即可回填）'),
+              }, t('无输出')),
         ),
-        React.createElement('span', { className: 'iterate-obs-head-meta' }, exit),
-        highlight ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, t('导致中止')) : null,
+        outputOpen && output
+          ? React.createElement('div', { className: 'iterate-obs-output', 'data-iterate': 'validation-output' },
+              React.createElement('div', { className: 'iterate-obs-bar', style: { marginBottom: 4 } },
+                output.exitCode === null
+                  ? React.createElement('span', { className: 'iterate-obs-chip' }, 'exit —')
+                  : React.createElement('span', {
+                      className: 'iterate-obs-chip',
+                      'data-status': output.exitCode === 0 ? 'pass' : 'fail',
+                    }, `exit ${output.exitCode}`),
+                output.durationMs > 0
+                  ? React.createElement('span', { className: 'iterate-obs-chip' }, `${output.durationMs}ms`)
+                  : null,
+                output.timedOut ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, t('超时')) : null,
+                output.canceled ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, t('已取消')) : null,
+                output.truncated ? React.createElement('span', { className: 'iterate-obs-chip', 'data-status': 'fail' }, t('输出被截断')) : null,
+                output.rejectReason
+                  ? React.createElement('span', { className: 'iterate-obs-head-meta' }, output.rejectReason)
+                  : null,
+                outputText
+                  ? React.createElement('button', {
+                      className: 'iterate-btn', 'data-copied': copiedKey === `${rowKey}-out` ? '' : undefined,
+                      onClick: () => copyInstruction(`${rowKey}-out`, outputText),
+                      title: t('复制该命令的完整输出（可粘贴进 PR / issue）'),
+                    }, copiedKey === `${rowKey}-out` ? t('已复制') : t('复制输出'))
+                  : null,
+              ),
+              outputText
+                ? React.createElement('pre', { className: 'iterate-diff', 'data-iterate': 'output-body' }, outputText)
+                : React.createElement('div', { className: 'iterate-obs-empty' }, t('该命令没有产生输出')),
+            )
+          : null,
       )
     })
+    const outputsAvailable = validations.filter((v) => {
+      const cmd = String(v.command || '')
+      return cmd && Object.hasOwn(validationOutputs, cmd)
+    }).length
     const validationsBlock = React.createElement('div', { className: 'iterate-obs-block', style: { marginTop: 8 } },
       React.createElement('div', { className: 'iterate-obs-block-head' },
         React.createElement('span', {}, t('验证结果')),
         validations.length === 0
           ? React.createElement('span', { className: 'iterate-obs-head-meta' }, t('本轮尚无验证记录'))
           : React.createElement('span', { className: 'iterate-obs-head-meta' }, tf(`{a0} 条命令`, { a0: validations.length })),
+        outputsAvailable > 0
+          ? React.createElement('span', { className: 'iterate-obs-chip' }, tf(`{a0} 条可查看输出`, { a0: outputsAvailable }))
+          : null,
         abortedByValidation
           ? React.createElement('span', { className: 'iterate-obs-badge', 'data-status': 'fail' }, t('因验证失败中止'))
           : null,

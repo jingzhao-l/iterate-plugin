@@ -37,6 +37,20 @@ export const MAX_TIMELINE = 500;
 /** Max applied-fix records kept (newest wins; bounded so a long run cannot
  *  grow the manifest payload without limit). */
 const MAX_FIXES = 200;
+/**
+ * Per-fix diff budget on the manifest (v3.20). Mirrors the registry ceiling
+ * (MAX_FIX_DIFF_CHARS) but is duplicated here so the transcript module keeps
+ * no dependency on the fix tool; a mismatch only truncates harder.
+ */
+export const MAX_FIX_DIFF_CHARS = 6000;
+/** Bound one fix diff for the manifest, marking an explicit cut. */
+export function capTranscriptDiff(diff, max = MAX_FIX_DIFF_CHARS) {
+    if (typeof diff !== 'string' || diff.length === 0)
+        return '';
+    if (diff.length <= max)
+        return diff;
+    return `${diff.slice(0, max)}\n… (diff truncated, ${diff.length - max} more chars)`;
+}
 /** Max validation rows kept (newest wins; bounds a very long run's payload). */
 const MAX_VALIDATIONS = 500;
 /** Max round number accepted by the builder. A model-authored/manifest-backed
@@ -479,6 +493,11 @@ export class ReviewTranscriptBuilder {
             linesAdded: typeof record.linesAdded === 'number' ? Math.floor(record.linesAdded) : 0,
             linesRemoved: typeof record.linesRemoved === 'number' ? Math.floor(record.linesRemoved) : 0,
             success: record.success !== false,
+            // v3.20: carry the bounded unified diff so F4 can show WHAT changed
+            // (not just +N/−N). Empty/absent stays absent on the manifest.
+            ...(typeof record.diff === 'string' && record.diff.length > 0
+                ? { diff: capTranscriptDiff(record.diff) }
+                : {}),
         });
         if (this.fixes.length > MAX_FIXES) {
             this.fixes.splice(0, this.fixes.length - MAX_FIXES);
@@ -718,6 +737,11 @@ function normalizeFixRow(input) {
         linesAdded: clampCountValue(f.linesAdded),
         linesRemoved: clampCountValue(f.linesRemoved),
         success: f.success !== false,
+        // v3.20: a persisted unified diff — string only, bounded. A non-string
+        // (hostile manifest) is dropped rather than rendered as "[object Object]".
+        ...(typeof f.diff === 'string' && f.diff.length > 0
+            ? { diff: capTranscriptDiff(f.diff) }
+            : {}),
     };
 }
 /** Re-run one persisted timeline row through the builder's decision() shape. */

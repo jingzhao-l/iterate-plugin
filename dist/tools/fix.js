@@ -206,6 +206,32 @@ export function buildDiffSummary(hunks) {
     }
     return `+${added}/-${removed} lines (${hunks.length} hunk${hunks.length === 1 ? '' : 's'})`;
 }
+// ─── Inline diff evidence (v3.20) ───────────────────────────────────────────
+/**
+ * Per-fix diff budget (characters). Atomic fixes are small by construction
+ * (`atomic.max_lines`), so this ceiling only bites on a deliberate `force:true`
+ * architectural change; exceeding it truncates instead of rejecting the fix.
+ */
+export const MAX_FIX_DIFF_CHARS = 6000;
+/** Render hunks as a unified diff (`@@ -a,b +c,d @@` + content). */
+export function renderUnifiedDiff(hunks) {
+    return hunks
+        .map((h) => `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@\n${h.content}`)
+        .join('\n\n');
+}
+/**
+ * Bound a diff for persistence. Always returns a string when given one, so a
+ * truncated diff stays renderable and the cut is explicit (never a silent
+ * partial view that reads as the whole change).
+ */
+export function capDiffText(diff, max = MAX_FIX_DIFF_CHARS) {
+    if (typeof diff !== 'string' || diff.length === 0)
+        return '';
+    if (diff.length <= max)
+        return diff;
+    const omitted = diff.length - max;
+    return `${diff.slice(0, max)}\n… (diff truncated, ${omitted} more chars)`;
+}
 /** Default empty registry. */
 export function emptyRegistry() {
     return { rounds: [] };
@@ -238,7 +264,13 @@ export function readRegistry(projectRoot) {
                 typeof rec === 'object' &&
                 typeof rec.id === 'string' &&
                 !!rec.finding &&
-                typeof rec.finding === 'object'),
+                typeof rec.finding === 'object').map((rec) => (
+            // A hand-edited / legacy record may carry a non-string or oversized
+            // diff; normalize it so the client renders text (never an object)
+            // and an absurd payload cannot bloat the manifest.
+            typeof rec.diff === 'string' && rec.diff.length > 0
+                ? { ...rec, diff: capDiffText(rec.diff) }
+                : { ...rec, diff: undefined })),
         }))
             .filter((r) => typeof r.round === 'number' && Number.isFinite(r.round));
         return parsed;
@@ -694,6 +726,7 @@ export function registerFixTool(ctx) {
                         linesAdded: added,
                         linesRemoved: removed,
                         success: true,
+                        diff: capDiffText(renderUnifiedDiff(hunks)),
                     };
                     const nextRegistry = upsertRecord(registry, record);
                     try {
@@ -777,6 +810,7 @@ export function registerDiffTool(ctx) {
                     ok: { type: 'boolean', required: true },
                     file: { type: 'string' },
                     diff: { type: 'json' },
+                    diffText: { type: 'string' },
                     diffSummary: { type: 'string' },
                     files: { type: 'json' },
                     error: { type: 'string' },
@@ -789,7 +823,7 @@ export function registerDiffTool(ctx) {
                     const diff = value.diff ?? [];
                     const text = diff.length === 0
                         ? `No changes for ${value.file}.`
-                        : diff.map((h) => `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@\n${h.content}`).join('\n\n');
+                        : renderUnifiedDiff(diff);
                     return [{ type: 'text', text }];
                 }
                 const files = value.files ?? [];
@@ -828,7 +862,16 @@ export function registerDiffTool(ctx) {
                     return { ok: false, error: `backup missing for ${file}: ${String(err)}` };
                 }
                 const hunks = diffLines(original, current.content);
-                return { ok: true, file, diff: hunks, diffSummary: buildDiffSummary(hunks) };
+                return {
+                    ok: true,
+                    file,
+                    diff: hunks,
+                    // Text mirror of the same hunks (v3.20): the client's F4 panel
+                    // renders diffs for fixes recorded before the field existed, and
+                    // this is the shape it scans out of the session stream.
+                    diffText: capDiffText(renderUnifiedDiff(hunks)),
+                    diffSummary: buildDiffSummary(hunks),
+                };
             }
             const files = [];
             for (const round of registry.rounds) {

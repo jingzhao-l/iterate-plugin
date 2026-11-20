@@ -21,13 +21,13 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { mkdir, readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { writeTextAtomicAsync } from "../atomic-fs.js";
 import { withProjectLock } from "../file-lock.js";
 import { dirname } from 'node:path';
 import { loadEffectiveConfig, resolveProjectRootForExec, } from "../config-loader.js";
-import { transcriptPath } from "../paths.js";
-import { ReviewTranscriptBuilder, MAX_TIMELINE, MAX_ROUNDS, normalizeManifestBounds } from "../transcript.js";
+import { transcriptPath, fixRegistryPath } from "../paths.js";
+import { ReviewTranscriptBuilder, MAX_TIMELINE, MAX_ROUNDS, normalizeManifestBounds, capTranscriptDiff } from "../transcript.js";
 import { readDecisionLogDetailed } from "./decision-log.js";
 import { readQualityGate } from "./quality-store.js";
 import { readLive } from "../live.js";
@@ -171,7 +171,57 @@ function normalizeFix(input) {
         linesAdded: typeof f.linesAdded === 'number' ? f.linesAdded : 0,
         linesRemoved: typeof f.linesRemoved === 'number' ? f.linesRemoved : 0,
         success: f.success !== false,
+        ...(typeof f.diff === 'string' && f.diff.length > 0
+            ? { diff: capTranscriptDiff(f.diff) }
+            : {}),
     };
+}
+/**
+ * Read `id → bounded unified diff` from `.iterate/fixes/registry.json` (v3.20).
+ *
+ * Capture accepts a compact `fixes` payload from the model (id / file / round /
+ * counts). The unified diff is already on disk in the registry — requiring the
+ * model to retype it would be lossy and expensive — so capture enriches each
+ * row from this map. Any unreadable/corrupt registry degrades to an empty map:
+ * diff evidence is an enhancement, never a precondition for capturing a run.
+ *
+ * Deliberately parses the file directly instead of importing the fix tool:
+ * `fix.ts` imports this module for rollback mirroring, so importing back would
+ * create a cycle.
+ */
+export function readRegistryDiffs(projectRoot) {
+    const out = new Map();
+    try {
+        const file = fixRegistryPath(projectRoot);
+        if (!existsSync(file))
+            return out;
+        const parsed = JSON.parse(readFileSync(file, 'utf-8'));
+        const rounds = parsed && typeof parsed === 'object' && Array.isArray(parsed.rounds)
+            ? (parsed.rounds)
+            : [];
+        for (const round of rounds) {
+            if (!round || typeof round !== 'object')
+                continue;
+            const records = round.records;
+            if (!Array.isArray(records))
+                continue;
+            for (const rec of records) {
+                if (!rec || typeof rec !== 'object')
+                    continue;
+                const id = rec.id;
+                const diff = rec.diff;
+                if (typeof id !== 'string' || !id)
+                    continue;
+                if (typeof diff !== 'string' || diff.length === 0)
+                    continue;
+                out.set(id, capTranscriptDiff(diff));
+            }
+        }
+    }
+    catch {
+        // unreadable / hand-edited registry → no diff enrichment
+    }
+    return out;
 }
 /**
  * Structural gate for a parsed `.iterate/transcript.json` payload.
@@ -270,7 +320,9 @@ export function registerTranscriptTool(ctx) {
             checkpoint: { type: 'json', description: 'For `capture`: checkpoint summary (optional).' },
             fixes: {
                 type: 'json',
-                description: 'For `capture`: array of applied fixes [{id, file, round, summary, linesAdded, linesRemoved, success}].',
+                description: 'For `capture`: array of applied fixes [{id, file, round, summary, linesAdded, linesRemoved, success}]. ' +
+                    'The unified diff is read automatically from `.iterate/fixes/registry.json` by fix id (an explicit `diff` string wins), ' +
+                    'so the observatory F4 panel can show what changed.',
             },
             validations: {
                 type: 'json',
@@ -618,10 +670,19 @@ export function registerTranscriptTool(ctx) {
             }
             builder.recordCheckpoint(normalizeCheckpoint(args.checkpoint));
             if (Array.isArray(args.fixes)) {
+                // v3.20: enrich each captured fix with the unified diff already on
+                // disk, so F4 can show the actual change instead of only +N/−N.
+                const registryDiffs = readRegistryDiffs(projectRoot);
                 for (const fx of args.fixes) {
                     const record = normalizeFix(fx);
-                    if (record)
-                        builder.fix(record);
+                    if (!record)
+                        continue;
+                    if (!record.diff) {
+                        const known = registryDiffs.get(record.id);
+                        if (known)
+                            record.diff = known;
+                    }
+                    builder.fix(record);
                 }
             }
             // Validation outcomes (contract with the client run console):

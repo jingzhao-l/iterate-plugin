@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import {
   ReviewTranscriptBuilder,
   TRANSCRIPT_VERSION,
+  capTranscriptDiff,
+  MAX_FIX_DIFF_CHARS,
 } from '../src/transcript.ts'
 import { markFixRolledBackInTranscript, registerTranscriptTool } from '../src/tools/transcript.ts'
 import type { TranscriptEntry } from '../src/types.ts'
@@ -1484,6 +1486,97 @@ describe('capture round marker (minor 8)', () => {
       const m2 = rew.transcript as { round: number; rounds: unknown[] }
       assert.equal(m2.round, 2)
       assert.equal(m2.rounds.length, 2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+// ─── v3.20: per-fix unified diff evidence on the manifest ───────────────────
+
+describe('fix diff evidence', () => {
+  it('capTranscriptDiff bounds a long diff and marks the cut', () => {
+    const short = '@@ -1 +1 @@\n-old\n+new\n'
+    assert.equal(capTranscriptDiff(short), short)
+    const long = 'y'.repeat(MAX_FIX_DIFF_CHARS + 20)
+    const capped = capTranscriptDiff(long)
+    assert.equal(capped.length, MAX_FIX_DIFF_CHARS + '\n… (diff truncated, 20 more chars)'.length)
+    assert.match(capped, /diff truncated, 20 more chars/)
+    assert.equal(capTranscriptDiff(''), '')
+  })
+
+  it('carries the diff through serialize and a bounded re-normalize', () => {
+    const b = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b.fix({ id: 'f1', file: 'src/a.ts', round: 1, summary: 'add guard', diff: '@@ -1,2 +1,3 @@\n+guard\n' })
+    const m = b.serialize()
+    assert.equal(m.fixes[0]!.diff, '@@ -1,2 +1,3 @@\n+guard\n')
+
+    // A hostile oversized diff is re-capped by the read-side normalizer.
+    const giant = 'g'.repeat(MAX_FIX_DIFF_CHARS + 5)
+    const b2 = new ReviewTranscriptBuilder({ project: '/proj', now: fixedClock() })
+    b2.fix({ id: 'f2', file: 'src/b.ts', round: 1, summary: 'big', diff: giant })
+    const m2 = b2.serialize()
+    assert.match(m2.fixes[0]!.diff ?? '', /diff truncated, 5 more chars/)
+    assert.ok((m2.fixes[0]!.diff ?? '').length <= MAX_FIX_DIFF_CHARS + 80)
+  })
+})
+
+describe('capture fix-diff enrichment', () => {
+  it('fills a captured fix diff from the on-disk registry by id', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-diff-'))
+    try {
+      mkdirSync(join(root, '.iterate', 'fixes'), { recursive: true })
+      writeFileSync(
+        join(root, '.iterate', 'fixes', 'registry.json'),
+        JSON.stringify({
+          rounds: [{
+            round: 1,
+            fixedCount: 1,
+            failedCount: 0,
+            records: [{
+              id: 'f1',
+              file: 'src/a.ts',
+              diff: '@@ -1,2 +1,3 @@\n+guard\n',
+            }],
+          }],
+        }),
+        'utf-8',
+      )
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        goal: 'g',
+        rounds: [{ round: 1, findings: [] }],
+        roundsExecuted: 1,
+        findingsByRound: [1],
+        fixes: [{ id: 'f1', file: 'src/a.ts', round: 1, summary: 'add guard', linesAdded: 1, linesRemoved: 0 }],
+      })) as Record<string, unknown>
+      const m = res.transcript as { fixes: Array<{ id: string; diff?: string }> }
+      assert.equal(m.fixes.length, 1)
+      assert.equal(m.fixes[0]!.id, 'f1')
+      assert.equal(m.fixes[0]!.diff, '@@ -1,2 +1,3 @@\n+guard\n')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves a captured fix diff empty when the registry has no match', async () => {
+    const tool = captureTranscriptTool()
+    const root = mkdtempSync(join(tmpdir(), 'iterate-transcript-diff-'))
+    try {
+      const res = (await tool({
+        operation: 'capture',
+        path: root,
+        goal: 'g',
+        rounds: [{ round: 1, findings: [] }],
+        roundsExecuted: 1,
+        findingsByRound: [1],
+        fixes: [{ id: 'nope', file: 'src/a.ts', round: 1, summary: 'x', linesAdded: 0, linesRemoved: 0 }],
+      })) as Record<string, unknown>
+      const m = res.transcript as { fixes: Array<{ id: string; diff?: string }> }
+      assert.equal(m.fixes.length, 1)
+      assert.equal(m.fixes[0]!.diff, undefined)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

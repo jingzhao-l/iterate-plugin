@@ -211,6 +211,11 @@ export interface FixRecord {
   linesRemoved: number
   success: boolean
   error?: string
+  /**
+   * Unified diff of the applied change (v3.20). Optional so registries written
+   * by earlier versions keep loading; bounded by MAX_FIX_DIFF_CHARS.
+   */
+  diff?: string
 }
 
 /** Fix registry metadata (per-round summary). */
@@ -337,6 +342,12 @@ export interface TranscriptFix {
   linesAdded: number
   linesRemoved: number
   success: boolean
+  /**
+   * Unified diff of the applied change (v3.20, F4 inline diff). Optional:
+   * manifests captured before the field existed render the "pull diff" action
+   * instead. Bounded by MAX_FIX_DIFF_CHARS.
+   */
+  diff?: string
 }
 
 /** A single decision-log entry in the timeline (F7). */

@@ -105,6 +105,15 @@ import {
   isEffectiveConfig,
   scanSessionForConfigRead,
   configValueByPath,
+  // v3.20 — evidence viewers
+  capEvidenceText,
+  capOutputTail,
+  renderHunksText,
+  parseDiffLines,
+  collectSessionValidationOutputs,
+  mapValidationOutputsByCommand,
+  collectSessionDiffs,
+  buildDiffInstruction,
 } from '../lib/parse.js'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -2918,5 +2927,89 @@ describe('deriveQualityGateComputeInput', () => {
     assert.deepEqual(input.validationResults, [])
     assert.deepEqual(input.findingsByRound, {})
     assert.deepEqual(input.fixedByDimension, {})
+  })
+})
+
+// ─── v3.20: evidence viewers (inline diff + validation output) ──────────────
+
+describe('evidence viewers', () => {
+  it('capEvidenceText bounds and marks the cut', () => {
+    const short = 'abc'
+    assert.equal(capEvidenceText(short), short)
+    const capped = capEvidenceText('x'.repeat(6000 + 5))
+    assert.equal(capped.length, 6000 + '\n… (truncated, 5 more chars)'.length)
+    assert.equal(capEvidenceText(''), '')
+    assert.equal(capEvidenceText(undefined), '')
+  })
+
+  it('capOutputTail keeps the tail (failure summary) and announces the cut', () => {
+    assert.equal(capOutputTail('short'), 'short')
+    const out = capOutputTail('a'.repeat(4000 + 9))
+    assert.equal(out.length, 4000 + '… (truncated, showing last 4000 of 4009 chars)\n'.length)
+    assert.ok(out.endsWith('a'.repeat(4000)))
+  })
+
+  it('renderHunksText mirrors the server unified-diff renderer', () => {
+    const text = renderHunksText([
+      { oldStart: 1, oldLines: 2, newStart: 1, newLines: 3, content: '+guard\n context' },
+    ])
+    assert.match(text, /^@@ -1,2 \+1,3 @@/)
+    assert.match(text, /\+guard/)
+    assert.equal(renderHunksText(null), '')
+    assert.equal(renderHunksText([{ content: 'x' }]), '@@\nx')
+  })
+
+  it('parseDiffLines classifies add/del/hunk/meta/context lines', () => {
+    const lines = parseDiffLines('@@ -1 +1 @@\n-old\n+new\n context\n\\ No newline at end of file')
+    assert.deepEqual(lines, [
+      { kind: 'hunk', text: '@@ -1 +1 @@' },
+      { kind: 'del', text: '-old' },
+      { kind: 'add', text: '+new' },
+      { kind: 'context', text: ' context' },
+      { kind: 'meta', text: '\\ No newline at end of file' },
+    ])
+    assert.equal(parseDiffLines('').length, 0)
+    assert.equal(parseDiffLines(undefined).length, 0)
+    // +++ / --- file headers are meta, never an added/removed line.
+    assert.equal(parseDiffLines('--- a/x\n+++ b/x')[0]!.kind, 'meta')
+  })
+
+  it('collectSessionValidationOutputs finds iterate_validate results and dedupes', () => {
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_validate', result: { allowed: true, command: 'npm test', exitCode: 0, stdout: 'ok', stderr: '', timedOut: false, canceled: false, durationMs: 5 } },
+        { tool: 'other', result: { command: 'npm test' } },
+        { tool: 'iterate_validate', result: { allowed: false, command: 'npm test', exitCode: 1, stdout: '', stderr: 'boom', timedOut: false, canceled: false, durationMs: 7, rejectReason: 'not configured' } },
+      ],
+    }
+    const rows = collectSessionValidationOutputs(session)
+    assert.equal(rows.length, 2)
+    assert.equal(rows[0]!.allowed, true)
+    assert.equal(rows[1]!.allowed, false)
+    assert.equal(rows[1]!.rejectReason, 'not configured')
+    const byCmd = mapValidationOutputsByCommand(session)
+    assert.equal(byCmd['npm test']!.stderr, 'boom')
+    assert.equal(collectSessionValidationOutputs(null).length, 0)
+    assert.deepEqual(mapValidationOutputsByCommand(null), {})
+  })
+
+  it('collectSessionDiffs maps the latest diffText per file, hunks fallback included', () => {
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_diff', result: { ok: true, file: 'src/a.ts', diffText: '@@ -1 +1 @@\n+new\n' } },
+        { tool: 'iterate_diff', result: { ok: true, file: 'src/b.ts', diff: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, content: '-old\n+new\n' }] } },
+      ],
+    }
+    const diffs = collectSessionDiffs(session)
+    assert.equal(diffs['src/a.ts'], '@@ -1 +1 @@\n+new\n')
+    assert.match(diffs['src/b.ts'] ?? '', /^@@ -1,1 \+1,1 @@/)
+    assert.deepEqual(collectSessionDiffs(null), {})
+  })
+
+  it('buildDiffInstruction carries the file, degrades to summary mode for an empty path', () => {
+    assert.match(buildDiffInstruction('src/a.ts'), /"file": "src\/a.ts"/)
+    assert.match(buildDiffInstruction('src/a.ts'), /iterate_diff/)
+    assert.doesNotMatch(buildDiffInstruction(''), /"file"/)
+    assert.doesNotMatch(buildDiffInstruction(undefined), /"file"/)
   })
 })

@@ -546,6 +546,28 @@ export const EN: Record<string, string> = {
   复制聊天卡片: 'Copy chat card',
   '复制 ```iterate-report 代码块：粘贴到回复里，Chat 会渲染成可交互运行卡片（指标 / 质量闸门 / 发现 / 复制按钮）':
     'Copy the ```iterate-report block: paste it into a reply and Chat renders an interactive run card (metrics / quality gate / findings / copy actions)',
+  // v3.20 — evidence viewers (F4 inline diff, F6 command output)
+  '展开/收起该修复的逐行差异': 'Show/hide the per-line diff of this fix',
+  收起差异: 'Hide diff',
+  查看差异: 'Show diff',
+  '复制 iterate_diff 指令文本（读取该文件的完整差异）': 'Copy the iterate_diff instruction (reads the full diff for this file)',
+  拉取差异: 'Pull diff',
+  '复制统一差异文本（可粘贴进 PR / issue）': 'Copy the unified diff text (paste into a PR / issue)',
+  '复制 diff': 'Copy diff',
+  已记录的差异: 'Diff recorded with the fix',
+  '取自本会话的 iterate_diff 结果': 'From an iterate_diff result in this session',
+  '展开/收起该命令的 stdout / stderr': 'Show/hide this command\'s stdout / stderr',
+  收起输出: 'Hide output',
+  查看输出: 'Show output',
+  无输出: 'No output',
+  '本会话还没有该命令的输出（跑一次 iterate_validate 即可回填）': 'No output for this command in the session yet (run iterate_validate to backfill it)',
+  超时: 'Timed out',
+  已取消: 'Cancelled',
+  输出被截断: 'Output truncated',
+  '复制该命令的完整输出（可粘贴进 PR / issue）': 'Copy this command\'s full output (paste into a PR / issue)',
+  复制输出: 'Copy output',
+  该命令没有产生输出: 'This command produced no output',
+  '{a0} 条可查看输出': '{a0} with viewable output',
 }
 let current: Lang = 'zh'
 let storage: LangStorage | null = null

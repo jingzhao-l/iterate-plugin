@@ -23,6 +23,9 @@ import {
   registerDiffTool,
   registerRollbackTool,
   MAX_FIX_CONTENT_CHARS,
+  renderUnifiedDiff,
+  capDiffText,
+  MAX_FIX_DIFF_CHARS,
 } from '../src/tools/fix.ts'
 import { acquireProjectLock } from '../src/file-lock.ts'
 import { fixBackupPath, fixesDir } from '../src/paths.ts'
@@ -733,6 +736,70 @@ describe('iterate_fix / iterate_diff / iterate_rollback execute', () => {
       const files = res.files as Array<{ file: string }>
       assert.equal(files.length, 1)
       assert.equal(files[0]!.file, 'src/app.ts')
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ─── v3.20: per-fix unified diff evidence ───────────────────────────────────
+
+describe('inline diff evidence', () => {
+  it('renderUnifiedDiff emits @@ headers + content for a hunk', () => {
+    const hunks = diffLines(ORIGINAL, FIXED)
+    const text = renderUnifiedDiff(hunks)
+    assert.match(text, /^@@ -1,0 \+2,1 @@/)
+    assert.match(text, /if \(!name\) return "ANON"/)
+  })
+
+  it('capDiffText leaves a short diff intact and marks a long one', () => {
+    const short = '@@ -1 +1 @@\n-old\n+new\n'
+    assert.equal(capDiffText(short), short)
+    const long = 'x'.repeat(MAX_FIX_DIFF_CHARS + 50)
+    const capped = capDiffText(long)
+    assert.equal(capped.length, MAX_FIX_DIFF_CHARS + '\n… (diff truncated, 50 more chars)'.length)
+    assert.match(capped, /diff truncated, 50 more chars/)
+    // Empty / non-string degrade to ''.
+    assert.equal(capDiffText(''), '')
+    assert.equal(capDiffText(undefined as unknown as string), '')
+  })
+
+  it('persists a bounded unified diff on the fix record and in iterate_diff output', async () => {
+    const [fix, diff] = captureTools([registerFixTool, registerDiffTool]) as [Tool, Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      await fix({ file: 'src/app.ts', content: FIXED, finding: finding(), round: 1, path: dir })
+      const record = readRegistry(dir).rounds[0]!.records[0]!
+      assert.match(record.diff ?? '', /^@@ -1,0 \+2,1 @@/)
+      assert.match(record.diff ?? '', /if \(!name\) return "ANON"/)
+      assert.ok((record.diff ?? '').length <= MAX_FIX_DIFF_CHARS)
+
+      const res = (await diff({ file: 'src/app.ts', path: dir })) as Record<string, unknown>
+      assert.equal(res.ok, true)
+      assert.equal(typeof res.diffText, 'string')
+      assert.match(String(res.diffText), /^@@ -1,0 \+2,1 @@/)
+      assert.match(String(res.diffText), /if \(!name\) return "ANON"/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('normalizes a hand-edited registry diff on read (non-string → absent, oversized → capped)', async () => {
+    const [fix] = captureTools([registerFixTool]) as [Tool]
+    const { dir, cleanup } = tempProject({ 'src/app.ts': ORIGINAL })
+    try {
+      await fix({ file: 'src/app.ts', content: FIXED, finding: finding(), round: 1, path: dir })
+      const registryPath = join(dir, '.iterate', 'fixes', 'registry.json')
+      const parsed = JSON.parse(readFileSync(registryPath, 'utf-8')) as { rounds: Array<{ records: Array<Record<string, unknown>> }> }
+      parsed.rounds[0]!.records[0]!.diff = 12345
+      writeFileSync(registryPath, JSON.stringify(parsed), 'utf-8')
+      const record = readRegistry(dir).rounds[0]!.records[0]!
+      assert.equal(record.diff, undefined)
+
+      parsed.rounds[0]!.records[0]!.diff = 'x'.repeat(MAX_FIX_DIFF_CHARS + 10)
+      writeFileSync(registryPath, JSON.stringify(parsed), 'utf-8')
+      const capped = readRegistry(dir).rounds[0]!.records[0]!
+      assert.match(capped.diff ?? '', /diff truncated, 10 more chars/)
     } finally {
       cleanup()
     }

@@ -5,6 +5,75 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.0] - 2026-11-20
+
+审查证据可见（Evidence viewer）：F4 逐行差异 + F6 验证命令输出（F4 inline diff + F6 validation command output）。
+把「改了什么只能看 `+N/−M`、验证为什么失败只能看 exit code」两条用户可见缺口补齐——
+观测台现在直接渲染可判读、可复制的代码级证据。按语义化版本是一次 minor。
+
+- **F4 逐行差异（fix inline diff）**：每个修复此前只显示 `+N/−M` 行数，想看清改了什么
+  必须先复制 `iterate_diff` 指令、等模型回显、再读聊天里的原始 JSON。现在 `iterate_fix`
+  在写盘时把统一差异（`@@` 头 + 逐行内容）持久化进 `.iterate/fixes/registry.json`
+  （单条上限 6000 字符，超出显式截断而非静默裁切）；`iterate_transcript capture` 按 fix
+  id 自动从注册表回填，`TranscriptFix.diff` 随 manifest 落地；F4 提供「查看差异 / 收起差异」
+  展开为逐行渲染（`+` 绿色 / `−` 红色 / `@@` 高亮 / `\ No newline` 元信息，全部 dsw token +
+  `color-mix`），并可「复制 diff」粘贴进 PR / issue。更早版本记录的修复（无 `diff` 字段）
+  提供「拉取差异」一键复制 `iterate_diff` 指令；若模型已在会话里回显过 `iterate_diff`
+  （含新 `diffText` 输出字段），客户端直接取会话扫描结果渲染，无需再点。
+- **F6 验证输出（validation output）**：运行控制台的验证行此前只有 `exit N`，命令为什么
+  失败要回终端重跑。客户端新增会话扫描 `collectSessionValidationOutputs` /
+  `mapValidationOutputsByCommand`——把 `iterate_validate` 的 stdout/stderr 按命令就近
+  附到验证行（每条保留尾部 4000 字符，失败摘要/堆栈在尾部），「查看输出」展开
+  `[stdout]`/`[stderr]` 块（超时/取消/截断/拒绝原因 chips）并「复制输出」；验证块头部
+  增加「N 条可查看输出」计数。纯客户端数据路径：`iterate_validate` 无需改动即可回填。
+- **上游 dsh**：`dsh-v0.2.2-rc.4`（模型异常响应处理、LiveShare 桌面修复）与
+  `dsh-v0.2.2-rc.5`（DeepSeek 模型改用服务端搜索）均**无插件面 API 变更**——对五个
+  依赖包 `dsh-tools`/`dsh-session`/`dsh-agent`/`dsh-jobs`/`dsh-util-values` 做了
+  rc.3→rc.5 的 d.ts 逐文件比对（`diff -r` 仅 `package.json` 版本号不同），本插件不使用
+  任何被触碰的接口，声明 compatible：`dshReleases` 32 → 34，三个 dsh peer 范围追加
+  `|| 0.2.2-rc.4 || 0.2.2-rc.5`，devDependencies 对齐 `0.2.2-rc.5`。
+- **防御与边界**：注册表读侧对手工编辑的 `diff` 做归一（非字符串 → 缺省、超长 → 截断）；
+  `normalizeTranscript` 对 manifest 里敌意 `diff` 做字符串化 + 截断；`iterate_diff` 文件
+  模式新增 `diffText` 输出字段（与工具 render 共用 `renderUnifiedDiff`）；空/坏路径的
+  `iterate_diff` 指令降级为汇总模式；会话无该命令输出时渲染「无输出」而非空白。
+
+### Added
+
+- `src/tools/fix.ts`：`renderUnifiedDiff` / `capDiffText` / `MAX_FIX_DIFF_CHARS`；
+  `FixRecord.diff`；`iterate_diff` 的 `diffText`；注册表读侧 diff 归一。
+- `src/transcript.ts`：`capTranscriptDiff` / `MAX_FIX_DIFF_CHARS`；`TranscriptFix.diff`。
+- `src/tools/transcript.ts`：`readRegistryDiffs`（capture 按 id 回填 diff，直读注册表避免
+  import 环）；capture `fixes` schema 描述更新。
+- `lib/parse.js`：`capEvidenceText` / `capOutputTail` / `renderHunksText` / `parseDiffLines` /
+  `isValidationOutput` / `normalizeValidationOutput` / `collectSessionValidationOutputs` /
+  `mapValidationOutputsByCommand` / `isDiffResult` / `collectSessionDiffs` / `buildDiffInstruction`。
+- `src/client/index.ts`：F4 diff 展开/复制/拉取 + F6 输出展开/复制 + 会话扫描（useMemo）；
+  CSS `.iterate-diff*` / `.iterate-val-item` / `.iterate-obs-output`（dsw token、
+  `prefers-reduced-motion` 无关、窄屏 480px 收紧）。
+- `src/client/i18n.ts`：22 个新双语键（查看差异 / 拉取差异 / 查看输出 / 无输出 / 复制输出…）。
+
+### Compatibility
+
+- `dsh.compatibility.dshReleases` 增加 `0.2.2-rc.4` / `0.2.2-rc.5`（34 个版本）；
+  三个 dsh peer 范围追加 `|| 0.2.2-rc.4 || 0.2.2-rc.5`；devDependencies 对齐 `0.2.2-rc.5`。
+  rc.4/rc.5 经 release notes 全文 + 五包 d.ts `diff -r` 核验无插件面能力、无破坏性变更，
+  compatible 成立。
+
+### Tests
+
+- `test/fix.test.ts` +4：`renderUnifiedDiff` 头/内容、`capDiffText` 短保真 + 长截断标记 +
+  空/非字符串降级、`iterate_fix` 持久化 bounded diff + `iterate_diff` 的 `diffText`、
+  手工编辑注册表 diff 归一（非字符串 → 缺省、超长 → 截断）。
+- `test/transcript.test.ts` +4：`capTranscriptDiff` 边界、builder `fix(diff)` 经
+  serialize 往返 + 读侧重截断、capture 从注册表按 id 回填 diff、注册表无匹配时 diff 缺省。
+- `test/parse.test.ts` +4：`capEvidenceText`/`capOutputTail` 边界、`renderHunksText`、
+  `parseDiffLines` 五类行、`collectSessionValidationOutputs`/`mapValidationOutputsByCommand`
+  去重 + rejectReason、`collectSessionDiffs` 最新每文件 + hunks 回退、`buildDiffInstruction`。
+- `test/client-render.test.ts` +3：F4 持久化 diff 展开渲染（add/del 行分类 + 收起）、
+  F4 旧修复拉取差异回退、F6 验证输出展开/复制 + 「N 条可查看输出」计数。
+- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿
+  （1476 → 1494 例）。
+
 ## [3.19.0] - 2026-11-16
 
 聊天报告卡片 + dsh 0.2.2-rc.3 兼容（Chat report card + dsh 0.2.2-rc.3 compat）。

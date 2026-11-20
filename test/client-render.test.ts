@@ -467,6 +467,63 @@ describe('ObservatoryPanel', () => {
     click(buttonByText(panel, '质量门禁'))
     assert.match(panel.textContent ?? '', /correctness/)
   })
+
+  it('renders the F4 inline diff for a fix that carries one (v3.20)', () => {
+    const session = {
+      transcript: transcriptFixture({
+        fixes: [{ id: 'f1', file: 'src/a.ts', round: 1, summary: 'add guard', linesAdded: 1, linesRemoved: 0, success: true, diff: '@@ -1,2 +1,3 @@\n-old\n+new\n context\n' }],
+      }),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '修复与回滚'))
+    const show = buttonByText(panel, '查看差异')
+    assert.ok(show, 'the show-diff toggle is offered for a fix with a persisted diff')
+    assert.ok(buttonByText(panel, '复制 diff'), 'copy-diff is offered')
+    click(show)
+    const html = panel.textContent ?? ''
+    assert.match(html, /-old/)
+    assert.match(html, /\+new/)
+    assert.ok(panel.querySelector('.iterate-diff-line[data-kind="add"]'), 'added line is classified add')
+    assert.ok(panel.querySelector('.iterate-diff-line[data-kind="del"]'), 'removed line is classified del')
+    assert.ok(buttonByText(panel, '收起差异'), 'toggle flips to collapse after expanding')
+  })
+
+  it('offers the pull-diff action for a legacy fix with no persisted diff (v3.20)', () => {
+    const session = {
+      transcript: transcriptFixture({
+        fixes: [{ id: 'f1', file: 'src/a.ts', round: 1, summary: 'add guard', linesAdded: 1, linesRemoved: 0, success: true }],
+      }),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '修复与回滚'))
+    assert.ok(buttonByText(panel, '拉取差异'), 'a legacy fix offers the iterate_diff instruction instead of a toggle')
+    assert.equal(buttonByText(panel, '查看差异'), undefined)
+  })
+
+  it('renders the F6 validation output for a command echoed in the session (v3.20)', () => {
+    const session = {
+      toolCalls: [
+        { tool: 'iterate_validate', result: { allowed: true, command: 'npm test', exitCode: 1, stdout: 'FAIL src/a.test.ts', stderr: 'AssertionError: expected 1', timedOut: false, canceled: false, durationMs: 42 } },
+      ],
+      transcript: transcriptFixture({
+        validations: [{ round: 1, command: 'npm test', exitCode: 1, allowed: false, rejectReason: 'not configured' }],
+      }),
+    }
+    const panel = mountSlot(boot(), 'iterate-observatory', { session })
+    click(panel.querySelector('.iterate-obs-head'))
+    click(buttonByText(panel, '运行控制台'))
+    assert.match(panel.textContent ?? '', /1 条可查看输出/, 'the output-available chip counts the row')
+    const show = buttonByText(panel, '查看输出')
+    assert.ok(show, 'the output toggle is offered for a command with output')
+    click(show)
+    const html = panel.textContent ?? ''
+    assert.match(html, /FAIL src\/a\.test\.ts/)
+    assert.match(html, /AssertionError: expected 1/)
+    assert.ok(buttonByText(panel, '收起输出'), 'toggle flips to collapse after expanding')
+    assert.ok(buttonByText(panel, '复制输出'), 'copy-output is offered')
+  })
 })
 
 describe('ObservatoryPanel open-event bridge (v3.14)', () => {
