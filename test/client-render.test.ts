@@ -266,11 +266,11 @@ describe('client bootstrap', () => {
     assert.deepEqual(client.inject, ['slots', 'theme'])
   })
 
-  it('registers all six render entries across four slots', () => {
+  it('registers all eight render entries across six slots', () => {
     const slots = boot()
     assert.deepEqual(
       [...slots.keys()].sort(),
-      ['iterate-dashboard', 'iterate-observatory', 'iterate-plugin/fence/iterate-report', 'iterate-progress', 'iterate-settings', 'iterate-turn-tail'],
+      ['iterate-composer-hint', 'iterate-dashboard', 'iterate-observatory', 'iterate-plugin/fence/iterate-report', 'iterate-progress', 'iterate-run-indicator', 'iterate-settings', 'iterate-turn-tail'],
     )
   })
 

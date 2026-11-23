@@ -2607,7 +2607,17 @@ describe('serializeObservatoryExport extras (gap #11)', () => {
       serializeExportWithExtras({}, [], { evil: 1, qualityGate: { ok: true } } as never),
     ) as Record<string, unknown>
     assert.ok(!('evil' in parsed))
-    assert.deepEqual(JSON.parse(serializeExportWithExtras({}, [], 'junk' as never)), JSON.parse(serializeExportWithExtras({}, [], undefined)))
+    // exportedAt is a wall-clock stamp — two calls can straddle a millisecond
+    // boundary, so compare the shape sans the timestamp (regression: flaky).
+    const stripExportedAt = (raw: string): Record<string, unknown> => {
+      const o = JSON.parse(raw) as Record<string, unknown>
+      delete o.exportedAt
+      return o
+    }
+    assert.deepEqual(
+      stripExportedAt(serializeExportWithExtras({}, [], 'junk' as never)),
+      stripExportedAt(serializeExportWithExtras({}, [], undefined)),
+    )
   })
 
   it('keeps the cyclic fallback', () => {

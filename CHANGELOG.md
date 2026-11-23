@@ -5,6 +5,61 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.21.0] - 2026-11-23
+
+空输入框运行提示 + 会话运行指示（Empty-composer run hint + session run indicator）。
+把 dsh `0.2.3-alpha.1` 的「插件可为空白输入框提供行内提示」新能力转成插件的**净新增交互面**——
+iterate 状态跟着用户走到不看仪表盘时真正注视的两处（输入框 + 会话面板开关）。
+按语义化版本是一次 minor。
+
+- **空输入框运行提示（dsh 0.2.3-alpha.1 `conversation.input.placeholder` 链式槽位）**：
+  此前空输入框只有宿主默认提示，用户一旦收起仪表盘就看不到「现在处于哪一阶段、还剩什么、按什么」。
+  现在插件为该槽位注册 `iterate-composer-hint` 贡献，**仅为携带 iterate 上下文的会话认领**
+  （`select` 读取键控会话缓存，无上下文返回 `null` 交由宿主内置提示，绝不劫持非 iterate 会话）：
+  运行中显示「输入消息 · iterate 第 2 轮 · review — F8 质量面板 · F9 经验库」；停止后显示停止原因与轮次；
+  收敛后显示「已收敛 · 轮次 · 发现数」；进行中（报告已落地未收敛）显示轮次与发现数。
+  背后是 `lib/parse.js` 的纯状态机 `composerHintState(session)`（运行中/停止/收敛/进行中/null），
+  与仪表盘共用同一会话状态，绝不伪造。
+- **会话运行指示（`conversation.session.panel.indicator` 列表槽位）**：会话面板开关上绘制小型状态图标
+  （运行中脉动圆点 / 收敛 `✓` / 进行中暗点；`prefers-reduced-motion` 关闭动画），
+  使长轮次在面板与输入区仪表盘都隐藏时仍可见；无 iterate 上下文渲染空。
+- **键控会话缓存**：`src/client/session-cache.ts` 新增按会话身份键控的 `byId` 映射、
+  `primeSession`（同步更新不通知，供同一渲染帧内的链式 `select` 读到）与 `readSessionById`；
+  `useSessionById` 经 `useSyncExternalStore` 订阅，保持提示/指示随会话快照刷新。
+- **上游 dsh `0.2.3-alpha.1`**：release notes 全文核验——插件面新能力仅 `conversation.input.placeholder`
+  （已转化）；破坏性变更（Cordis 同步 `4.0.0-rc.12`、客户端产物样式框架挂载 + CSS Modules 类名变化、
+  会话状态迁至 `dsh-client-ui-session-status`、模块导出入口标准化、`fileAddressFor` 相对地址、
+  `working_directory` 参数移除、工具失败结构化错误名/码、`list_agents` 改 `agents` 字段、
+  `ctx.deepseekAuth`、分支会话 `parentSource`）经 grep 逐条核验本插件均不使用，声明 compatible：
+  `dshReleases` 34 → 35、三个 dsh peer 追加 `|| 0.2.3-alpha.1`、cordis peer 追加 `|| ~4.1.0`、
+  devDeps 全部对齐 `0.2.3-alpha.1`（cordis `4.1.0`）。
+
+### Added
+
+- `lib/parse.js`：`composerHintState` / `sessionRunIndicator`（纯状态机，无上下文/运行中/停止/收敛/进行中）。
+- `src/client/session-cache.ts`：键控 `byId` + `primeSession` + `readSessionById`。
+- `src/client/index.ts`：`ComposerHint` / `SessionRunIndicator` 组件 + 两个槽位注册 +
+  `useSessionById` 钩子 + `.iterate-composer-hint` / `.iterate-session-indicator` CSS。
+- `src/client/i18n.ts`：7 个新双语键（四种提示文案 + 三种指示标题）。
+
+### Compatibility
+
+- `dsh.compatibility.dshReleases` 增加 `0.2.3-alpha.1`（35 个版本）；三个 dsh peer 追加
+  `|| 0.2.3-alpha.1`；cordis peer 追加 `|| ~4.1.0`；devDependencies 对齐 `0.2.3-alpha.1`。
+  `0.2.3-alpha.1` 经 release notes 全文 + 逐条 grep 核验，插件面新能力仅
+  `conversation.input.placeholder`（已转化），其余为宿主级/域外或本插件不使用的破坏性迁移，
+  compatible 成立。
+
+### Tests
+
+- `test/parse.test.ts` +12：`composerHintState`（无上下文 / junk / 运行中优先于报告 / 停止原因 /
+  收敛 / 进行中 / 未开始）+ `sessionRunIndicator`（running / converged / active / null）。
+- `test/client-render.test.ts`：槽位注册计数 6 → 8（新增 `iterate-composer-hint` /
+  `iterate-run-indicator`）。
+- `test/parse.test.ts`：修正 `serializeObservatoryExport` 测试的 1ms 时间戳竞态（导出比较剥离
+  `exportedAt`，此前为偶发 flaky）。
+- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿（1494 → 1506 例）。
+
 ## [3.20.0] - 2026-11-20
 
 审查证据可见（Evidence viewer）：F4 逐行差异 + F6 验证命令输出（F4 inline diff + F6 validation command output）。
