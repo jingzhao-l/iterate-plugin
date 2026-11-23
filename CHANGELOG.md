@@ -52,13 +52,13 @@ iterate 状态跟着用户走到不看仪表盘时真正注视的两处（输入
 
 ### Tests
 
-- `test/parse.test.ts` +12：`composerHintState`（无上下文 / junk / 运行中优先于报告 / 停止原因 /
+- `test/parse.test.ts` +10：`composerHintState`（无上下文 / junk / 运行中优先于报告 / 停止原因 /
   收敛 / 进行中 / 未开始）+ `sessionRunIndicator`（running / converged / active / null）。
 - `test/client-render.test.ts`：槽位注册计数 6 → 8（新增 `iterate-composer-hint` /
   `iterate-run-indicator`）。
 - `test/parse.test.ts`：修正 `serializeObservatoryExport` 测试的 1ms 时间戳竞态（导出比较剥离
   `exportedAt`，此前为偶发 flaky）。
-- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿（1494 → 1506 例）。
+- 全量 `npm run typecheck`（server/test/client）0 错误；`npm test` 全绿（1494 → 1504 例）。
 
 ## [3.20.0] - 2026-11-20
 
