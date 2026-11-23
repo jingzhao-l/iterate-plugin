@@ -89,6 +89,8 @@ import {
   // ── gap fixes ──
   START_INSTRUCTIONS, // #1: registered instruction set (test-locked)
   dashboardRunState, // #5: running vs onboarding empty state
+  composerHintState, // v3.21: empty-composer hint state machine
+  sessionRunIndicator, // v3.21: session panel-toggle run indicator
   buildRoundComparison, // #13: cross-round comparison table
   buildDiskSnapshotInstruction, // #4: pull `.iterate/` artifacts into the stream
   diskEmptyStateText, // #4: "not pulled" vs "pulled and empty"
@@ -144,7 +146,7 @@ import {
   registerReportFence,
   toIterateFence,
 } from './fence.ts'
-import { noteSession, readSession, subscribeSession } from './session-cache.ts'
+import { noteSession, primeSession, readSession, readSessionById, subscribeSession } from './session-cache.ts'
 // v3.14: right-click menu contributions (dsh 0.2.2-alpha.3 unified context menus).
 import {
   openObservatory,
@@ -695,6 +697,47 @@ const ITERATE_CSS = `
 .iterate-empty-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .iterate-dashboard-launch { display: inline-flex; align-items: center; gap: 6px; }
 
+/* v3.21: empty-composer inline run hint (dsh 0.2.3-alpha.1 placeholder slot) */
+.iterate-composer-hint {
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* v3.21: session panel-toggle run indicator (status dot / ✓) */
+.iterate-session-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 10px;
+  height: 10px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 50%;
+  color: transparent;
+  background: var(--dsw-alias-brand-primary);
+  /* Pulse softly while a run is live so the toggle reads as "something is
+     happening" without stealing attention. */
+  animation: iterate-indicator-pulse 2.4s ease-in-out infinite;
+}
+.iterate-session-indicator[data-run-state='converged'] {
+  color: var(--dsw-alias-state-success-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 18%, transparent);
+  animation: none;
+}
+.iterate-session-indicator[data-run-state='active'] {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent);
+  animation: none;
+}
+@keyframes iterate-indicator-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .iterate-session-indicator { animation: none; }
+}
+
 /* Convergence-completed progress fill */
 .iterate-progress-fill-done { background: var(--dsw-alias-state-success-primary); }
 
@@ -954,6 +997,20 @@ function removeStorageByPrefix(prefix: string): number {
  */
 function useSessionSnapshot(): unknown {
   return React.useSyncExternalStore(subscribeSession, readSession, readSession)
+}
+
+/**
+ * Session for a specific session identity (v3.21). The composer placeholder
+ * and the session panel-toggle indicator are session-scoped but receive only a
+ * `sessionId`; they look the session up from the keyed cache. `useSyncExternalStore`
+ * keeps them consistent when the session slots publish a fresh snapshot.
+ */
+function useSessionById(id: string | undefined | null): unknown {
+  return React.useSyncExternalStore(
+    subscribeSession,
+    () => readSessionById(id),
+    () => readSessionById(id),
+  )
 }
 
 /** Wrap a slot component so its whole subtree re-renders on a language change. */
@@ -1303,6 +1360,10 @@ function ConvergenceDashboard(props: SlotProps) {
   React.useEffect(() => {
     noteSession(session)
   }, [session])
+  // v3.21: PRIME the keyed cache synchronously (no notification) so the
+  // composer-placeholder chain `select`, which renders AFTER this dock in the
+  // SAME pass, already sees this session's iterate context on its first frame.
+  primeSession(session)
   const report = latestReport(session)
 
   // Mount-time suppression: opening a session that ALREADY has a report mounts
@@ -4358,11 +4419,96 @@ function selectTurnTail(owner: SlotProps): { matched: boolean } | null {
  * stable — creating the wrapper inside the render callback would remount the
  * subtree (and wipe triage verdicts, expanded tabs …) on every render.
  */
+/**
+ * v3.21 — empty-composer inline run hint (dsh 0.2.3-alpha.1
+ * `conversation.input.placeholder` chain slot).
+ *
+ * Renders the iterate run state inside the empty composer for a session that
+ * carries iterate context, and DECLINES (its chain `select` returns null) for
+ * every other session so the host's built-in prompt stays. This is the first
+ * thing a user sees when the dashboard is collapsed or scrolled out of view —
+ * "which phase are we in, what do I press" — instead of a generic prompt.
+ *
+ * The chain `select` reads the keyed session cache (primed synchronously by
+ * the dock dashboard in the same render pass), so the decision is a function
+ * of the session identity and the already-published session, never of a
+ * mounted component probing its own props.
+ */
+function ComposerHint(props: SlotProps): React.ReactElement | null {
+  const sessionId = props && typeof props.sessionId === 'string' ? props.sessionId : null
+  const session = useSessionById(sessionId)
+  const state = composerHintState(session)
+  if (!state) return null
+  let text = ''
+  if (state.kind === 'running') {
+    text = tf(
+      `输入消息 · iterate 第 {a0} 轮 · {a1} — F8 质量面板 · F9 经验库`,
+      { a0: String(state.round), a1: state.phase || t('…') },
+    )
+  } else if (state.kind === 'done') {
+    text = tf(
+      `输入消息 · iterate 已停止{a0} · 第 {b0} 轮 — F8 质量面板 · F9 经验库`,
+      { a0: state.reason ? parenthesize(stoppedReasonLabel(state.reason, getLang())) : '', b0: String(state.round) },
+    )
+  } else if (state.kind === 'converged') {
+    text = tf(
+      `输入消息 · iterate 已收敛 · {a0}/{b0} 轮 · {c0} 项发现 — F8 质量面板`,
+      { a0: String(state.round), b0: String(state.total), c0: String(state.findings) },
+    )
+  } else {
+    text = tf(
+      `输入消息 · iterate 第 {a0} 轮 · {b0} 项发现 — F8 质量面板 · F9 经验库`,
+      { a0: String(state.round), b0: String(state.findings) },
+    )
+  }
+  return React.createElement(
+    'span',
+    { className: 'iterate-composer-hint', 'data-iterate': 'composer-hint', 'data-run-state': state.kind },
+    text,
+  )
+}
+
+/**
+ * v3.21 — session panel-toggle run indicator (dsh
+ * `conversation.session.panel.indicator` list slot).
+ *
+ * A tiny status glyph on the session header toggle so a running / converged /
+ * in-flight iterate run stays visible even while the session panel (and the
+ * composer dashboard) is hidden or collapsed. Renders nothing for a session
+ * with no iterate context.
+ */
+function SessionRunIndicator(props: SlotProps): React.ReactElement | null {
+  const sessionId = props && typeof props.sessionId === 'string' ? props.sessionId : null
+  const session = useSessionById(sessionId)
+  const state = composerHintState(session)
+  if (!state) return null
+  if (state.kind === 'running') {
+    const title = tf(`iterate 运行中 · 第 {a0} 轮`, { a0: String(state.round) })
+    return React.createElement('span', {
+      className: 'iterate-session-indicator', 'data-run-state': 'running',
+      title, 'aria-label': title,
+    })
+  }
+  if (state.kind === 'converged') {
+    return React.createElement('span', {
+      className: 'iterate-session-indicator', 'data-run-state': 'converged',
+      title: t('iterate 已收敛'), 'aria-label': t('iterate 已收敛'),
+    }, '✓')
+  }
+  const title = t('iterate 进行中')
+  return React.createElement('span', {
+    className: 'iterate-session-indicator', 'data-run-state': 'active',
+    title, 'aria-label': title,
+  })
+}
+
 const LangDashboard = withLang(ConvergenceDashboard)
 const LangObservatory = withLang(ObservatoryPanel)
 const LangTurnTail = withLang(TurnTailEntry)
 const LangProgress = withLang(ProgressCapsule)
 const LangSettings = withLang(SettingsPanel)
+const LangComposerHint = withLang(ComposerHint)
+const LangSessionIndicator = withLang(SessionRunIndicator)
 
 /**
  * v3.18 — iterate settings-page navigation icon (dsh 0.2.2-rc.1 capability).
@@ -4487,6 +4633,40 @@ export function apply(ctx: ClientContext): void {
       slotsSvc?.register(
         { name: 'settings.section.icon', id: 'iterate-settings', order: 30 },
         (props) => React.createElement(IterateSettingsIcon, props),
+      ),
+    )
+
+    // v3.21: empty-composer inline run hint (dsh 0.2.3-alpha.1
+    // `conversation.input.placeholder` chain slot). Chain `select` declines for
+    // every session without iterate context, so the host's built-in prompt
+    // stays; a session that predates the capability never declares the slot,
+    // so the inject is a no-op and the prompt stays — no crash, no lost data.
+    slotsSvc.inject('conversation.input.placeholder', () =>
+      slotsSvc?.register(
+        {
+          name: 'conversation.input.placeholder',
+          id: 'iterate-composer-hint',
+          select: (owner) => {
+            const sid = owner && typeof owner.sessionId === 'string' ? owner.sessionId : null
+            if (!sid) return null
+            // The dock dashboard primed this session synchronously in the SAME
+            // render pass, so the decision is honest on the first frame.
+            const session = readSessionById(sid)
+            return composerHintState(session) ? { matched: true } : null
+          },
+        },
+        (props) => React.createElement(LangComposerHint, props),
+      ),
+    )
+
+    // v3.21: session panel-toggle run indicator (dsh
+    // `conversation.session.panel.indicator` list slot). A host that predates
+    // the slot never declares it, so the inject is a no-op and the toggle
+    // shows no iterate glyph — no crash.
+    slotsSvc.inject('conversation.session.panel.indicator', () =>
+      slotsSvc?.register(
+        { name: 'conversation.session.panel.indicator', id: 'iterate-run-indicator', order: 30 },
+        (props) => React.createElement(LangSessionIndicator, props),
       ),
     )
 

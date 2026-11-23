@@ -76,6 +76,8 @@ import {
   START_INSTRUCTIONS,
   buildScopedReviewInstruction,
   dashboardRunState,
+  composerHintState,
+  sessionRunIndicator,
   buildRoundComparison,
   serializeObservatoryExport as serializeExportWithExtras,
   EXPORT_EXTRA_KEYS,
@@ -3011,5 +3013,86 @@ describe('evidence viewers', () => {
     assert.match(buildDiffInstruction('src/a.ts'), /iterate_diff/)
     assert.doesNotMatch(buildDiffInstruction(''), /"file"/)
     assert.doesNotMatch(buildDiffInstruction(undefined), /"file"/)
+  })
+})
+
+// ─── composerHintState / sessionRunIndicator (v3.21, dsh 0.2.3-alpha.1) ──────
+
+describe('composerHintState (empty-composer run hint)', () => {
+  it('declines (null) for no session / junk / no iterate context', () => {
+    assert.equal(composerHintState(null), null)
+    assert.equal(composerHintState(undefined), null)
+    assert.equal(composerHintState(42), null)
+    assert.equal(composerHintState({ toolCalls: [{ tool: 'other', result: {} }] }), null)
+    assert.equal(composerHintState('junk'), null)
+  })
+
+  it('prefers a live transcript (running) over an aggregated report', () => {
+    const transcript = { ...makeTranscriptManifest(), active: true, round: 2, phases: ['review'] }
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', transcript } }] }
+    assert.deepEqual(composerHintState(session), { kind: 'running', round: 2, phase: 'review' })
+  })
+
+  it('reports a stopped run with its stop reason (done)', () => {
+    const transcript = {
+      ...makeTranscriptManifest(),
+      active: false,
+      round: 3,
+      phases: ['report'],
+      stoppedReason: 'max_rounds_reached',
+    }
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', transcript } }] }
+    assert.deepEqual(composerHintState(session), { kind: 'done', round: 3, reason: 'max_rounds_reached' })
+  })
+
+  it('reports a converged run from the aggregated report', () => {
+    const report = makeReport() // convergence.converged = true, 2 findings
+    const session = { toolCalls: [{ tool: 'iterate_review', result: { report } }] }
+    assert.deepEqual(composerHintState(session), { kind: 'converged', round: 2, total: 3, findings: 2 })
+  })
+
+  it('reports an in-flight run without convergence as active', () => {
+    const report = makeReport()
+    report.convergence = { ...report.convergence, converged: false }
+    const session = { toolCalls: [{ tool: 'iterate_review', result: { report } }] }
+    assert.deepEqual(composerHintState(session), { kind: 'active', round: 2, findings: 2 })
+  })
+
+  it('declines when a transcript exists but the run never started and no report landed', () => {
+    // dashboardRunState maps an active transcript to running even at round 1.
+    const transcript = { ...makeTranscriptManifest(), active: true, round: 1, phases: [] }
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', transcript } }] }
+    const state = composerHintState(session)
+    assert.ok(state && state.kind === 'running')
+    assert.equal(state.round, 1)
+  })
+})
+
+describe('sessionRunIndicator (session panel-toggle dot)', () => {
+  it('returns running for a live transcript', () => {
+    const transcript = { ...makeTranscriptManifest(), active: true, round: 2 }
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', transcript } }] }
+    assert.equal(sessionRunIndicator(session), 'running')
+  })
+
+  it('returns converged for a converged report', () => {
+    const session = { toolCalls: [{ tool: 'iterate_review', result: { report: makeReport() } }] }
+    assert.equal(sessionRunIndicator(session), 'converged')
+  })
+
+  it('returns active for a non-converged report', () => {
+    const report = makeReport()
+    report.convergence = { ...report.convergence, converged: false }
+    const session = { toolCalls: [{ tool: 'iterate_review', result: { report } }] }
+    assert.equal(sessionRunIndicator(session), 'active')
+  })
+
+  it('returns null without iterate context', () => {
+    assert.equal(sessionRunIndicator(null), null)
+    assert.equal(sessionRunIndicator({ toolCalls: [{ tool: 'other', result: {} }] }), null)
+    // A stopped transcript with no report has no live state to badge.
+    const transcript = { ...makeTranscriptManifest(), active: false, round: 3 }
+    const session = { toolCalls: [{ tool: 'iterate_transcript', result: { operation: 'capture', transcript } }] }
+    assert.equal(sessionRunIndicator(session), null)
   })
 })

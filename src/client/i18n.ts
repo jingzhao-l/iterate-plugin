@@ -78,6 +78,18 @@ export const EN: Record<string, string> = {
   '运行一次评审后，这里会显示收敛进度与发现统计。':
     'Run a review and convergence progress and finding stats will show up here.',
   本次迭代从上一次中断的断点继续执行: 'This run resumed from the previous interrupted checkpoint',
+  // ── v3.21 composer hint / session run indicator (dsh 0.2.3-alpha.1) ──────
+  '输入消息 · iterate 第 {a0} 轮 · {a1} — F8 质量面板 · F9 经验库':
+    'Type a message · iterate round {a0} · {a1} — F8 quality panel · F9 experience bank',
+  '输入消息 · iterate 已停止{a0} · 第 {b0} 轮 — F8 质量面板 · F9 经验库':
+    'Type a message · iterate stopped{a0} · round {b0} — F8 quality panel · F9 experience bank',
+  '输入消息 · iterate 已收敛 · {a0}/{b0} 轮 · {c0} 项发现 — F8 质量面板':
+    'Type a message · iterate converged · {a0}/{b0} rounds · {c0} findings — F8 quality panel',
+  '输入消息 · iterate 第 {a0} 轮 · {b0} 项发现 — F8 质量面板 · F9 经验库':
+    'Type a message · iterate round {a0} · {b0} findings — F8 quality panel · F9 experience bank',
+  'iterate 运行中 · 第 {a0} 轮': 'iterate running · round {a0}',
+  'iterate 已收敛': 'iterate converged',
+  'iterate 进行中': 'iterate in progress',
   '已中断恢复 ×{a0}': 'Resumed ×{a0}',
   '会话中检测到用户附带的图片，评审将作为视觉证据参考':
     'Images attached by the user were detected in this session; the review treats them as visual evidence',
