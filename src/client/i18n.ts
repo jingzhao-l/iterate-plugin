@@ -153,6 +153,17 @@ export const EN: Record<string, string> = {
     'Apply instruction copied — paste it back into the chat and the model will call iterate_triage apply and report how many entries were written.',
   '已复制回读指令——粘贴回会话可列出当前已写入的 known_intentional。':
     'Readback instruction copied — paste it back to list the known_intentional entries currently written.',
+  '当前没有标记为「已知有意」的 finding 可撤销': 'No finding is marked known-intentional to un-mark',
+  '复制撤销指令：粘贴后模型会调用 iterate_triage remove，按 file/dimension/line 撤销这些 known_intentional 条目（写入前备份、失败自动回滚）':
+    'Copy the remove instruction: once pasted, the model calls iterate_triage remove, un-marking these known_intentional entries by file/dimension/line (backs up before writing, rolls back on failure)',
+  撤销已标记条目: 'Un-mark flagged entries',
+  '复制清空指令：粘贴后模型会调用 iterate_triage clear，清空全部 known_intentional 条目（仅该列表，配置其余字段不动）':
+    'Copy the clear instruction: once pasted, the model calls iterate_triage clear, resetting the whole known_intentional list (that list only; the rest of the config is untouched)',
+  清空全部条目: 'Clear all entries',
+  '已复制撤销指令——粘贴回会话，模型将调用 iterate_triage remove 并按 file/dimension/line 撤销这些条目。':
+    'Remove instruction copied — paste it back into the chat and the model will call iterate_triage remove and un-mark these entries by file/dimension/line.',
+  '已复制清空指令——粘贴回会话，模型将调用 iterate_triage clear 清空全部 known_intentional 条目。':
+    'Clear instruction copied — paste it back into the chat and the model will call iterate_triage clear and reset the whole known_intentional list.',
 
   // ── command actions ──────────────────────────────────────────────────────
   指挥操作: 'Command actions',

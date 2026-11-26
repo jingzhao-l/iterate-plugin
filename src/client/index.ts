@@ -54,6 +54,8 @@ import {
   hashReport,
   toKnownIntentionalYaml,
   buildApplyInstruction,
+  buildRemoveInstruction,
+  buildClearInstruction,
   collectIgnoredEntries,
   filterFindingsWithIndices,
   buildFilterOptions,
@@ -1858,6 +1860,22 @@ function TriagePanel(props: SlotProps) {
     copyWithFeedback(text, 'readback')
   }
 
+  // v3.22: the un-triage intervention — a mis-triaged verdict (or one made
+  // moot by a fix) can now be undone with the SAME keys it was applied with.
+  const doRemoveInstruction = () => {
+    const text = buildRemoveInstruction(ignored)
+    if (!text) return
+    setPayload(text)
+    copyWithFeedback(text, 'remove')
+  }
+
+  // v3.22: reset the whole known_intentional list (config backup + rollback).
+  const doClearInstruction = () => {
+    const text = buildClearInstruction()
+    setPayload(text)
+    copyWithFeedback(text, 'clear')
+  }
+
   // Audit: `filtered` and `indices` are produced together, but an
   // out-of-range slot would otherwise render a row keyed `undefined` whose
   // verdict writes to `verdicts["undefined"]`. Pair them up-front so the
@@ -1994,12 +2012,32 @@ function TriagePanel(props: SlotProps) {
           onClick: doReadback,
           title: t('复制 iterate_triage list 指令，核对已经写入的 known_intentional 条目（写回闭环确认）'),
         }, cmdCopied === 'readback' ? t('已复制') : cmdFailed === 'readback' ? t('复制失败') : t('回读已写入条目')),
+        React.createElement('button', {
+          className: 'iterate-btn',
+          'data-copied': cmdCopied === 'remove' ? '' : undefined,
+          'data-failed': cmdFailed === 'remove' ? '' : undefined,
+          onClick: doRemoveInstruction, disabled: ignoredCount === 0,
+          title: ignoredCount === 0
+            ? t('当前没有标记为「已知有意」的 finding 可撤销')
+            : t('复制撤销指令：粘贴后模型会调用 iterate_triage remove，按 file/dimension/line 撤销这些 known_intentional 条目（写入前备份、失败自动回滚）'),
+        }, cmdCopied === 'remove' ? t('已复制') : cmdFailed === 'remove' ? t('复制失败') : t('撤销已标记条目')),
+        React.createElement('button', {
+          className: 'iterate-btn',
+          'data-copied': cmdCopied === 'clear' ? '' : undefined,
+          'data-failed': cmdFailed === 'clear' ? '' : undefined,
+          onClick: doClearInstruction,
+          title: t('复制清空指令：粘贴后模型会调用 iterate_triage clear，清空全部 known_intentional 条目（仅该列表，配置其余字段不动）'),
+        }, cmdCopied === 'clear' ? t('已复制') : cmdFailed === 'clear' ? t('复制失败') : t('清空全部条目')),
       ),
       cmdCopied === 'apply'
         ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, t('已复制应用指令——粘贴回会话，模型将调用 iterate_triage apply 并回报写入条数。'))
         : cmdCopied === 'readback'
           ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, t('已复制回读指令——粘贴回会话可列出当前已写入的 known_intentional。'))
-          : null,
+          : cmdCopied === 'remove'
+            ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, t('已复制撤销指令——粘贴回会话，模型将调用 iterate_triage remove 并按 file/dimension/line 撤销这些条目。'))
+            : cmdCopied === 'clear'
+              ? React.createElement('span', { className: 'iterate-triage-hint', role: 'status' }, t('已复制清空指令——粘贴回会话，模型将调用 iterate_triage clear 清空全部 known_intentional 条目。'))
+              : null,
     ),
     // v3.0: Command buttons for native actions (§8)
     React.createElement('div', { className: 'iterate-triage-foot', style: { borderTop: '1px solid var(--dsw-alias-border-l1)' } },

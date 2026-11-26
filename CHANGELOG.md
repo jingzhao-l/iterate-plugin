@@ -5,7 +5,62 @@ All notable changes to iterate-plugin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.21.0] - 2026-11-23
+## [3.22.0] - 2026-11-26
+
+分诊撤销干预（un-triage intervention）：把 `iterate_triage` 从「只写不删」补成完整的
+「写 → 回读 → 撤销/清空」闭环，并在 F3 分诊面板给用户一个可操作的撤销/清空入口。
+这是用户今天还拿不到的能力：此前一旦把某个 finding 标成 `known_intentional`（或整个列表被
+误标/已过时），没有工具路径能撤销，只能手改 `iterate.config.yaml`。现在 `remove` 用与
+`apply` 完全相同的 `file|dimension|line` 键匹配撤销（`reason` 不是身份的一部分），
+`clear` 一键重置整个列表，两者都与 `apply` 同样走「备份 + 原子写 + 失败回滚」，绝不丢数据。
+按语义化版本是一次 minor。
+
+- **`iterate_triage` 新增 `remove` 操作**：按 `file|dimension|line` 撤销一条或多条
+  `known_intentional` 条目。与 `apply` 共用同一把 `config-write` 锁与同一备份/回滚周期；
+  结果报告 `removed`（实际删除数）与 `skipped`（目标键不在列表中），重复 remove 一个
+  已删条目不会静默吞掉。`reason` 在 remove 时**不要求**（它只属于 apply 的负载，
+  不属于身份键）——新增 `validateRemoveTargets` 做这一语义差异。
+- **`iterate_triage` 新增 `clear` 操作**：清空整个 `personalization.known_intentional`
+  列表，配置其余顶层字段不动；结果报告 `cleared`（重置前条目数，空列表为 0）。
+- **纯函数 `removeKnownIntentional`**：按 `entryKey` 去重移除集合、逐条匹配删除、报告
+  `removed`/`skipped`，且不修改入参列表——与 `mergeKnownIntentional` 对称，可直接单测。
+- **F3 分诊面板撤销/清空入口（UX）**：新增「撤销已标记条目」按钮——复制一条
+  `iterate_triage remove` 指令（同一批 `ignored` 条目、同样的键匹配），以及
+  「清空全部条目」按钮——复制一条 `iterate_triage clear` 指令。复制载荷与目标工具 schema
+  对齐（remove 载荷不含 `reason`）。背后是 `lib/parse.js` 新增的
+  `buildRemoveInstruction` / `buildClearInstruction`（纯函数，已单测）。
+- **上游 dsh `0.2.3-alpha.2`**：release notes 全文核验——该发布仅调整宿主 Node.js 版本要求
+  （24.22.3+/26.13.1+），**无任何插件面新能力或破坏性变更**。但 `dsh-agent@0.2.3-alpha.2`
+  起所有 `@deepseek-ai/dsh-*` 包的 cordis peer 升至 `~4.2.0-alpha.1`，故同步 cordis peer
+  追加 `|| ~4.2.0-alpha.1`、devDep cordis `4.1.0 → 4.2.0-alpha.1`、其余 devDeps 对齐
+  `0.2.3-alpha.2`。声明 compatible：`dshReleases` 35 → 36、三个 dsh peer 追加
+  `|| 0.2.3-alpha.2`。
+
+### Added
+
+- `src/tools/triage.ts`：`remove` / `clear` 操作 + `removeEntries` / `clearEntries` /
+  `persistKnownIntentional`（共享写回周期）+ `validateRemoveTargets` + `removeKnownIntentional`。
+- `lib/parse.js`：`buildRemoveInstruction` / `buildClearInstruction`。
+- `src/client/index.ts`：`doRemoveInstruction` / `doClearInstruction` + 两个按钮 +
+  `.iterate-btn` 复制状态（`cmdCopied`/`cmdFailed` 的 `remove`/`clear` 分支）。
+- `src/client/i18n.ts`：7 个新双语键（撤销/清空按钮标题、tooltip、复制成功提示）。
+
+### Compatibility
+
+- `dsh.compatibility.dshReleases` 增加 `0.2.3-alpha.2`（36 个版本）；三个 dsh peer 追加
+  `|| 0.2.3-alpha.2`；cordis peer 追加 `|| ~4.2.0-alpha.1`；devDependencies 对齐
+  `0.2.3-alpha.2`（cordis `4.2.0-alpha.1`）。`0.2.3-alpha.2` 经 release notes 全文核验
+  无插件面能力、无破坏性变更（仅宿主 Node 版本要求），compatible 成立。
+
+### Tests
+
+- `test/triage.test.ts` +9：`removeKnownIntentional`（按键删除 / 整文件与行级键区分 /
+  去重 + skipped / 空目标 / 不改入参）+ `remove`/`clear` execute（删除 + 备份 / 重复删除 /
+  清空 + 保留其它字段 / 空列表 / 非法条目不落盘）。
+- `test/parse.test.ts` +4：`buildRemoveInstruction`（命名 iterate_triage、省略 reason、
+  保留 line、空列表）+ `buildClearInstruction`。
+- 全量：1504 → 1518 测试，`npm run typecheck` 与 `npm test` 全绿。
+
 
 空输入框运行提示 + 会话运行指示（Empty-composer run hint + session run indicator）。
 把 dsh `0.2.3-alpha.1` 的「插件可为空白输入框提供行内提示」新能力转成插件的**净新增交互面**——

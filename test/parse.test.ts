@@ -22,6 +22,8 @@ import {
   hashReport,
   toKnownIntentionalYaml,
   buildApplyInstruction,
+  buildRemoveInstruction,
+  buildClearInstruction,
   buildValidationApplyInstruction,
   collectIgnoredEntries,
   normalizeFindingFilter,
@@ -581,6 +583,33 @@ describe('triage serialization helpers', () => {
     assert.match(text, /iterate_triage/)
     assert.match(text, /"operation": "apply"/)
     assert.match(text, /"file": "src\/a.ts"/)
+  })
+
+  it('builds a remove instruction that names iterate_triage and omits reason', () => {
+    const text = buildRemoveInstruction([
+      { file: 'src/a.ts', dimension: 'security' },
+    ])
+    assert.match(text, /iterate_triage/)
+    assert.match(text, /"operation": "remove"/)
+    assert.match(text, /"file": "src\/a.ts"/)
+    assert.ok(!text.includes('"reason"'), 'reason is not part of the remove identity')
+  })
+
+  it('builds a remove instruction with the optional line preserved', () => {
+    const text = buildRemoveInstruction([
+      { file: 'src/a.ts', line: 7, dimension: 'security' },
+    ])
+    assert.match(text, /"line": 7/)
+  })
+
+  it('returns empty string for a remove instruction with no entries', () => {
+    assert.equal(buildRemoveInstruction([]), '')
+  })
+
+  it('builds a clear instruction that names iterate_triage clear', () => {
+    const text = buildClearInstruction()
+    assert.match(text, /iterate_triage/)
+    assert.match(text, /"operation": "clear"/)
   })
 
   it('collects ignored entries from triage state', () => {

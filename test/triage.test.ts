@@ -9,6 +9,7 @@ import {
   validateTriageEntries,
   entryKey,
   mergeKnownIntentional,
+  removeKnownIntentional,
   buildConfigWithKnownIntentional,
   readKnownIntentional,
   backupSuffix,
@@ -187,6 +188,66 @@ describe('mergeKnownIntentional', () => {
   })
 })
 
+// ─── removeKnownIntentional ──────────────────────────────────────────────────
+
+describe('removeKnownIntentional', () => {
+  it('removes matching entries by file|dimension|line and reports the count', () => {
+    const existing = [
+      entry({ file: 'src/a.ts', dimension: 'security', line: 1 }),
+      entry({ file: 'src/b.ts', dimension: 'security' }),
+      entry({ file: 'src/c.ts', dimension: 'performance' }),
+    ]
+    const { entries, removed, skipped } = removeKnownIntentional(existing, [
+      entry({ file: 'src/a.ts', dimension: 'security', line: 1 }),
+    ])
+    assert.equal(removed, 1)
+    assert.equal(skipped, 0)
+    assert.equal(entries.length, 2)
+    assert.deepEqual(entries.map((e) => e.file), ['src/b.ts', 'src/c.ts'])
+  })
+
+  it('treats whole-file and line-specific entries as distinct keys', () => {
+    const existing = [entry({ file: 'src/a.ts', dimension: 'security' })]
+    // A line-specific target must NOT remove the whole-file entry, and vice
+    // versa — the key semantics mirror `apply` exactly.
+    const lineResult = removeKnownIntentional(existing, [entry({ file: 'src/a.ts', dimension: 'security', line: 5 })])
+    assert.equal(lineResult.removed, 0)
+    assert.equal(lineResult.skipped, 1)
+    assert.equal(lineResult.entries.length, 1)
+    const wholeResult = removeKnownIntentional([entry({ file: 'src/a.ts', dimension: 'security', line: 5 })], [entry({ file: 'src/a.ts', dimension: 'security' })])
+    assert.equal(wholeResult.removed, 0)
+    assert.equal(wholeResult.entries.length, 1)
+  })
+
+  it('dedupes the removal set and reports targets not present as skipped', () => {
+    const existing = [entry({ file: 'src/a.ts' })]
+    const { entries, removed, skipped } = removeKnownIntentional(existing, [
+      entry({ file: 'src/a.ts' }),
+      entry({ file: 'src/a.ts' }),
+      entry({ file: 'src/absent.ts' }),
+    ])
+    assert.equal(removed, 1)
+    // The duplicate target matches once; the absent one is the only skip.
+    assert.equal(skipped, 1)
+    assert.equal(entries.length, 0)
+  })
+
+  it('removes nothing for an empty target list', () => {
+    const existing = [entry({ file: 'src/a.ts' })]
+    const { entries, removed, skipped } = removeKnownIntentional(existing, [])
+    assert.equal(removed, 0)
+    assert.equal(skipped, 0)
+    assert.equal(entries.length, 1)
+  })
+
+  it('does not mutate the existing list', () => {
+    const existing = [entry({ file: 'src/a.ts' })]
+    const snapshot = [...existing]
+    removeKnownIntentional(existing, [entry({ file: 'src/a.ts' })])
+    assert.deepEqual(existing, snapshot)
+  })
+})
+
 // ─── buildConfigWithKnownIntentional / readKnownIntentional ──────────────────
 
 describe('config object helpers', () => {
@@ -291,6 +352,137 @@ describe('iterate_triage execute', () => {
       assert.equal(second.added, 0)
       assert.equal(second.skipped, 1)
       assert.equal(second.count, 1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('remove deletes matching entries with a backup and reports skipped targets', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject(
+      yaml.dump({
+        goal: 'g',
+        personalization: {
+          known_intentional: [
+            entry({ file: 'src/a.ts', dimension: 'security', line: 1, reason: 'r1' }),
+            entry({ file: 'src/b.ts', dimension: 'security', reason: 'r2' }),
+          ],
+        },
+      }),
+    )
+    try {
+      const result = (await tool.execute({
+        operation: 'remove',
+        path: dir,
+        entries: [
+          // Match by key only — `reason` is ignored, `line` distinguishes.
+          { file: 'src/a.ts', dimension: 'security', line: 1 },
+          { file: 'src/absent.ts', dimension: 'security' },
+        ],
+      })) as Record<string, unknown>
+      assert.equal(result.operation, 'remove')
+      assert.equal(result.removed, 1)
+      assert.equal(result.skipped, 1)
+      assert.equal(result.count, 1)
+
+      const parsed = yaml.load(readFileSync(join(dir, 'iterate.config.yaml'), 'utf-8')) as Record<string, unknown>
+      const known = readKnownIntentional(parsed)
+      assert.equal(known.length, 1)
+      assert.equal(known[0]?.file, 'src/b.ts')
+
+      // A timestamped backup of the pre-remove config was created.
+      const backups = readdirSync(dir).filter((f) => f.includes('.bak-'))
+      assert.equal(backups.length, 1)
+      const backupParsed = yaml.load(readFileSync(join(dir, backups[0] as string), 'utf-8')) as Record<string, unknown>
+      assert.equal(readKnownIntentional(backupParsed).length, 2)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('remove of an already-removed entry reports removed 0 and skipped 1', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject(
+      yaml.dump({ goal: 'g', personalization: { known_intentional: [entry({ file: 'src/a.ts', line: 3 })] } }),
+    )
+    try {
+      const args = {
+        operation: 'remove',
+        path: dir,
+        entries: [{ file: 'src/a.ts', dimension: 'security', line: 3 }],
+      }
+      const first = (await tool.execute(args)) as Record<string, unknown>
+      assert.equal(first.removed, 1)
+      assert.equal(first.count, 0)
+      const second = (await tool.execute(args)) as Record<string, unknown>
+      assert.equal(second.removed, 0)
+      assert.equal(second.skipped, 1)
+      assert.equal(second.count, 0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clear resets the whole known_intentional list and reports how many were removed', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject(
+      yaml.dump({
+        goal: 'g',
+        dimensions: ['correctness'],
+        personalization: { known_intentional: [entry({ file: 'src/a.ts' }), entry({ file: 'src/b.ts' })] },
+      }),
+    )
+    try {
+      const result = (await tool.execute({
+        operation: 'clear',
+        path: dir,
+      })) as Record<string, unknown>
+      assert.equal(result.operation, 'clear')
+      assert.equal(result.cleared, 2)
+      assert.equal(result.count, 0)
+
+      const parsed = yaml.load(readFileSync(join(dir, 'iterate.config.yaml'), 'utf-8')) as Record<string, unknown>
+      // Other top-level fields survive the reset.
+      assert.equal(parsed.goal, 'g')
+      assert.deepEqual(parsed.dimensions, ['correctness'])
+      assert.deepEqual(readKnownIntentional(parsed), [])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('clear on an empty list reports cleared 0 and leaves config untouched', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject('goal: "g"\n')
+    try {
+      const result = (await tool.execute({ operation: 'clear', path: dir })) as Record<string, unknown>
+      assert.equal(result.cleared, 0)
+      assert.equal(result.count, 0)
+      // The config survives the reset (the round-trip normalizes `"g"` → `g`).
+      const parsed = yaml.load(readFileSync(join(dir, 'iterate.config.yaml'), 'utf-8')) as Record<string, unknown>
+      assert.equal(parsed.goal, 'g')
+      assert.deepEqual(readKnownIntentional(parsed), [])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('remove rejects invalid entries without touching the config', async () => {
+    const tool = captureTool()
+    const { dir, cleanup } = tempProject(
+      yaml.dump({ goal: 'g', personalization: { known_intentional: [entry({ file: 'src/a.ts' })] } }),
+    )
+    try {
+      const result = (await tool.execute({
+        operation: 'remove',
+        path: dir,
+        entries: [{ file: '', dimension: 'security' }],
+      })) as Record<string, unknown>
+      assert.match(String(result.error), /Invalid entries/)
+      assert.equal(result.removed, undefined)
+      // The config is untouched (the entry survives).
+      const parsed = yaml.load(readFileSync(join(dir, 'iterate.config.yaml'), 'utf-8')) as Record<string, unknown>
+      assert.equal(readKnownIntentional(parsed).length, 1)
     } finally {
       cleanup()
     }

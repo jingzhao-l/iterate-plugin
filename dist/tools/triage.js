@@ -86,6 +86,46 @@ export function validateTriageEntries(entries) {
     return errors;
 }
 /**
+ * Validate a caller-supplied remove-target list.
+ *
+ * `remove` matches entries by identity key (file|dimension|line) only — the
+ * `reason` is a payload of `apply`, NOT part of the identity, so it is
+ * optional here. Everything else mirrors {@link validateTriageEntries}.
+ *
+ * @param {unknown} entries
+ * @returns {string[]} Validation error messages (empty when valid).
+ */
+export function validateRemoveTargets(entries) {
+    const errors = [];
+    if (!Array.isArray(entries)) {
+        errors.push('entries must be an array');
+        return errors;
+    }
+    if (entries.length > MAX_ENTRIES) {
+        errors.push(`entries must not exceed ${MAX_ENTRIES} items (got ${entries.length})`);
+        return errors;
+    }
+    for (let i = 0; i < entries.length; i++) {
+        const prefix = `entries[${i}]`;
+        const e = entries[i];
+        if (!e || typeof e !== 'object') {
+            errors.push(`${prefix} must be an object`);
+            continue;
+        }
+        const entry = e;
+        if (typeof entry.file !== 'string' || entry.file.trim().length === 0) {
+            errors.push(`${prefix}.file must be a non-empty string`);
+        }
+        if (typeof entry.dimension !== 'string' || entry.dimension.trim().length === 0) {
+            errors.push(`${prefix}.dimension must be a non-empty string`);
+        }
+        if (entry.line !== undefined && normalizeEntryLine(entry.line) === undefined) {
+            errors.push(`${prefix}.line must be a positive integer when present`);
+        }
+    }
+    return errors;
+}
+/**
  * Build the dedupe key for a known-intentional entry.
  * Semantics mirror review.ts filterKnownIntentional: a whole-file entry
  * (`line` 0/undefined) is distinct from a line-specific one.
@@ -160,6 +200,42 @@ export function buildConfigWithKnownIntentional(config, entries) {
     personalization[KNOWN_INTENTIONAL_KEY] = entries;
     next[PERSONALIZATION_KEY] = personalization;
     return next;
+}
+/**
+ * Remove entries from the known-intentional list by key.
+ *
+ * The removal set is deduped by {@link entryKey} first, then every existing
+ * entry whose key is in the target set is dropped. Entries not present in the
+ * list are counted as `skipped` (mirrors the `skipped` report of a merge, so a
+ * repeat `remove` of an already-removed entry is not silently swallowed — the
+ * caller sees it did nothing).
+ *
+ * @param {KnownIntentional[]} existing
+ * @param {KnownIntentional[]} targets
+ * @returns {{ entries: KnownIntentional[]; removed: number; skipped: number }}
+ */
+export function removeKnownIntentional(existing, targets) {
+    const targetKeys = new Set();
+    for (const t of targets) {
+        targetKeys.add(entryKey(t));
+    }
+    const entries = [];
+    let removed = 0;
+    for (const entry of existing) {
+        if (targetKeys.has(entryKey(entry))) {
+            removed++;
+        }
+        else {
+            entries.push(entry);
+        }
+    }
+    // `skipped` = target keys that did NOT match any live entry (deduped).
+    let skipped = 0;
+    for (const key of targetKeys) {
+        if (!existing.some((e) => entryKey(e) === key))
+            skipped++;
+    }
+    return { entries, removed, skipped };
 }
 /** Read the raw known-intentional list from a config object (may be absent). */
 export function readKnownIntentional(config) {
@@ -243,49 +319,107 @@ function applyEntries(projectRoot, incoming) {
         }
         const existing = readKnownIntentional(config);
         const { merged, added, skipped, dropped } = mergeKnownIntentional(existing, incoming);
-        const nextConfig = buildConfigWithKnownIntentional(config, merged);
-        const hadFile = existsSync(configPath);
-        const backupPath = hadFile ? `${configPath}.bak-${backupSuffix()}` : null;
-        if (backupPath) {
-            try {
-                copyFileSync(configPath, backupPath);
-            }
-            catch (err) {
-                return {
-                    ok: false,
-                    error: `Failed to create backup: ${String(err)}`,
-                };
-            }
-        }
-        const yamlText = yaml.dump(nextConfig, { noRefs: true });
+        return persistKnownIntentional(projectRoot, configPath, config, merged, { added, skipped, dropped });
+    });
+}
+/**
+ * Remove known-intentional entries: backup, filter, write, rollback on failure.
+ * Mirrors `applyEntries` exactly (same lock, same backup + rollback semantics)
+ * so a `remove` can never be lost to an interleaved apply/write.
+ */
+function removeEntries(projectRoot, targets) {
+    const configPath = join(projectRoot, CONFIG_FILE);
+    return withProjectLock(projectRoot, 'config-write', () => {
+        let config;
         try {
-            writeTextAtomic(configPath, yamlText);
+            config = readConfigFile(configPath);
         }
         catch (err) {
-            // Rollback: restore the backup, or REMOVE the file we just created when
-            // there was no prior config — an empty file left behind would poison all
-            // future config reads (empty YAML is not a valid mapping).
-            let rollbackError = '';
-            try {
-                if (backupPath)
-                    copyFileSync(backupPath, configPath);
-                else if (existsSync(configPath))
-                    rmSync(configPath, { force: true });
-            }
-            catch (rbErr) {
-                rollbackError = `; rollback also failed: ${String(rbErr)}`;
-            }
+            return { ok: false, error: `Failed to read config: ${String(err)}` };
+        }
+        const existing = readKnownIntentional(config);
+        const { entries, removed, skipped } = removeKnownIntentional(existing, targets);
+        return persistKnownIntentional(projectRoot, configPath, config, entries, { removed, skipped });
+    });
+}
+/**
+ * Clear every known-intentional entry: backup, empty the list, write, rollback
+ * on failure. Other top-level config fields are untouched. `cleared` reports
+ * how many entries were actually removed (0 for an already-empty list).
+ */
+function clearEntries(projectRoot) {
+    const configPath = join(projectRoot, CONFIG_FILE);
+    return withProjectLock(projectRoot, 'config-write', () => {
+        let config;
+        try {
+            config = readConfigFile(configPath);
+        }
+        catch (err) {
+            return { ok: false, error: `Failed to read config: ${String(err)}` };
+        }
+        const existing = readKnownIntentional(config);
+        const cleared = existing.length;
+        return persistKnownIntentional(projectRoot, configPath, config, [], { cleared });
+    });
+}
+/**
+ * Shared write cycle for every known_intentional mutation: build the next
+ * config, back up the existing file, write atomically, and roll back on a
+ * failed write. Runs INSIDE the config-write lock (callers hold it).
+ */
+function persistKnownIntentional(projectRoot, configPath, config, nextEntries, report) {
+    const nextConfig = buildConfigWithKnownIntentional(config, nextEntries);
+    const hadFile = existsSync(configPath);
+    const backupPath = hadFile ? `${configPath}.bak-${backupSuffix()}` : null;
+    if (backupPath) {
+        try {
+            copyFileSync(configPath, backupPath);
+        }
+        catch (err) {
             return {
                 ok: false,
-                error: `Failed to write config: ${String(err)}${rollbackError}`,
+                error: `Failed to create backup: ${String(err)}`,
             };
         }
-        // Success: bound the accumulation of timestamped backups so a long-lived
-        // project never collects an unbounded pile of config snapshots.
-        if (backupPath)
-            pruneOldConfigBackups(configPath);
-        return { ok: true, added, skipped, dropped, count: merged.length, configPath, backupPath };
-    });
+    }
+    const yamlText = yaml.dump(nextConfig, { noRefs: true });
+    try {
+        writeTextAtomic(configPath, yamlText);
+    }
+    catch (err) {
+        // Rollback: restore the backup, or REMOVE the file we just created when
+        // there was no prior config — an empty file left behind would poison all
+        // future config reads (empty YAML is not a valid mapping).
+        let rollbackError = '';
+        try {
+            if (backupPath)
+                copyFileSync(backupPath, configPath);
+            else if (existsSync(configPath))
+                rmSync(configPath, { force: true });
+        }
+        catch (rbErr) {
+            rollbackError = `; rollback also failed: ${String(rbErr)}`;
+        }
+        return {
+            ok: false,
+            error: `Failed to write config: ${String(err)}${rollbackError}`,
+        };
+    }
+    // Success: bound the accumulation of timestamped backups so a long-lived
+    // project never collects an unbounded pile of config snapshots.
+    if (backupPath)
+        pruneOldConfigBackups(configPath);
+    return {
+        ok: true,
+        added: report.added ?? 0,
+        skipped: report.skipped ?? 0,
+        dropped: report.dropped ?? 0,
+        removed: report.removed ?? 0,
+        cleared: report.cleared ?? 0,
+        count: nextEntries.length,
+        configPath,
+        backupPath,
+    };
 }
 /**
  * Register the `iterate_triage` tool.
@@ -299,50 +433,68 @@ function applyEntries(projectRoot, incoming) {
  *  - `apply`: merge validated entries into the config (dedupe by
  *             file|dimension|line), with an automatic timestamped backup and
  *             rollback if the write fails.
+ *  - `remove`: delete entries by the same file|dimension|line match, with the
+ *              same backup + rollback — the un-triage / un-waive path for a
+ *              mis-triaged or now-resolved verdict.
+ *  - `clear`: reset the whole known_intentional list (other config untouched).
  *  - `list`:  read back the current known_intentional entries.
  */
 export function registerTriageTool(ctx) {
     ctx.tools.register(defineTool({
         name: 'iterate_triage',
-        // Pending-call card (#12): `apply` rewrites iterate.config.yaml (with
-        // backup + rollback) — it must read as a config write, not a read, and
-        // name how many entries it will merge. `list` is a plain read and keeps
-        // the default presentation. Pure: derived from args only.
+        // Pending-call card (#12): `apply`/`remove`/`clear` rewrite
+        // iterate.config.yaml (with backup + rollback) — they must read as a
+        // config write, not a read, and name how many entries they will touch.
+        // `list` is a plain read and keeps the default presentation. Pure:
+        // derived from args only.
         presentCall: (args) => {
             const a = args;
-            if (a.operation !== 'apply')
+            if (a.operation !== 'apply' && a.operation !== 'remove' && a.operation !== 'clear') {
                 return undefined;
+            }
+            if (a.operation === 'clear') {
+                return {
+                    card: 'generic',
+                    title: 'Clear all known_intentional entries from iterate.config.yaml',
+                    kind: 'edit',
+                };
+            }
             const count = Array.isArray(a.entries) ? a.entries.length : 0;
+            const verb = a.operation === 'remove' ? 'Remove' : 'Apply';
             return {
                 card: 'generic',
                 title: count > 0
-                    ? `Apply ${count} known_intentional ${count === 1 ? 'entry' : 'entries'} to iterate.config.yaml`
-                    : 'Apply known_intentional entries to iterate.config.yaml',
+                    ? `${verb} ${count} known_intentional ${count === 1 ? 'entry' : 'entries'} ${a.operation === 'remove' ? 'from' : 'to'} iterate.config.yaml`
+                    : `${verb} known_intentional entries ${a.operation === 'remove' ? 'from' : 'to'} iterate.config.yaml`,
                 kind: 'edit',
             };
         },
-        // `list` is a pure config read; `apply` rewrites iterate.config.yaml →
-        // only list joins a parallel dispatch group.
+        // `list` is a pure config read; `apply`/`remove`/`clear` rewrite
+        // iterate.config.yaml → only list joins a parallel dispatch group.
         isConcurrencySafe: (args) => args.operation === 'list',
         description: 'Manage `personalization.known_intentional` entries in iterate.config.yaml. ' +
             'Use `apply` to write back triage verdicts (entries where the reviewer said "known intentional") so ' +
             'future review rounds filter them out. Entries are deduped by file|dimension|line and the config is ' +
             'backed up before writing. The list is capped at 1000 entries — when a merge overflows it, the OLDEST ' +
-            'entries are evicted and the result reports `dropped`. Use `list` to read the current entries. ' +
+            'entries are evicted and the result reports `dropped`. Use `list` to read the current entries, ' +
+            '`remove` to un-mark a mis-triaged or now-resolved entry (same file|dimension|line match as `apply`, ' +
+            'with the same backup + rollback), and `clear` to reset the whole list. ' +
             'The client browser cannot write files, so this tool is the write-back channel for the triage panel.',
         parameters: {
             operation: {
                 type: 'string',
                 required: true,
-                description: '"apply" to merge entries into the config, "list" to read them back.',
-                enum: ['apply', 'list'],
+                description: '"apply" to merge entries into the config, "remove" to delete entries, "clear" to reset the list, "list" to read them back.',
+                enum: ['apply', 'remove', 'clear', 'list'],
             },
             entries: {
                 type: 'json',
                 description: 'For `apply`: array of known-intentional entries, e.g. ' +
                     '[{"file":"src/a.ts","line":42,"dimension":"security","reason":"..."}]. ' +
                     'Each entry needs non-empty string file/dimension/reason; line is an optional positive integer ' +
-                    '(omitted = whole file).',
+                    '(omitted = whole file). ' +
+                    'For `remove`: the same shape, but only file/dimension/line are matched (reason is ignored) — ' +
+                    'pass the exact entry (or a key-only subset) you want to un-mark.',
             },
             path: {
                 type: 'string',
@@ -359,6 +511,10 @@ export function registerTriageTool(ctx) {
                     skipped: { type: 'integer' },
                     /** Entries evicted from the FRONT of the list (total cap hit). */
                     dropped: { type: 'integer' },
+                    /** remove: how many entries were actually removed. */
+                    removed: { type: 'integer' },
+                    /** clear: how many entries were present before the reset. */
+                    cleared: { type: 'integer' },
                     count: { type: 'integer' },
                     path: { type: 'string' },
                     backupPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
@@ -427,9 +583,54 @@ export function registerTriageTool(ctx) {
                     backupPath: result.backupPath ?? null,
                 };
             }
+            if (args.operation === 'remove') {
+                const validation = validateRemoveTargets(args.entries);
+                if (validation.length > 0) {
+                    return { operation: 'remove', errors: validation, error: 'Invalid entries.' };
+                }
+                // Only file/dimension/line are matched (reason is ignored). Build the
+                // target keys the same way `apply` builds incoming entries so a
+                // `remove` and an `apply` always agree on what "the same entry" is.
+                const targets = args.entries.map((e) => {
+                    const raw = e;
+                    return {
+                        file: String(raw.file),
+                        ...(normalizeEntryLine(raw.line) !== undefined
+                            ? { line: normalizeEntryLine(raw.line) }
+                            : {}),
+                        dimension: String(raw.dimension),
+                        reason: typeof raw.reason === 'string' ? raw.reason : '',
+                    };
+                });
+                const result = removeEntries(projectRoot, targets);
+                if (!result.ok) {
+                    return { operation: 'remove', error: result.error };
+                }
+                return {
+                    operation: 'remove',
+                    removed: result.removed,
+                    skipped: result.skipped,
+                    count: result.count,
+                    path: result.configPath,
+                    backupPath: result.backupPath ?? null,
+                };
+            }
+            if (args.operation === 'clear') {
+                const result = clearEntries(projectRoot);
+                if (!result.ok) {
+                    return { operation: 'clear', error: result.error };
+                }
+                return {
+                    operation: 'clear',
+                    cleared: result.cleared,
+                    count: result.count,
+                    path: result.configPath,
+                    backupPath: result.backupPath ?? null,
+                };
+            }
             return {
                 operation: args.operation,
-                error: 'Unknown operation. Use "apply" or "list".',
+                error: 'Unknown operation. Use "apply", "remove", "clear" or "list".',
             };
         },
     }));
